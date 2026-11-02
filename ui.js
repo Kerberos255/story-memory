@@ -1,218 +1,354 @@
-import {pendingFloors,deriveState,injectionText} from './core.js';
-const NAV=[['summaries','摘要','▤'],['items','物品','◇'],['scenes','场景','⌁'],['characters','角色','♙'],['settings','设置','⚙']];
-const node=(tag,cls,text)=>{
-  const result=document.createElement(tag);if(cls)result.className=cls;
-  if(text!==undefined)result.textContent=text;return result;
+import {pendingFloors,deriveState,injectionText,validChapters} from './core.js';
+
+const NAV=[['summaries','摘要','book'],['items','物品','package'],['scenes','场景','pin'],['characters','角色','users'],['settings','设置','sliders']];
+const ICONS={
+  book:['M4 19.5A2.5 2.5 0 0 1 6.5 17H20','M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z','M8 7h8','M8 11h6'],
+  package:['m12 3 9 5-9 5-9-5 9-5Z','M3 8v8l9 5 9-5V8','M12 13v8'],
+  pin:['M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z','M12 10h.01'],
+  users:['M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2','M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z','M22 21v-2a4 4 0 0 0-3-3.87','M16 3.13a4 4 0 0 1 0 7.75'],
+  sliders:['M4 7h16','M4 17h16','M9 4v6','M15 14v6'],
+  moon:['M20.5 13A8.5 8.5 0 0 1 11 3.5 8.5 8.5 0 1 0 20.5 13Z'],
+  sun:['M12 2v2','M12 20v2','M4.93 4.93l1.42 1.42','m17.65 17.65 1.42 1.42','M2 12h2','M20 12h2','m6.35 17.65-1.42 1.42','m19.07 4.93-1.42 1.42','M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z'],
+  x:['M18 6 6 18','M6 6l12 12'],
+  chevron:['m6 9 6 6 6-6'],
+  plus:['M12 5v14','M5 12h14'],
+  arrow:['M7 17 17 7','M8 7h9v9']
 };
-function button(label,action,cls='sm-button'){
-  const b=node('button',cls,label);b.type='button';b.addEventListener('click',action);return b;
+const el=(tag,cls,text)=>{
+  const result=document.createElement(tag);
+  if(cls)result.className=cls;
+  if(text!==undefined)result.textContent=String(text);
+  return result;
+};
+const svg=(name)=>{
+  const xmlns='http://www.w3.org/2000/svg',element=document.createElementNS(xmlns,'svg');
+  element.setAttribute('viewBox','0 0 24 24');element.setAttribute('aria-hidden','true');
+  element.setAttribute('fill','none');element.setAttribute('stroke','currentColor');
+  element.setAttribute('stroke-width','1.75');element.setAttribute('stroke-linecap','round');
+  element.setAttribute('stroke-linejoin','round');
+  for(const d of ICONS[name]||[]){
+    const p=document.createElementNS(xmlns,'path');p.setAttribute('d',d);element.append(p);
+  }
+  return element;
+};
+function button(label,onClick,cls='sm-btn'){
+  const b=el('button',cls,label);b.type='button';b.addEventListener('click',onClick);return b;
 }
-function field(labelText,value,type='text'){
-  const wrapper=node('label','sm-field'),title=node('span','sm-field-label',labelText),input=node('input','sm-input');
-  input.type=type;input.value=String(value??'');wrapper.append(title,input);return {wrapper,input};
+function field(title,value,type='text',help=''){
+  const wrap=el('label','sm-field'),caption=el('span','sm-field-label',title);
+  const input=el('input','sm-input');input.type=type;input.value=String(value??'');
+  wrap.append(caption,input);
+  if(help)wrap.append(el('small','sm-help',help));
+  return {wrapper:wrap,input};
 }
-function check(labelText,checked){
-  const wrapper=node('label','sm-check'),input=node('input');input.type='checkbox';input.checked=Boolean(checked);
-  wrapper.append(input,node('span','',labelText));return {wrapper,input};
+function switchRow(title,checked,help=''){
+  const label=el('label','sm-switch-row'),copy=el('span','sm-switch-copy');
+  copy.append(el('strong','',title));
+  if(help)copy.append(el('small','',help));
+  const control=el('span','sm-switch'),input=el('input');
+  input.type='checkbox';input.checked=Boolean(checked);
+  control.append(input,el('span','sm-switch-track'));
+  label.append(copy,control);return {wrapper:label,input};
 }
+function textArea(value='',rows=4,placeholder=''){
+  const area=el('textarea','sm-textarea');area.value=value;area.rows=rows;area.placeholder=placeholder;return area;
+}
+function sectionTitle(title,description=''){
+  const holder=el('div','sm-subheading');
+  holder.append(el('h3','',title));
+  if(description)holder.append(el('p','',description));return holder;
+}
+
 export function mountUI(api){
-  const host=node('div');host.id='story-memory-host';document.body.append(host);
-  host.style.display='contents';
-  const shadow=host.attachShadow({mode:'open'}),css=node('link');
-  css.rel='stylesheet';css.href=new URL('./style.css',import.meta.url).href;shadow.append(css);
-  const dialog=node('dialog','sm-dialog');
-  dialog.setAttribute('aria-label','剧情记忆');
-  shadow.append(dialog);
-  const header=node('header','sm-header'),brand=node('div','sm-brand'),title=node('span','sm-title','剧情记忆'),sub=node('small','sm-caption','STORY MEMORY · PRIVATE');
-  brand.append(node('span','sm-symbol','✦'),title,sub);
-  const close=button('×',()=>open(false),'sm-close');close.setAttribute('aria-label','关闭弹窗');
-  header.append(brand,close);
-  const content=node('div','sm-layout'),nav=node('nav','sm-nav'),body=node('main','sm-main');
-  content.append(nav,body);dialog.append(header,content);
-  dialog.addEventListener('cancel',event=>{event.preventDefault();open(false);});
-  dialog.addEventListener('click',event=>{
-    // For backdrop clicks, dialog is the target but the pointer lies outside its box.
-    if(event.target!==dialog)return;
+  const host=el('div');host.id='story-memory-host';host.style.display='contents';document.body.append(host);
+  const shadow=host.attachShadow({mode:'open'}),style=el('link');
+  style.rel='stylesheet';style.href=new URL('./style.css',import.meta.url).href;shadow.append(style);
+  const dialog=el('dialog','sm-dialog');dialog.setAttribute('aria-label','剧情记忆');shadow.append(dialog);
+  const top=el('header','sm-topbar'),mark=el('div','sm-brand-mark','✦'),brand=el('div','sm-brand');
+  brand.append(mark,el('span','sm-brand-name','剧情记忆'));
+  const topActions=el('div','sm-top-actions');
+  const themeButton=button('',()=>toggleTheme(),'sm-icon-button'),close=button('',()=>open(false),'sm-icon-button');
+  themeButton.setAttribute('data-testid','theme-toggle');
+  close.append(svg('x'));close.setAttribute('aria-label','关闭');close.title='关闭';
+  topActions.append(themeButton,close);top.append(brand,topActions);
+  const layout=el('div','sm-layout'),nav=el('nav','sm-nav'),body=el('main','sm-content');
+  layout.append(nav,body);dialog.append(top,layout);
+  let active=false,page='summaries',notice='',settingsOpen=new Set(['api']);
+  let theme='dark';
+  try{theme=localStorage.getItem('story-memory-theme')==='light'?'light':'dark';}catch{}
+  const updateTheme=()=>{
+    dialog.dataset.theme=theme;
+    themeButton.replaceChildren(svg(theme==='dark'?'sun':'moon'));
+    const label=theme==='dark'?'切换到明亮主题':'切换到暗色主题';
+    themeButton.setAttribute('aria-label',label);themeButton.title=label;
+  };
+  const toggleTheme=()=>{
+    theme=theme==='dark'?'light':'dark';
+    try{localStorage.setItem('story-memory-theme',theme);}catch{}
+    updateTheme();
+  };
+  updateTheme();
+  const showNotice=(message)=>{
+    notice=String(message||'');
+    if(!active)return;
+    const old=body.querySelector('.sm-notice');if(old)old.remove();
+    if(notice){const toast=el('div','sm-notice',notice);body.prepend(toast);}
+  };
+  dialog.addEventListener('cancel',e=>{e.preventDefault();open(false);});
+  dialog.addEventListener('click',e=>{
+    if(e.target!==dialog)return;
     const rect=dialog.getBoundingClientRect();
-    if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)open(false);
+    if(e.clientX<rect.left||e.clientX>rect.right||e.clientY<rect.top||e.clientY>rect.bottom)open(false);
   });
-  let page='summaries',active=false,status='';
-  const report=message=>{status=String(message||'');render();};
   function open(value=true){
     if(value){
-      if(!dialog.open){dialog.showModal();}
-      active=true;render();close.focus();
+      active=true;if(!dialog.open)dialog.showModal();
+      render();close.focus();
     }else{
-      active=false;
-      if(dialog.open)dialog.close();
-      // Releasing the page DOM keeps the idle footprint small.
-      nav.replaceChildren();body.replaceChildren();
+      active=false;if(dialog.open)dialog.close();
+      body.replaceChildren();nav.replaceChildren();
       api.onClose?.();
     }
   }
-  function refresh(){if(active)render();}
-  function top(headerText,caption){
-    const row=node('div','sm-page-heading'),stack=node('div');
-    stack.append(node('h2','sm-h2',headerText),node('p','sm-muted',caption));
-    row.append(stack);body.append(row);return row;
+  function title(text,subtitle='',action=null){
+    const header=el('div','sm-page-heading'),caption=el('div','sm-page-title');
+    caption.append(el('h2','',text));
+    if(subtitle)caption.append(el('p','',subtitle));
+    header.append(caption);
+    if(action)header.append(action);
+    body.append(header);
   }
-  function empty(message){body.append(node('p','sm-empty',message));}
-  function addRows(title,entries,extract){
+  function emptyState(icon,titleText,description){
+    const box=el('div','sm-empty');
+    const mark=el('span','sm-empty-icon');mark.append(svg(icon));
+    box.append(mark,el('strong','',titleText),el('p','',description));body.append(box);
+  }
+  function recordCards(heading,entries,extract){
     if(!entries.length)return;
-    body.append(node('h3','sm-section-title',title));
+    body.append(sectionTitle(heading));
+    const list=el('div','sm-record-list');
     for(const entry of entries){
-      const details=node('details','sm-record'),summary=node('summary','sm-record-heading',extract(entry).title);
-      details.append(summary,node('p','sm-record-text',extract(entry).description));body.append(details);
+      const value=extract(entry),details=el('details','sm-record');
+      const head=el('summary','sm-record-head'),label=el('span','sm-record-label',value.title);
+      head.append(label,svg('chevron'));
+      details.append(head,el('p','sm-record-text',value.description||'暂无详情'));list.append(details);
     }
+    body.append(list);
   }
-  function manualRows(kind,entries){
+  function manualList(kind,entries){
     if(!entries?.length)return;
-    body.append(node('h3','sm-section-title','手动记录 · '+entries.length));
+    body.append(sectionTitle('手动记录'));
+    const list=el('div','sm-record-list');
     for(const entry of entries){
-      const card=node('details','sm-record'),head=node('summary','sm-record-heading',entry.text.slice(0,90));
-      const textarea=node('textarea','sm-textarea');textarea.value=entry.text;textarea.rows=4;
-      const actions=node('div','sm-actions');
-      actions.append(button('保存修改',()=>{
-        try{api.editManual(kind,entry.id,textarea.value);report('记录已更新');}catch(e){report(e.message);}
-      }));
+      const card=el('details','sm-record'),header=el('summary','sm-record-head');
+      header.append(el('span','sm-record-label',entry.text.slice(0,84)),svg('chevron'));
+      const editor=textArea(entry.text,4),actions=el('div','sm-row-actions');
       actions.append(button('删除',()=>{
-        if(!window.confirm('确定删除这条手动记录？'))return;
-        try{api.removeManual(kind,entry.id);report('记录已删除');}catch(e){report(e.message);}
-      }));
-      card.append(head,textarea,actions);body.append(card);
+        if(!window.confirm('确定删除这条记录？'))return;
+        try{api.removeManual(kind,entry.id);showNotice('已删除');}catch(e){showNotice(e.message);}
+      },'sm-btn sm-btn-danger'));
+      actions.append(button('保存修改',()=>{
+        try{api.editManual(kind,entry.id,editor.value);showNotice('修改已保存');}catch(e){showNotice(e.message);}
+      },'sm-btn sm-btn-primary'));
+      const inner=el('div','sm-record-edit');inner.append(editor,actions);
+      card.append(header,inner);list.append(card);
     }
+    body.append(list);
   }
-  function manualBox(kind){
-    const section=node('section','sm-compose'),label=node('h3','sm-section-title','手动输入／导入');
-    const textarea=node('textarea','sm-textarea');textarea.rows=4;textarea.placeholder='输入要长期记住的信息，可直接粘贴旧剧情摘要……';
-    const controls=node('div','sm-actions'),file=node('input');file.type='file';file.accept='.txt,.md,text/plain,text/markdown';file.className='sm-file';
-    file.addEventListener('change',async()=>{const f=file.files?.[0];if(!f)return;if(f.size>12000){report('单条记忆限 12 KB，请分段导入');return;}textarea.value=await f.text();});
-    controls.append(file,button('保存记录',()=>{try{api.addManual(kind,textarea.value);textarea.value='';report('已保存到当前聊天');}catch(e){report(e.message);}},'sm-primary'));
-    section.append(label,textarea,controls);body.append(section);
+  function manualInput(kind){
+    const details=el('details','sm-manual'),head=el('summary','sm-manual-head');
+    const left=el('span','sm-manual-title');left.append(svg('plus'),el('span','', '添加记忆'));
+    head.append(left,svg('chevron'));details.append(head);
+    const area=textArea('',4,'写下需要长期保留的信息…');
+    const actionRow=el('div','sm-row-actions'),file=el('input','sm-file');
+    file.type='file';file.accept='.txt,.md,text/plain,text/markdown';
+    file.addEventListener('change',async()=>{
+      const f=file.files?.[0];if(!f)return;
+      if(f.size>12000){showNotice('单条记录不能超过 12 KB');return;}
+      try{area.value=await f.text();}catch{showNotice('文件读取失败');}
+    });
+    actionRow.append(file,button('保存记录',()=>{
+      try{api.addManual(kind,area.value);showNotice('已保存到当前聊天');}
+      catch(e){showNotice(e.message);}
+    },'sm-btn sm-btn-primary'));
+    const content=el('div','sm-manual-content');content.append(area,actionRow);details.append(content);body.append(details);
   }
   function renderSummary(){
     const ctx=api.context(),mem=api.memory(),pending=pendingFloors(mem,ctx?.chat||[]);
-    const heading=top('剧情摘要','保留事件、时间线与未解决的故事线。');
-    heading.append(button(api.queue.busy?'整理中…':'批量补摘',()=>api.queue.enqueueMissing(80),'sm-primary'));
-    const metrics=node('div','sm-metrics');
-    for(const [number,label] of [[Object.keys(mem.leaves).length,'已摘要楼层'],[pending.length,'待整理楼层'],[mem.chapters.length,'章节总结']]){
-      const box=node('div','sm-metric');box.append(node('b','',String(number)),node('small','',label));metrics.append(box);
+    const action=button(api.queue.busy?'正在整理':'批量补摘',()=>api.queue.enqueueMissing(80),'sm-btn sm-btn-primary');
+    action.disabled=Boolean(api.queue.busy);
+    title('剧情摘要','时间线、章节与重要事件',action);
+    const metrics=el('div','sm-metrics');
+    for(const [count,label] of [[Object.keys(mem.leaves).length,'已摘要'],[pending.length,'待整理'],[validChapters(mem,ctx?.chat||[]).length,'章节']]){
+      const item=el('div','sm-metric');item.append(el('span','sm-metric-number',count),el('span','sm-metric-label',label));metrics.append(item);
     }
     body.append(metrics);
     if(pending.length){
-      body.append(node('h3','sm-section-title','待整理 · '+pending.length+' 楼'));
-      const strip=node('div','sm-pending');
-      for(const index of pending.slice(-22)){
-        strip.append(button('#'+index,()=>api.queue.enqueue([index]),'sm-pill'));
-      }
-      body.append(strip);
+      const pendingBox=el('section','sm-pending-box'),heading=el('div','sm-pending-heading');
+      heading.append(el('strong','', '待整理楼层'),el('span','sm-pending-count',pending.length+' 楼'));
+      const strip=el('div','sm-pills');
+      for(const i of pending.slice(-24))strip.append(button('#'+i,()=>api.queue.enqueue([i]),'sm-pill'));
+      pendingBox.append(heading,strip);body.append(pendingBox);
     }
-    addRows('章节总结',mem.chapters,(entry)=>({title:'章节 · '+entry.children.length+' 楼',description:entry.summary}));
+    const valid=validChapters(mem,ctx?.chat||[]);
+    recordCards('章节回顾',valid.slice().reverse(),c=>({title:c.level===2?'长期概览':'章节总结 · '+c.children.length+' 段',description:c.summary}));
     const state=deriveState(mem,ctx?.chat||[]);
-    addRows('楼层摘要',state.timeline.slice(-70).reverse(),entry=>({title:'#'+entry.sourceIndex+(entry.time?' · '+entry.time:''),description:entry.summary}));
-    manualRows('summaries',mem.manual?.summaries||[]);
-    if(!state.timeline.length&&!mem.manual.summaries.length)empty('还没有摘要。可以先手动输入，或配置副 API 后补摘。');
-    manualBox('summaries');
+    recordCards('剧情时间线',state.timeline.slice(-50).reverse(),e=>({title:'#'+e.sourceIndex+(e.time?' · '+e.time:''),description:e.summary}));
+    manualList('summaries',mem.manual.summaries);
+    if(!state.timeline.length&&!mem.manual.summaries.length)emptyState('book','还没有剧情摘要','可以先添加记忆，或配置副 API 后整理楼层。');
+    manualInput('summaries');
   }
-  function renderCollection(kind,title,caption){
-    const ctx=api.context(),mem=api.memory(),derived=deriveState(mem,ctx?.chat||[]);
-    top(title,caption);
-    const entries=(derived[kind]||[]).filter(x=>!x.manual);
-    addRows('当前记录 · '+entries.length,entries,x=>({title:x.name,description:x.manual?'手动记录':[
+  function renderCollection(kind,heading,caption){
+    const ctx=api.context(),mem=api.memory(),state=deriveState(mem,ctx?.chat||[]);
+    title(heading,caption);
+    const entries=(state[kind]||[]).filter(x=>!x.manual);
+    recordCards('当前'+heading,entries,x=>({title:x.name,description:[
       x.description,x.location&&'位置：'+x.location,x.owner&&'归属：'+x.owner,
       x.relationship&&'关系：'+x.relationship,x.status,x.quantity!==undefined&&'数量：'+x.quantity
     ].filter(Boolean).join(' · ')}));
-    if(!entries.length)empty('尚无'+title+'记录。');
-    manualRows(kind,mem.manual?.[kind]||[]);
-    manualBox(kind);
+    manualList(kind,mem.manual[kind]);
+    if(!entries.length&&!mem.manual[kind].length)emptyState('package','暂无'+heading+'记录','从剧情提取后会显示在这里，也可以手动添加。');
+    manualInput(kind);
+  }
+  function accordion(id,label,description,children){
+    const details=el('details','sm-accordion');
+    details.open=settingsOpen.has(id);
+    const summary=el('summary','sm-accordion-head'),copy=el('span','sm-accordion-copy');
+    copy.append(el('strong','',label));
+    if(description)copy.append(el('small','',description));
+    summary.append(copy,svg('chevron'));
+    const content=el('div','sm-accordion-body');content.append(...children);
+    details.append(summary,content);
+    details.addEventListener('toggle',()=>{if(details.open)settingsOpen.add(id);else settingsOpen.delete(id);});
+    return details;
+  }
+  function grid(...elements){const row=el('div','sm-fields-grid');row.append(...elements);return row;}
+  function jsonPairs(existing){
+    const wrapper=el('div','sm-kv-editor'),list=el('div','sm-kv-list');
+    const addRow=(key='',value='')=>{
+      const row=el('div','sm-kv-row'),a=el('input','sm-input'),b=el('input','sm-input'),remove=button('×',()=>row.remove(),'sm-kv-remove');
+      a.placeholder='标头名称';a.setAttribute('aria-label','标头名称');a.value=key;
+      b.placeholder='标头内容';b.setAttribute('aria-label','标头内容');b.value=value;
+      remove.setAttribute('aria-label','移除标头');
+      row.append(a,b,remove);list.append(row);
+    };
+    for(const [key,value] of Object.entries(existing||{}))addRow(key,String(value));
+    wrapper.append(list,button('＋ 添加标头',()=>addRow(),'sm-btn sm-btn-text'));
+    return {wrapper,getValue(){
+      const result={};
+      for(const row of list.children){
+        const [key,value]=row.querySelectorAll('input'),name=key.value.trim();
+        if(!name)continue;
+        if(!/^[a-z0-9-]{1,100}$/i.test(name))throw Error('请求标头名称无效：'+name);
+        if(Object.keys(result).some(x=>x.toLowerCase()===name.toLowerCase()))throw Error('重复的请求标头：'+name);
+        result[name]=value.value;
+      }
+      return result;
+    }};
   }
   function renderSettings(){
-    const settings=api.settings();
-    const heading=top('插件设置','独立副 API、自动任务和主模型记忆注入。');
-    heading.append(button('查看注入预览',()=>{page='preview';render();},'sm-button'));
-    const settingsForm=node('div','sm-settings');
-    const general=node('section','sm-panel');general.append(node('h3','sm-section-title','运行'));
-    const enabled=check('启用记忆引擎',settings.enabled),auto=check('自动摘要新楼层',settings.autoSummary);
-    const recent=field('最近正文保留楼数',settings.summary.keepRecent,'number');
-    const chapter=field('每章合并摘要数',settings.summary.chapterEvery,'number');
-    general.append(enabled.wrapper,auto.wrapper,recent.wrapper,chapter.wrapper);settingsForm.append(general);
-
-    const channel=node('section','sm-panel');channel.append(node('h3','sm-section-title','副 API · OpenAI 兼容'));
-    const apiUrl=field('API 地址',settings.api.url),model=field('模型 ID',settings.api.model);
-    const temp=field('Temperature',settings.api.temperature,'number'),max=field('最大输出 Tokens',settings.api.maxTokens,'number');
-    const excluded=field('排除参数（英文逗号分隔）',settings.api.exclude.join(', '));
-    const headers=node('textarea','sm-textarea');headers.rows=3;headers.value=JSON.stringify(settings.api.headers||{},null,2);
-    const included=node('textarea','sm-textarea');included.rows=3;included.value=JSON.stringify(settings.api.include||{},null,2);
-    channel.append(apiUrl.wrapper,model.wrapper,node('p','sm-muted','密钥在酒馆 Custom API 中配置；额外请求标头由你自行填写，不会自动添加。'),temp.wrapper,max.wrapper,excluded.wrapper,
-      node('span','sm-field-label','包含请求标头（JSON 对象，自行配置；不要填密钥）'),headers,
-      node('span','sm-field-label','附加请求参数（JSON 对象）'),included);
-    settingsForm.append(channel);
-
-    const summary=node('section','sm-panel');summary.append(node('h3','sm-section-title','摘要与自定义提示词'));
-    const sourceLimit=field('单次摘要最大正文字符',settings.summary.maxInputChars,'number');
-    const retries=field('临时错误重试次数（0–2）',settings.summary.retry,'number');
-    const summaryPrompt=node('textarea','sm-textarea');summaryPrompt.rows=4;summaryPrompt.placeholder='留空使用内置短提示词';summaryPrompt.value=settings.prompts.summary||'';
-    const chapterPrompt=node('textarea','sm-textarea');chapterPrompt.rows=3;chapterPrompt.placeholder='留空使用内置章节总结提示词';chapterPrompt.value=settings.prompts.chapter||'';
-    summary.append(sourceLimit.wrapper,retries.wrapper,node('span','sm-field-label','摘要附加指令'),summaryPrompt,node('span','sm-field-label','章节总结指令'),chapterPrompt);
-    settingsForm.append(summary);
-
-    const inject=node('section','sm-panel');inject.append(node('h3','sm-section-title','记忆注入'));
+    const cfg=api.settings();
+    title('设置','按需调整整理、注入和检索方式');
+    const box=el('section','sm-settings'),main=el('div','sm-setting-global');
+    const enabled=switchRow('启用记忆引擎',cfg.enabled,'控制记忆整理、注入和检索');
+    main.append(enabled.wrapper);box.append(main);
+    const apiUrl=field('API 地址',cfg.api.url,'url'),model=field('模型 ID',cfg.api.model);
+    const temp=field('温度',cfg.api.temperature,'number'),max=field('最大输出 Tokens',cfg.api.maxTokens,'number');
+    const excluded=field('排除参数',cfg.api.exclude.join(', '),'text','多个参数用英文逗号分隔');
+    const headers=jsonPairs(cfg.api.headers);
+    const adv=el('details','sm-advanced'),advancedTitle=el('summary','','附加请求参数'),included=textArea(JSON.stringify(cfg.api.include||{},null,2),3,'{}');
+    adv.append(advancedTitle,included);
+    box.append(accordion('api','副 API','摘要使用的独立模型和请求参数',[
+      grid(apiUrl.wrapper,model.wrapper),
+      grid(temp.wrapper,max.wrapper),
+      excluded.wrapper,sectionTitle('包含请求标头','按需自行添加，不自动填写或修改'),headers.wrapper,
+      adv
+    ]));
+    const recent=field('最近保留楼层',cfg.summary.keepRecent,'number'),chapter=field('章节合并数量',cfg.summary.chapterEvery,'number');
+    const sourceLimit=field('单次正文字符上限',cfg.summary.maxInputChars,'number'),retries=field('失败重试次数',cfg.summary.retry,'number');
+    const auto=switchRow('自动摘要新楼层',cfg.autoSummary,'新回复完成后，自动加入摘要队列');
+    box.append(accordion('summary','摘要设置','自动整理、章节合并和失败重试',[
+      auto.wrapper,grid(recent.wrapper,chapter.wrapper),grid(sourceLimit.wrapper,retries.wrapper)
+    ]));
     const flags=[
-      ['summary','剧情摘要'],['inventory','物品状态'],['scenes','场景地点'],['characters','角色档案'],['vector','向量召回']
-    ].map(([key,label])=>[key,check(label,settings.injection[key])]);
-    for(const [,c] of flags)inject.append(c.wrapper);
-    const budget=field('注入预算（估算 Tokens）',settings.injection.budget,'number');inject.append(budget.wrapper);settingsForm.append(inject);
-
-    const v=node('section','sm-panel');v.append(node('h3','sm-section-title','向量记忆 · 按需开启'));
-    const vec=check('启用 Embedding 检索',settings.vector.enabled);
-    const vModel=field('Embedding 模型',settings.vector.model);
-    const topK=field('Top-K 召回数量',settings.vector.topK,'number');
-    v.append(vec.wrapper,node('p','sm-muted','复用酒馆 /api/vector 服务端索引。服务商：硅基流动；API 密钥在酒馆自身配置。'),vModel.wrapper,topK.wrapper);
-    v.append(button('建立／更新当前聊天索引',async()=>{report('正在索引…');try{const n=await api.indexNow();report('已索引 '+n+' 条记忆');}catch(e){report(e.message);}},'sm-button'));settingsForm.append(v);
-    const save=button('保存设置',()=>{
+      ['summary','剧情摘要'],['inventory','物品状态'],['scenes','场景地点'],
+      ['characters','角色档案'],['vector','向量召回']
+    ].map(([key,label])=>[key,switchRow(label,cfg.injection[key])]);
+    const flagGroup=el('div','sm-switch-grid');
+    flagGroup.append(...flags.map(([,x])=>x.wrapper));
+    const budget=field('注入预算（估算 Tokens）',cfg.injection.budget,'number');
+    box.append(accordion('inject','注入设置','决定哪些记忆进入主对话',[
+      flagGroup,budget.wrapper,
+      button('查看注入预览',()=>{page='preview';render();},'sm-btn')
+    ]));
+    const vector=switchRow('启用向量检索',cfg.vector.enabled);
+    const vectorModel=field('Embedding 模型',cfg.vector.model);
+    const topK=field('召回数量 Top-K',cfg.vector.topK,'number');
+    const vectorActions=el('div','sm-row-actions');
+    vectorActions.append(button('更新当前聊天索引',async()=>{
+      showNotice('正在更新索引…');
+      try{const count=await api.indexNow();showNotice('已更新 '+count+' 条记忆');}
+      catch(e){showNotice(e.message);}
+    },'sm-btn'));
+    box.append(accordion('vector','向量记忆','按相关性找回旧剧情',[
+      vector.wrapper,grid(vectorModel.wrapper,topK.wrapper),vectorActions
+    ]));
+    const summaryPrompt=textArea(cfg.prompts.summary||'',5,'留空使用默认摘要提示词');
+    const chapterPrompt=textArea(cfg.prompts.chapter||'',4,'留空使用默认章节提示词');
+    const promptWrap=el('div','sm-form-stack');
+    promptWrap.append(el('span','sm-field-label','摘要附加指令'),summaryPrompt,el('span','sm-field-label','章节总结指令'),chapterPrompt);
+    box.append(accordion('prompts','自定义提示词','自定义摘要细节和章节整理方式',[promptWrap]));
+    const saveBar=el('div','sm-settings-save'),save=button('保存设置',()=>{
       try{
-        const obj=structuredClone(settings);
-        const getJson=input=>{const data=JSON.parse(input.value||'{}');if(!data||typeof data!=='object'||Array.isArray(data))throw Error('JSON 必须是对象');return data;};
-        obj.enabled=enabled.input.checked;obj.autoSummary=auto.input.checked;
-        obj.summary.keepRecent=Math.max(0,Math.min(30,Number(recent.input.value)||0));
-        obj.summary.chapterEvery=Math.max(3,Math.min(30,Number(chapter.input.value)||8));
-        obj.summary.maxInputChars=Math.max(2000,Math.min(30000,Number(sourceLimit.input.value)||16000));
-        obj.summary.retry=Math.max(0,Math.min(2,Number(retries.input.value)||0));
-        obj.api.url=apiUrl.input.value.trim();obj.api.model=model.input.value.trim();delete obj.api.openCodeSession;
-        delete obj.api.key;
-        obj.api.temperature=Number(temp.input.value)||0;obj.api.maxTokens=Number(max.input.value)||4096;
-        obj.api.exclude=excluded.input.value.split(',').map(x=>x.trim()).filter(Boolean);
-        obj.api.headers=getJson(headers);obj.api.include=getJson(included);
-        obj.prompts.summary=summaryPrompt.value;obj.prompts.chapter=chapterPrompt.value;
-        for(const [k,c] of flags)obj.injection[k]=c.input.checked;
-        obj.injection.budget=Number(budget.input.value)||4500;
-        obj.vector.enabled=vec.input.checked;obj.vector.source='siliconflow';
-        obj.vector.model=vModel.input.value.trim();delete obj.vector.key;delete obj.vector.url;
-        obj.vector.topK=Math.max(1,Math.min(10,Number(topK.input.value)||5));
-        api.saveSettings(obj);report('设置已保存');
-      }catch(e){report('保存失败：'+e.message);}
-    },'sm-primary sm-save');
-    settingsForm.append(save);body.append(settingsForm);
+        const next=structuredClone(cfg);
+        const jsonValue=JSON.parse(included.value||'{}');
+        if(!jsonValue||Array.isArray(jsonValue)||typeof jsonValue!=='object')throw Error('附加请求参数须为 JSON 对象');
+        next.enabled=enabled.input.checked;next.autoSummary=auto.input.checked;
+        next.api.url=apiUrl.input.value.trim();next.api.model=model.input.value.trim();
+        next.api.temperature=Number(temp.input.value)||0;
+        next.api.maxTokens=Number(max.input.value)||4096;
+        next.api.exclude=excluded.input.value.split(',').map(x=>x.trim()).filter(Boolean);
+        next.api.headers=headers.getValue();next.api.include=jsonValue;
+        next.summary.keepRecent=Math.max(0,Math.min(30,Number(recent.input.value)||0));
+        next.summary.chapterEvery=Math.max(3,Math.min(30,Number(chapter.input.value)||8));
+        next.summary.maxInputChars=Math.max(2000,Math.min(30000,Number(sourceLimit.input.value)||16000));
+        next.summary.retry=Math.max(0,Math.min(2,Number(retries.input.value)||0));
+        next.injection.budget=Number(budget.input.value)||4500;
+        for(const [key,value] of flags)next.injection[key]=value.input.checked;
+        next.vector.enabled=vector.input.checked;next.vector.source='siliconflow';
+        next.vector.model=vectorModel.input.value.trim();
+        next.vector.topK=Math.max(1,Math.min(10,Number(topK.input.value)||5));
+        next.prompts.summary=summaryPrompt.value;next.prompts.chapter=chapterPrompt.value;
+        delete next.api.key;delete next.vector.key;delete next.vector.url;
+        api.saveSettings(next);showNotice('设置已保存');
+      }catch(e){showNotice('保存失败：'+e.message);}
+    },'sm-btn sm-btn-primary');
+    saveBar.append(save);
+    box.append(saveBar);body.append(box);
   }
   function renderPreview(){
-    const ctx=api.context(),text=injectionText(api.memory(),ctx?.chat||[],api.settings());
-    top('注入预览','这部分内容将在生成时放入主对话系统提示词。');
-    const textarea=node('textarea','sm-textarea sm-preview');textarea.readOnly=true;textarea.value=text||'当前没有需要注入的记忆。';
-    body.append(textarea,node('p','sm-muted','大小估计：约 '+Math.ceil(text.length/3)+' tokens。向量召回是按生成时查询动态追加的。'));
+    const ctx=api.context(),result=injectionText(api.memory(),ctx?.chat||[],api.settings());
+    title('注入预览','查看下一轮对话将使用的记忆内容');
+    const textarea=textArea(result||'当前没有需要注入的记忆。',13);textarea.readOnly=true;
+    body.append(textarea,el('p','sm-help','约 '+Math.ceil(result.length/3)+' Tokens；向量记忆在生成时单独检索。'));
   }
   function render(){
-    if(!active)return;nav.replaceChildren();body.replaceChildren();
-    for(const [key,label,icon] of NAV){
-      const tab=button(icon+'  '+label,()=>{page=key;status='';render();},'sm-nav-item'+(page===key?' active':''));
-      tab.setAttribute('aria-current',page===key?'page':'false');nav.append(tab);
+    if(!active)return;
+    body.replaceChildren();nav.replaceChildren();
+    for(const [name,label,icon] of NAV){
+      const item=button('',()=>{if(page===name)return;page=name;notice='';render();body.scrollTop=0;},'sm-nav-item'+(page===name?' is-current':''));
+      item.append(svg(icon),el('span','',label));item.setAttribute('aria-current',page===name?'page':'false');nav.append(item);
     }
-    const footer=node('div','sm-nav-footer','Story Memory · v0.1 开发版');nav.append(footer);
     if(page==='summaries')renderSummary();
-    else if(page==='items')renderCollection('items','物品','数量、持有者与存放地，变更可追溯。');
-    else if(page==='scenes')renderCollection('scenes','场景','地点、人物位置与环境记录。');
-    else if(page==='characters')renderCollection('characters','角色','人物身份、关系、状态与重要背景。');
-    else if(page==='settings')renderSettings();else renderPreview();
-    if(status){const tip=node('div','sm-toast',status);body.prepend(tip);}
+    else if(page==='items')renderCollection('items','物品','重要物件和持有状态');
+    else if(page==='scenes')renderCollection('scenes','场景','地点与环境记录');
+    else if(page==='characters')renderCollection('characters','角色','人物档案及关系变化');
+    else if(page==='settings')renderSettings();
+    else renderPreview();
+    if(notice)showNotice(notice);
   }
-  return {open,refresh,report};
+  return {open,refresh(){
+    // Refreshing while editing settings would discard unsaved form input.
+    if(active&&page!=='settings')render();
+  },report:showNotice};
 }
