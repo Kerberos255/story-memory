@@ -1,0 +1,12 @@
+{
+  "display_name": "剧情记忆",
+  "loading_order": 110,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "generate_interceptor": "storyMemoryGenerationInterceptor",
+  "author": "Private local project",
+  "version": "0.1.0",
+  "auto_update": false,
+  "minimum_client_version": "1.12.13"
+}

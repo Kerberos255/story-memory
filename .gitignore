@@ -1,0 +1,16 @@
+node_modules/
+*.log
+.env
+.env.*
+!.env.example
+*.pid
+*.cache
+.cache/
+coverage/
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+*.zip
+*.key
+secrets*
