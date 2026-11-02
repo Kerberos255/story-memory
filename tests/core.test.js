@@ -164,3 +164,63 @@ test('edited user text invalidates leaf; oversized source cannot be auto-hidden'
  memory=commitLeaf(memory,1,messageFingerprint(chat[1]),normalizeDelta({summary:'截断 AI'}),userFingerprint(chat,1));
  assert.deepEqual(hideReadyIndices(memory,chat,cfg),[]);
 });
+
+test('story timestamp canonicalization preserves uncertain times and unifies known date ranges',async()=>{
+ const {formatStoryTime}=await import('../core.js');
+ assert.equal(formatStoryTime('2026/7/11 星期六 06:22-06:29'),'2026/07/11 · 06:22–06:29');
+ assert.equal(formatStoryTime('2026/7/11 06:15-06:22'),'2026/07/11 · 06:15–06:22');
+ assert.equal(formatStoryTime('[2026/7/11 | 星期六 | 06:48]'),'2026/07/11 · 06:48');
+ assert.equal(formatStoryTime('2026-07-11T06:48'),'2026/07/11 · 06:48');
+ assert.equal(formatStoryTime('深夜'),'深夜');
+ assert.equal(formatStoryTime('2026/2/30 09:00'),'2026/2/30 09:00');
+ assert.equal(normalizeDelta({summary:'过程',time:'2026/7/11 星期六 06:22-06:29'}).time,
+   '2026/07/11 · 06:22–06:29');
+});
+test('generated summary editing preserves structured facts and invalidates higher-level conclusions',async()=>{
+ const {editGeneratedLeaf,deleteGeneratedLeaf,resumeGeneratedFloor,leafValid,validChapters}=await import('../core.js');
+ const chat=makeChat();
+ let mem=commitLeaf(freshMemory(),1,messageFingerprint(chat[1]),
+   normalizeDelta({summary:'旧摘要',time:'2026/7/11 06:22-06:29',items:[{op:'add',name:'钥匙',owner:'角色'}]}));
+ mem.chapters.push({id:'chapter:1',level:1,children:['floor:1'],summary:'旧章节'});
+ const revised=editGeneratedLeaf(mem,chat,1,{summary:'修改过的事实',time:'2026/7/11 星期六 06:22-06:29',location:'小巷'});
+ assert.equal(revised.leaves[1].summary,'修改过的事实');
+ assert.equal(revised.leaves[1].time,'2026/07/11 · 06:22–06:29');
+ assert.equal(revised.leaves[1].delta.items[0].name,'钥匙');
+ assert.equal(revised.chapters.length,0);
+ assert.equal(mem.chapters.length,1,'source value remains immutable');
+ assert.equal(leafValid(revised,chat,1),true);
+ const removed=deleteGeneratedLeaf(revised,chat,1);
+ assert.equal(removed.leaves[1],undefined);
+ assert.equal(deriveState(removed,chat).items.length,0,'deleted extraction should disappear');
+ assert.ok(!pendingFloors(removed,chat).includes(1),'explicit delete should suppress regeneration');
+ const reenabled=resumeGeneratedFloor(removed,1);
+ assert.ok(pendingFloors(reenabled,chat).includes(1),'explicit retry reopens the floor');
+ chat[1].mes='剧情文本已修改';
+ assert.ok(pendingFloors(removed,chat).includes(1),'changed source can be automatically summarized');
+ assert.throws(()=>resumeGeneratedFloor(reenabled,1),/未标记/);
+ assert.throws(()=>editGeneratedLeaf(removed,chat,1,{summary:'非法'}),/变化/);
+});
+test('manually edited or deleted chapter invalidates ancestors without removing original floors',async()=>{
+ const {editGeneratedChapter,deleteGeneratedChapter,nextCompression,commitCompression}=await import('../core.js');
+ const chat=Array.from({length:4},(_,i)=>({is_user:false,mes:'事件'+i}));
+ let mem=freshMemory();
+ for(let i=0;i<4;i++)mem=commitLeaf(mem,i,messageFingerprint(chat[i]),normalizeDelta({summary:'事件摘要 '+i}));
+ const cfg=defaultSettings();cfg.summary.leafBatchThreshold=2;cfg.summary.leafKeepRecent=0;cfg.summary.resummaryThreshold=2;
+ let plan=nextCompression(mem,chat,cfg);
+ mem=commitCompression(mem,chat,plan,'第一阶段');
+ const first=mem.chapters[0].id;
+ plan=nextCompression(mem,chat,cfg);mem=commitCompression(mem,chat,plan,'第二阶段');
+ const second=mem.chapters[1].id;
+ plan=nextCompression(mem,chat,cfg);
+ mem=commitCompression(mem,chat,plan,'阶段总览');
+ assert.equal(mem.chapters.length,3);
+ const edited=editGeneratedChapter(mem,chat,first,'第一阶段修正');
+ assert.equal(edited.chapters.length,2,'parent conclusion must be dropped');
+ assert.ok(edited.chapters.some(c=>c.id===second));
+ assert.equal(edited.chapters.find(c=>c.id===first).summary,'第一阶段修正');
+ const deleted=deleteGeneratedChapter(edited,chat,first);
+ assert.equal(Object.keys(deleted.leaves).length,4);
+ assert.equal(deleted.chapters.length,1);
+ assert.ok(deleted.skippedPlans.some(s=>s.includes('floor:0')&&s.includes('floor:1')));
+ assert.equal(mem.chapters.length,3,'prior state not mutated');
+});

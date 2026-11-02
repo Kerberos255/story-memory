@@ -1,4 +1,4 @@
-import {defaultSettings,SETTINGS_KEY,readMemory,writeMemory,addManual,editManual,removeManual,injectionText} from './core.js';
+import {defaultSettings,SETTINGS_KEY,readMemory,writeMemory,addManual,editManual,removeManual,editGeneratedLeaf,deleteGeneratedLeaf,resumeGeneratedFloor,editGeneratedChapter,deleteGeneratedChapter,injectionText} from './core.js';
 import {SummaryQueue} from './queue.js';
 import {listSummaryModels} from './api.js';
 import {indexSummaries,recall} from './vector-local.js';
@@ -32,7 +32,7 @@ function inject(hits=[]){
 }
 function afterMemoryChanged(){
   inject();ui?.refresh();
-  void queue?.restoreStale().catch(()=>{});
+  void queue?.restoreStale().then(()=>queue.restoreStale()).catch(()=>{});
 }
 function add(kind,text){
   const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
@@ -45,6 +45,30 @@ function edit(kind,id,text){
 function remove(kind,id){
   const ctx=getContext();if(!ctx)throw Error('聊天未就绪');
   writeMemory(ctx,removeManual(readMemory(ctx),kind,id));afterMemoryChanged();
+}
+function editLeaf(index,changes){
+  const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
+  queue.cancel(false);
+  writeMemory(ctx,editGeneratedLeaf(readMemory(ctx),ctx.chat,index,changes));afterMemoryChanged();
+}
+function deleteLeaf(index){
+  const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
+  queue.cancel(false);
+  writeMemory(ctx,deleteGeneratedLeaf(readMemory(ctx),ctx.chat,index));afterMemoryChanged();
+}
+function resumeLeaf(index){
+  const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
+  writeMemory(ctx,resumeGeneratedFloor(readMemory(ctx),index));afterMemoryChanged();
+}
+function editChapter(id,summary){
+  const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
+  queue.cancel(false);
+  writeMemory(ctx,editGeneratedChapter(readMemory(ctx),ctx.chat,id,summary));afterMemoryChanged();
+}
+function deleteChapter(id){
+  const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
+  queue.cancel(false);
+  writeMemory(ctx,deleteGeneratedChapter(readMemory(ctx),ctx.chat,id));afterMemoryChanged();
 }
 async function fetchSummaryModels(config){
   return listSummaryModels(getContext(),config);
@@ -95,7 +119,8 @@ function init(){
   getSettings();
   queue=new SummaryQueue(getContext,getSettings,afterMemoryChanged);
   ui=mountUI({context:getContext,memory:()=>readMemory(getContext()),settings:getSettings,saveSettings,
-    addManual:add,editManual:edit,removeManual:remove,queue,indexNow,fetchSummaryModels});
+    addManual:add,editManual:edit,removeManual:remove,
+    editLeaf,deleteLeaf,resumeLeaf,editChapter,deleteChapter,queue,indexNow,fetchSummaryModels});
   lastChat=ctx.getCurrentChatId?.()||'';
   const onChatChanged=()=>{const now=getContext()?.getCurrentChatId?.()||'';if(now!==lastChat){lastChat=now;queue.cancel();}inject();ui?.refresh();};
   ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED,onChatChanged);

@@ -7,7 +7,7 @@ export class SummaryQueue{
     this.jobs=[];this.busy=false;this.abort=null;this.chatKey='';
   }
   currentKey(){return this.getContext()?.getCurrentChatId?.()||'';}
-  cancel(){this.jobs=[];this.abort?.abort();this.chatKey=this.currentKey();this.onChange?.();}
+  cancel(notify=true){this.jobs=[];this.abort?.abort();this.chatKey=this.currentKey();if(notify)this.onChange?.();}
   enqueue(indices){
     const ctx=this.getContext();if(!ctx||!this.getSettings().enabled)return;
     const key=this.currentKey();if(!key)return;

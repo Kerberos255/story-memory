@@ -1,6 +1,6 @@
 // Standalone browser-side embeddings, completely independent from SillyTavern's secret vault.
 // Cache is rebuildable; canonical summaries always remain in chat metadata.
-import {hashText,messageFingerprint,validChapters} from './core.js';
+import {hashText,leafValid,validChapters} from './core.js';
 const DB='story-memory-embeddings-v1',TABLE='entries';
 let opening;
 function db(){
@@ -87,7 +87,7 @@ export function candidates(ctx,memory){
   const result=[];
   for(const [key,leaf] of Object.entries(memory.leaves||{})){
     const i=Number(key);
-    if(messageFingerprint(ctx.chat?.[i])!==leaf.fingerprint)continue;
+    if(!leafValid(memory,ctx.chat,i))continue;
     result.push({key:'floor:'+i,text:leaf.summary});
   }
   for(const chapter of validChapters(memory,ctx.chat||[])){

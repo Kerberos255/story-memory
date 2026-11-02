@@ -12,7 +12,7 @@ export function defaultSettings() {
   };
 }
 export function freshMemory() {
-  return {version:1,leaves:{},chapters:[],manual:{summaries:[],items:[],scenes:[],characters:[]},tasks:{},revision:0};
+  return {version:1,leaves:{},chapters:[],skippedFloors:{},skippedPlans:[],manual:{summaries:[],items:[],scenes:[],characters:[]},tasks:{},revision:0};
 }
 export function readMemory(ctx) {
   if (!ctx?.chatMetadata) return freshMemory();
@@ -57,11 +57,40 @@ export function pendingFloors(memory,chat) {
     const m=chat[i],fingerprint=messageFingerprint(m);
     if(!fingerprint) continue;
     if(leafValid(memory,chat,i))continue;
+    const skip=memory.skippedFloors?.[i];
+    if(skip?.fingerprint===fingerprint&&skip.userFingerprint===userFingerprint(chat,i))continue;
     pending.push(i);
   }
   return pending;
 }
 const cleanString=(value,limit=3000)=>typeof value==='string'?value.trim().slice(0,limit):'';
+
+/** Normalize explicit story timestamps without inventing an unknown date or time.
+ * Ambiguous prose (such as "深夜") is kept unchanged.
+ */
+export function formatStoryTime(value) {
+  const original=typeof value==='string'?value.trim().slice(0,100):'';
+  if(!original)return '';
+  const plain=original.replace(/[|｜\[\]]/g,' ').replace(/(?:星期|周)[一二三四五六日天]/g,' ')
+    .replace(/\s+/g,' ').trim();
+  const date=plain.match(/^(\d{4})[\/.\-年](\d{1,2})[\/.\-月](\d{1,2})日?(?:\s+|T)?(.*)$/);
+  let remainder=plain, prefix='';
+  if(date) {
+    const y=Number(date[1]),m=Number(date[2]),d=Number(date[3]);
+    const parsed=new Date(Date.UTC(y,m-1,d));
+    if(parsed.getUTCFullYear()!==y||parsed.getUTCMonth()!==m-1||parsed.getUTCDate()!==d)return original;
+    prefix=[String(y),String(m).padStart(2,'0'),String(d).padStart(2,'0')].join('/');
+    remainder=date[4]?.trim()||'';
+  }
+  if(!remainder)return prefix||original;
+  const clock=remainder.match(/^(\d{1,2}):(\d{2})(?:\s*(?:-|~|～|–|—|至)\s*(\d{1,2}):(\d{2}))?$/);
+  if(!clock)return original;
+  const h=Number(clock[1]),min=Number(clock[2]),h2=clock[3]===undefined?null:Number(clock[3]),min2=clock[4]===undefined?null:Number(clock[4]);
+  if(h>23||min>59||(h2!==null&&(h2>23||min2>59)))return original;
+  const pad=n=>String(n).padStart(2,'0');
+  const time=pad(h)+':'+pad(min)+(h2===null?'':'–'+pad(h2)+':'+pad(min2));
+  return (prefix?prefix+' · ':'')+time;
+}
 export function normalizeDelta(raw) {
   if(!raw||typeof raw!=='object'||Array.isArray(raw))throw Error('摘要 JSON 必须是对象');
   const summary=cleanString(raw.summary,8000);
@@ -82,23 +111,86 @@ export function normalizeDelta(raw) {
       delta[kind].push(out);
     }
   }
-  return {summary,time:cleanString(raw.time,100),location:cleanString(raw.location,180),delta};
+  return {summary,time:formatStoryTime(raw.time),location:cleanString(raw.location,180),delta};
 }
 export function commitLeaf(memory,index,fingerprint,data,userFp='') {
   if(!Number.isInteger(index)||index<0||!fingerprint)throw Error('楼层标识无效');
   const next=structuredClone(memory);
   next.leaves[index]={id:'floor:'+index,sourceIndex:index,fingerprint,userFingerprint:userFp,summary:data.summary,time:data.time,location:data.location,delta:data.delta,updatedAt:Date.now()};
   delete next.tasks[index];
+  if(next.skippedFloors)delete next.skippedFloors[index];
   // Any changed leaf invalidates its ancestor compression chain, not other chapters.
-  const invalid=new Set(['floor:'+index]);
-  let size=-1;
-  while(size!==invalid.size){
-    size=invalid.size;
-    for(const chapter of next.chapters)if(chapter.children?.some(id=>invalid.has(id)))invalid.add(chapter.id);
-  }
-  next.chapters=next.chapters.filter(chapter=>!invalid.has(chapter.id));
+  pruneDependentChapters(next,'floor:'+index);
   next.revision++;
   return next;
+}
+
+function pruneDependentChapters(memory,sourceId){
+  const invalid=new Set([sourceId]);
+  let count=-1;
+  while(count!==invalid.size){
+    count=invalid.size;
+    for(const chapter of memory.chapters||[]){
+      if(chapter.children?.some(id=>invalid.has(id)))invalid.add(chapter.id);
+    }
+  }
+  memory.chapters=(memory.chapters||[]).filter(chapter=>!invalid.has(chapter.id));
+}
+export function editGeneratedLeaf(memory,chat,index,changes){
+  if(!leafValid(memory,chat,index))throw Error('楼层内容已变化，请重新摘要');
+  const previous=memory.leaves[index];
+  const summary=cleanString(changes.summary,8000);
+  if(!summary)throw Error('摘要正文不能为空');
+  const next=commitLeaf(memory,index,previous.fingerprint,{
+    summary,time:formatStoryTime(changes.time),location:cleanString(changes.location,180),
+    delta:previous.delta
+  },previous.userFingerprint);
+  next.leaves[index].edited=true;
+  return next;
+}
+export function deleteGeneratedLeaf(memory,chat,index){
+  if(!leafValid(memory,chat,index))throw Error('楼层摘要已经失效');
+  const next=structuredClone(memory),previous=next.leaves[index];
+  delete next.leaves[index];
+  pruneDependentChapters(next,'floor:'+index);
+  next.skippedFloors??={};
+  next.skippedFloors[index]={fingerprint:previous.fingerprint,userFingerprint:previous.userFingerprint||userFingerprint(chat,index)};
+  next.revision++;return next;
+}
+export function resumeGeneratedFloor(memory,index){
+  const next=structuredClone(memory);
+  if(!next.skippedFloors?.[index])throw Error('楼层未标记为跳过');
+  delete next.skippedFloors[index];
+  next.revision++;return next;
+}
+export function editGeneratedChapter(memory,chat,id,summary){
+  const text=cleanString(summary,12000);
+  if(!text)throw Error('总结正文不能为空');
+  if(!validChapters(memory,chat).some(c=>c.id===id))throw Error('总结源已变化');
+  const next=structuredClone(memory),chapter=next.chapters.find(c=>c.id===id);
+  chapter.summary=text;chapter.updatedAt=Date.now();chapter.edited=true;
+  // Higher-level conclusions were based on the previous text.
+  const invalid=new Set([id]);let count=-1;
+  while(count!==invalid.size){
+    count=invalid.size;
+    for(const c of next.chapters)if(c.id!==id&&c.children?.some(child=>invalid.has(child)))invalid.add(c.id);
+  }
+  next.chapters=next.chapters.filter(c=>c.id===id||!invalid.has(c.id));
+  next.revision++;return next;
+}
+function planSignature(level,children){
+  return level+'|'+children.join('|');
+}
+export function deleteGeneratedChapter(memory,chat,id){
+  const original=validChapters(memory,chat).find(c=>c.id===id);
+  if(!original)throw Error('总结源已变化');
+  const next=structuredClone(memory);
+  pruneDependentChapters(next,id);
+  next.skippedPlans??=[];
+  const signature=planSignature(original.level,original.children);
+  if(!next.skippedPlans.includes(signature))next.skippedPlans.push(signature);
+  next.skippedPlans=next.skippedPlans.slice(-100);
+  next.revision++;return next;
 }
 export function addManual(memory,kind,entry) {
   if(!['summaries','items','scenes','characters'].includes(kind))throw Error('未知记录类型');
@@ -241,8 +333,11 @@ export function nextCompression(memory,chat,settings){
     const roots=compressionRoots(memory,chat,level);
     const keep=level===0?Math.max(0,Math.trunc(Number(opts.leafKeepRecent??3))):0;
     if(roots.length<threshold+keep)continue;
-    const batch=roots.slice(0,threshold);
-    return {level:level+1,children:batch.map(x=>x.id),rows:batch};
+    for(let offset=0;offset+threshold<=roots.length-keep;offset+=threshold){
+      const batch=roots.slice(offset,offset+threshold),children=batch.map(x=>x.id);
+      if(memory.skippedPlans?.includes(planSignature(level+1,children)))continue;
+      return {level:level+1,children,rows:batch};
+    }
   }
   return null;
 }

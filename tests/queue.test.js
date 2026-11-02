@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {SummaryQueue} from '../queue.js';
-import {defaultSettings,readMemory,pendingFloors} from '../core.js';
+import {defaultSettings,freshMemory,writeMemory,readMemory,pendingFloors,messageFingerprint} from '../core.js';
 function fixture(){
  let id='chat-1',saved=0;
  const ctx={
@@ -137,4 +137,27 @@ test('user message edited during API request cannot commit stale summary or hide
    assert.equal(Boolean(f.ctx.chat[0].is_system),false);
    assert.equal(Boolean(f.ctx.chat[1].is_system),false);
  }finally{globalThis.fetch=oldFetch;}
+});
+
+test('deleting a hidden generated leaf restores excluded AI and corresponding user text',async()=>{
+ const {deleteGeneratedLeaf,userFingerprint,commitLeaf,normalizeDelta}=await import('../core.js');
+ const f=fixture(),chat=[];
+ for(let i=0;i<5;i++)chat.push({is_user:true,mes:'用户输入 '+i},{is_user:false,mes:'AI 剧情 '+i,swipe_id:0});
+ f.ctx.chat=chat;
+ let saves=0;f.ctx.saveChat=async()=>{saves++;};
+ let mem=commitLeaf(freshMemory(),1,messageFingerprint(chat[1]),
+   normalizeDelta({summary:'第一段摘要'}),userFingerprint(chat,1));
+ writeMemory(f.ctx,mem);
+ chat[0].is_system=true;chat[0].extra={story_memory_hidden:true};
+ chat[1].is_system=true;chat[1].extra={story_memory_hidden:true};
+ mem=deleteGeneratedLeaf(readMemory(f.ctx),chat,1);
+ writeMemory(f.ctx,mem);
+ const q=new SummaryQueue(()=>f.ctx,()=>f.settings,()=>{});
+ const restored=await q.restoreStale();
+ assert.equal(restored,2);
+ assert.equal(saves,1);
+ assert.equal(chat[0].is_system,false);
+ assert.equal(chat[1].is_system,false);
+ assert.ok(!pendingFloors(readMemory(f.ctx),chat).includes(1),
+   'deleted floor remains skipped until explicit retry or source change');
 });

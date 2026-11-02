@@ -1,4 +1,4 @@
-import {defaultSettings,pendingFloors,automaticFloorIndices,deriveState,injectionText,validChapters} from './core.js';
+import {defaultSettings,formatStoryTime,messageFingerprint,userFingerprint,pendingFloors,automaticFloorIndices,deriveState,injectionText,validChapters} from './core.js';
 import {DEFAULT_SUMMARY_PROMPT,DEFAULT_CHAPTER_PROMPT,DEFAULT_RESUMMARY2_PROMPT,DEFAULT_OVERVIEW_PROMPT,effectiveSummaryPrompt,parseExtraBody,parseExcluded,parseHeaderLines} from './api.js';
 
 const NAV=[['summaries','摘要','book'],['items','物品','package'],['scenes','场景','pin'],['characters','角色','users'],['settings','设置','sliders']];
@@ -124,7 +124,7 @@ export function mountUI(api){
     const mark=el('span','sm-empty-icon');mark.append(svg(icon));
     box.append(mark,el('strong','',titleText),el('p','',description));body.append(box);
   }
-  function recordCards(heading,entries,extract){
+  function recordCards(heading,entries,extract,editorFactory=null){
     if(!entries.length)return;
     body.append(sectionTitle(heading));
     const list=el('div','sm-record-list');
@@ -132,9 +132,46 @@ export function mountUI(api){
       const value=extract(entry),details=el('details','sm-record');
       const head=el('summary','sm-record-head'),label=el('span','sm-record-label',value.title);
       head.append(label,svg('chevron'));
-      details.append(head,el('p','sm-record-text',value.description||'暂无详情'));list.append(details);
+      details.append(head,el('p','sm-record-text',value.description||'暂无详情'));
+      if(editorFactory)details.append(editorFactory(entry));
+      list.append(details);
     }
     body.append(list);
+  }
+
+  function generatedEditor(entry,type){
+    const panel=el('div','sm-record-edit sm-generated-editor');
+    const editor=textArea(type==='floor'?entry.summary:entry.summary,5,'修改剧情摘要…');
+    editor.setAttribute('aria-label',type==='floor'?'编辑楼层摘要':'编辑分层总结');
+    panel.append(el('span','sm-field-label','摘要正文'),editor);
+    let time=null,location=null;
+    if(type==='floor'){
+      const gridRow=el('div','sm-grid');
+      time=field('故事时间',formatStoryTime(entry.time||''),'text','示例：2026/07/11 · 06:22–06:29；时间不明可留空');
+      location=field('地点',entry.location||'');
+      gridRow.append(time.wrapper,location.wrapper);panel.append(gridRow);
+      panel.append(el('small','sm-help','修改剧情正文不会自动重写物品、场景和角色状态；删除整条摘要则会撤销该楼层的状态变化。'));
+    }
+    const actions=el('div','sm-row-actions');
+    actions.append(button('删除',()=>{
+      const message=type==='floor'
+        ?'删除此楼层摘要及其物品、场景、角色状态变化？依赖它的上层总结也会失效。原始聊天不会删除，此楼层暂不自动重新摘要。'
+        :'删除这条分层总结？原始楼层摘要仍保留，依赖此总结的更高层总结将失效。';
+      if(!window.confirm(message))return;
+      try{
+        if(type==='floor')api.deleteLeaf(entry.sourceIndex);
+        else api.deleteChapter(entry.id);
+        showNotice('摘要已删除');
+      }catch(e){showNotice(e.message||'删除失败');}
+    },'sm-btn sm-btn-danger'));
+    actions.append(button('保存修改',()=>{
+      try{
+        if(type==='floor')api.editLeaf(entry.sourceIndex,{summary:editor.value,time:time.input.value,location:location.input.value});
+        else api.editChapter(entry.id,editor.value);
+        showNotice('修改已保存，相关高层总结已更新状态');
+      }catch(e){showNotice(e.message||'保存失败');}
+    },'sm-btn sm-btn-primary'));
+    panel.append(actions);return panel;
   }
   function manualList(kind,entries){
     if(!entries?.length)return;
@@ -199,9 +236,22 @@ export function mountUI(api){
       pendingBox.append(heading,strip);body.append(pendingBox);
     }
     const valid=validChapters(mem,ctx?.chat||[]);
-    recordCards('分层剧情回顾',valid.slice().reverse(),c=>({title:'L'+c.level+' · '+(c.level===1?'首次总结':c.level===2?'二次总结':'高层总结')+' · '+c.children.length+' 段',description:c.summary}));
+    recordCards('分层剧情回顾',valid.slice().reverse(),c=>({title:'L'+c.level+' · '+(c.level===1?'阶段总结':c.level===2?'二次总结':'高层总结')+' · '+c.children.length+' 段',description:c.summary}),c=>generatedEditor(c,'chapter'));
     const state=deriveState(mem,ctx?.chat||[]);
-    recordCards('剧情时间线',state.timeline.slice(-50).reverse(),e=>({title:'#'+e.sourceIndex+(e.time?' · '+e.time:''),description:e.summary}));
+    recordCards('剧情时间线',state.timeline.slice(-50).reverse(),e=>({title:'#'+e.sourceIndex+(e.time?' · '+formatStoryTime(e.time):''),description:e.summary}),e=>generatedEditor(e,'floor'));
+    const skipped=Object.keys(mem.skippedFloors||{}).map(Number).filter(i=>
+      mem.skippedFloors[i]?.fingerprint===messageFingerprint(ctx?.chat?.[i])&&
+      mem.skippedFloors[i]?.userFingerprint===userFingerprint(ctx.chat,i)).sort((a,b)=>a-b);
+    if(skipped.length){
+      const panel=el('div','sm-pending-box'),heading=el('div','sm-pending-heading');
+      heading.append(el('strong','','已删除／跳过的摘要'),el('span','sm-pending-count',skipped.length+' 楼'));
+      const row=el('div','sm-pills');
+      for(const i of skipped)row.append(button('#'+i+' · 重新摘要',()=>{
+        try{api.resumeLeaf(i);api.queue.enqueue([i]);showNotice('已重新加入摘要队列');}
+        catch(e){showNotice(e.message||'恢复失败');}
+      },'sm-pill'));
+      panel.append(heading,row);body.append(panel);
+    }
     manualList('summaries',mem.manual.summaries);
     if(!state.timeline.length&&!mem.manual.summaries.length)emptyState('book','还没有剧情摘要','可以先添加记忆，或配置副 API 后整理楼层。');
     manualInput('summaries');
@@ -489,7 +539,7 @@ export function mountUI(api){
     },'sm-btn sm-btn-primary');
     const reset=button('恢复默认',()=>{
       const ask=window.confirm(
-        '要恢复默认设置吗？\n\n会重置摘要、注入、向量检索参数和自定义提示词。\n保留独立摘要与向量 API 的地址、密钥、模型及附加参数。\n已生成的剧情记忆不会删除。'
+        '要恢复默认设置吗？\n\n会重置摘要、注入、向量检索参数和自定义提示词。\n保留 API 地址与密钥、摘要 API 模型及附加参数。Embedding 模型将恢复 BAAI/bge-m3。\n已生成的剧情记忆不会删除。'
       );
       if(!ask)return;
       try{
@@ -506,7 +556,7 @@ export function mountUI(api){
           ...defaults.vector,
           url:cfg.vector.url||defaults.vector.url,
           key:cfg.vector.key||'',
-          model:cfg.vector.model||defaults.vector.model
+          model:defaults.vector.model
         };
         api.saveSettings(defaults);
         render();

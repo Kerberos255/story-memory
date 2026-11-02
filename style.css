@@ -295,3 +295,11 @@
   .sm-summary-control-grid{grid-template-columns:1fr}
   .sm-level-bottom small{display:none}
 }
+
+/* AI-generated summaries can be revised in place without leaving the timeline. */
+.sm-generated-editor{border-top:1px solid var(--edge);padding-top:14px;display:grid;gap:9px}
+.sm-generated-editor>.sm-field-label{font-weight:630;color:var(--fg-weak)}
+.sm-generated-editor .sm-grid{margin:0;gap:10px}
+.sm-generated-editor .sm-textarea{min-height:100px}
+.sm-generated-editor .sm-help{display:block;font-size:11px;color:var(--muted);line-height:1.6}
+.sm-generated-editor .sm-row-actions{margin-top:3px}

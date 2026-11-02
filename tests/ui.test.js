@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mountUI} from '../ui.js';
-import {freshMemory,defaultSettings} from '../core.js';
+import {freshMemory,defaultSettings,commitLeaf,normalizeDelta,messageFingerprint,userFingerprint,editGeneratedLeaf,deleteGeneratedLeaf,editGeneratedChapter,deleteGeneratedChapter} from '../core.js';
 import {readFileSync} from 'node:fs';
 
 class FakeElement{
@@ -212,6 +212,7 @@ test('summary settings expose delayed floor count and automatic hiding toggle',(
  assert.equal(saved.summary.delayFloors,4);
  assert.equal(saved.summary.autoHide,true);
 }));
+
 test('restore defaults keeps connection secrets and remembers, asks before replacing settings',()=>withUI(body=>{
   const previousWindow=globalThis.window;
   const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
@@ -251,7 +252,7 @@ test('restore defaults keeps connection secrets and remembers, asks before repla
     assert.equal(cfg.api.model,'synthetic-model');
     assert.deepEqual(cfg.api.headers,{'X-Example':'synthetic'});
     assert.equal(cfg.vector.key,'synthetic-vector-value');
-    assert.equal(cfg.vector.model,'custom-embedding');
+    assert.equal(cfg.vector.model,'BAAI/bge-m3');
   }finally{globalThis.window=previousWindow;}
 }));
 
@@ -295,3 +296,62 @@ test('dark and light palettes have clear foreground and neutral cool backgrounds
  assert.match(css,/@media\(max-width:610px\)/);
  assert.doesNotMatch(css,/#f8f7f4|#fffefa|#d3a569/i);
 });
+
+test('AI-generated timeline allows editing time, place, text and confirmed deletion',()=>withUI(body=>{
+ const oldWindow=globalThis.window;
+ let confirmDelete=true;
+ globalThis.window={confirm:()=>confirmDelete};
+ try{
+   const ctx={chat:[{is_user:true,mes:'用户问路'},{is_user:false,mes:'角色进入小巷',swipe_id:0}],getCurrentChatId:()=> 'local-test'};
+   let memory=commitLeaf(freshMemory(),1,messageFingerprint(ctx.chat[1]),
+     normalizeDelta({summary:'旧摘要',time:'2026/7/11 星期六 06:22-06:29',location:'巷口',
+       items:[{op:'add',name:'钥匙',owner:'角色'}]}),userFingerprint(ctx.chat,1));
+   const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+     queue:{busy:false,enqueueMissing(){}},
+     editLeaf:(index,patch)=>{memory=editGeneratedLeaf(memory,ctx.chat,index,patch);},
+     deleteLeaf:index=>{memory=deleteGeneratedLeaf(memory,ctx.chat,index);}
+   });
+   view.open();const dialog=body.children[0].shadow.children[1];
+   const editor=find(dialog,x=>x.className?.includes('sm-generated-editor'));
+   assert.ok(editor,'AI-generated card should have editor');
+   const story=walk(editor).find(x=>x.tag==='textarea');
+   const time=walk(editor).find(x=>x.tag==='input'&&x.value.startsWith('2026'));
+   assert.ok(time);
+   assert.equal(time.value,'2026/07/11 · 06:22–06:29');
+   story.value='人工更正后的剧情';
+   time.value='2026/7/11 06:22-06:29';
+   find(editor,x=>x.tag==='button'&&x.textContent==='保存修改').fire('click');
+   assert.equal(memory.leaves[1].summary,'人工更正后的剧情');
+   assert.equal(memory.leaves[1].time,'2026/07/11 · 06:22–06:29');
+   confirmDelete=false;
+   find(editor,x=>x.tag==='button'&&x.textContent==='删除').fire('click');
+   assert.ok(memory.leaves[1],'cancelled delete must not modify memory');
+   confirmDelete=true;
+   find(editor,x=>x.tag==='button'&&x.textContent==='删除').fire('click');
+   assert.equal(memory.leaves[1],undefined);
+   assert.equal(ctx.chat[1].mes,'角色进入小巷','original chat text must be preserved');
+ }finally{globalThis.window=oldWindow;}
+}));
+test('generated L1 chapter exposes manual editing and deletion controls',()=>withUI(body=>{
+ const oldWindow=globalThis.window;globalThis.window={confirm:()=>true};
+ try{
+   const ctx={chat:[{is_user:false,mes:'AI剧情'}],getCurrentChatId:()=> 'local-test'};
+   let memory=commitLeaf(freshMemory(),0,messageFingerprint(ctx.chat[0]),normalizeDelta({summary:'楼层'}));
+   memory.chapters.push({id:'chapter:1',level:1,children:['floor:0'],summary:'阶段总结'});
+   const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+     queue:{busy:false,enqueueMissing(){}},
+     editChapter:(id,summary)=>{memory=editGeneratedChapter(memory,ctx.chat,id,summary);},
+     deleteChapter:id=>{memory=deleteGeneratedChapter(memory,ctx.chat,id);}
+   });
+   view.open();const dialog=body.children[0].shadow.children[1];
+   const editor=find(dialog,x=>x.className?.includes('sm-generated-editor'));
+   assert.ok(editor);
+   const area=walk(editor).find(x=>x.tag==='textarea');
+   area.value='改写过的 L1 阶段总结';
+   find(editor,x=>x.tag==='button'&&x.textContent==='保存修改').fire('click');
+   assert.equal(memory.chapters[0].summary,'改写过的 L1 阶段总结');
+   find(editor,x=>x.tag==='button'&&x.textContent==='删除').fire('click');
+   assert.equal(memory.chapters.length,0);
+   assert.ok(memory.leaves[0],'underlying fact stays');
+ }finally{globalThis.window=oldWindow;}
+}));
