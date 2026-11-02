@@ -73,7 +73,7 @@ export class SummaryQueue{
   }
   async maybeChapter(key){
     const ctx=this.getContext(),settings=this.getSettings();
-    if(!ctx||key!==this.currentKey()||!settings.api?.model)return;
+    if(!ctx||key!==this.currentKey()||(settings.api?.mode!=='main'&&!settings.api?.model))return;
     const memory=readMemory(ctx),min=Math.max(3,Math.min(30,Number(settings.summary?.chapterEvery)||8));
     if((memory.chapterPauseUntil||0)>Date.now())return;
     const covered=new Set(validChapters(memory,ctx.chat).flatMap(c=>c.children||[]));
@@ -108,7 +108,7 @@ export class SummaryQueue{
     if(chapters.length<4)return;
     const controller=new AbortController();this.abort=controller;
     try{
-      const content=await requestChat(cfg.api,buildChapterMessages(chapters,cfg),ctx,controller.signal);
+      const content=await requestChat(cfg.api,buildChapterMessages(chapters,cfg,'overview'),ctx,controller.signal);
       if(key!==this.currentKey()||controller.signal.aborted)return;
       const current=this.getContext(),next=readMemory(current);
       const ids=new Set(validChapters(next,current.chat).map(c=>c.id));

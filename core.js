@@ -4,10 +4,10 @@ export const SETTINGS_KEY = 'story_memory_settings_v1';
 
 export function defaultSettings() {
   return {
-    enabled: true, autoSummary: false, api: {name:'副 API',url:'',model:'',headers:{},exclude:[],include:{},maxTokens:4096,timeout:90,temperature:0.2},
+    enabled: true, autoSummary: false, api: {name:'摘要 API',mode:'main',url:'',key:'',model:'',headers:{},exclude:[],include:{},maxTokens:4096,timeout:90,temperature:0.2},
     summary: {keepRecent:6,chapterEvery:8,retry:1,maxInputChars:16000},
     injection: {summary:true,inventory:true,scenes:true,characters:true,vector:false,budget:4500},
-    prompts: {summary:'',chapter:''},
+    prompts: {summary:'',summaryFull:'',chapter:'',overview:''},
     vector: {enabled:false,source:'siliconflow',model:'Qwen/Qwen3-Embedding-8B',topK:5,threshold:0.35}
   };
 }

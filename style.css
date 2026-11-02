@@ -152,9 +152,34 @@
 .sm-kv-row{display:grid;grid-template-columns:minmax(0,.85fr) minmax(0,1.4fr) 29px;gap:8px;align-items:center}
 .sm-kv-remove{height:30px;width:29px;display:grid;place-items:center;padding:0;background:none;border:0;color:var(--muted);font-size:20px;border-radius:7px}
 .sm-kv-remove:hover{color:var(--danger);background:var(--hover)}
-.sm-advanced{border:1px solid var(--edge);background:var(--surface-alt);border-radius:8px;overflow:hidden}
-.sm-advanced summary{padding:12px 13px;cursor:pointer;font-weight:590;font-size:12px}
-.sm-advanced .sm-textarea{margin:0 12px 12px;width:calc(100% - 24px)}
+.sm-dialog [hidden]{display:none!important}
+.sm-select{cursor:pointer;appearance:auto}
+.sm-advanced{border:1px solid var(--edge);background:var(--surface-alt);border-radius:9px;overflow:hidden}
+.sm-advanced-title{display:flex;align-items:center;justify-content:space-between;gap:8px;list-style:none;
+  padding:12px 14px;cursor:pointer;font-weight:630;font-size:12px;color:var(--fg-weak)}
+.sm-advanced-title::-webkit-details-marker{display:none}
+.sm-advanced-title svg{width:15px;height:15px;transition:transform .18s;color:var(--muted)}
+.sm-advanced[open] .sm-advanced-title svg{transform:rotate(180deg)}
+.sm-advanced-content{padding:3px 14px 16px;display:grid;gap:0;background:var(--surface)}
+.sm-extra-section{padding:14px 0 16px;display:grid;gap:9px}
+.sm-extra-section+.sm-extra-section{border-top:1px solid var(--edge)}
+.sm-extra-section .sm-subheading{display:flex;flex-direction:column;align-items:flex-start;gap:2px;margin:0}
+.sm-extra-section .sm-subheading h3{font-size:12px;font-weight:660}
+.sm-extra-section .sm-subheading p{font-size:11px}
+.sm-extra-section .sm-textarea{font-size:12px;min-height:62px;font-family:ui-monospace,"Cascadia Code",Consolas,monospace;line-height:1.5;resize:vertical}
+.sm-prompt-group{border:1px solid var(--edge);border-radius:9px;background:var(--surface-alt);overflow:hidden}
+.sm-prompt-group+.sm-prompt-group{margin-top:-3px}
+.sm-prompt-head{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;list-style:none;padding:12px 14px}
+.sm-prompt-head::-webkit-details-marker{display:none}
+.sm-prompt-title{display:flex;flex-direction:column;gap:2px}
+.sm-prompt-title strong{font-weight:640;font-size:12px}
+.sm-prompt-title small{font-size:11px;color:var(--muted)}
+.sm-prompt-head svg{width:15px;height:15px;color:var(--muted);transition:transform .18s}
+.sm-prompt-group[open] .sm-prompt-head svg{transform:rotate(180deg)}
+.sm-prompt-content{display:grid;gap:12px;border-top:1px solid var(--edge);padding:13px}
+.sm-prompt-content textarea{min-height:190px;font-size:12px;white-space:pre-wrap}
+.sm-prompt-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.sm-prompt-toolbar .sm-btn{min-height:30px}
 .sm-settings-save{position:sticky;bottom:-45px;z-index:2;margin:8px -35px -45px;display:flex;align-items:center;justify-content:space-between;gap:12px;
   background:var(--bg);border-top:1px solid var(--edge);padding:13px 35px 17px;justify-content:flex-end}
 .sm-save-note{color:var(--muted);font-size:11px}
@@ -184,3 +209,9 @@
   .sm-dialog[open]{animation:none}
   .sm-dialog *{transition:none!important}
 }
+
+/* Model picker and refresh control share a single line in the summary API form. */
+.sm-model-line{display:grid;grid-template-columns:minmax(0,1fr) 38px;gap:8px;align-items:center}
+.sm-model-line .sm-input{min-width:0}
+.sm-refresh-models{width:38px;height:37px;min-height:37px;padding:0;font-size:22px;line-height:1;flex-shrink:0}
+.sm-model-line [hidden]{display:none!important}

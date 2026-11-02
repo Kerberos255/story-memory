@@ -1,6 +1,7 @@
 import {defaultSettings,SETTINGS_KEY,readMemory,writeMemory,addManual,editManual,removeManual,injectionText} from './core.js';
 import {SummaryQueue} from './queue.js';
-import {indexSummaries,recall} from './vector-st.js';
+import {listSummaryModels} from './api.js';
+import {indexSummaries,recall,saveSiliconFlowSecret} from './vector-st.js';
 import {mountUI} from './ui.js';
 // Pure private ST extension. No external scripts, analytics or dependencies.
 let ui,queue,lastChat='',settings;
@@ -43,6 +44,9 @@ function edit(kind,id,text){
 function remove(kind,id){
   const ctx=getContext();if(!ctx)throw Error('聊天未就绪');
   writeMemory(ctx,removeManual(readMemory(ctx),kind,id));afterMemoryChanged();
+}
+async function fetchSummaryModels(config){
+  return listSummaryModels(getContext(),config);
 }
 async function indexNow(){
   const ctx=getContext();if(!ctx)throw Error('聊天未就绪');
@@ -89,7 +93,7 @@ function init(){
   getSettings();
   queue=new SummaryQueue(getContext,getSettings,afterMemoryChanged);
   ui=mountUI({context:getContext,memory:()=>readMemory(getContext()),settings:getSettings,saveSettings,
-    addManual:add,editManual:edit,removeManual:remove,queue,indexNow});
+    addManual:add,editManual:edit,removeManual:remove,queue,indexNow,saveVectorKey:value=>saveSiliconFlowSecret(getContext(),value),fetchSummaryModels});
   lastChat=ctx.getCurrentChatId?.()||'';
   const onChatChanged=()=>{const now=getContext()?.getCurrentChatId?.()||'';if(now!==lastChat){lastChat=now;queue.cancel();}inject();ui?.refresh();};
   ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED,onChatChanged);

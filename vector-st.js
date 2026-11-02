@@ -59,3 +59,20 @@ export async function recall(ctx,memory,settings,query,signal){
     .filter(x=>whitelist.has(Number(x.hash)))
     .map(x=>({text:String(x.text||'').slice(0,8000),index:Number(x.index)}));
 }
+
+/**
+ * Save a user-entered embedding key directly into SillyTavern's server-side
+ * secret vault. The extension never reads existing secrets or persists the
+ * submitted value in its own settings.
+ */
+export async function saveSiliconFlowSecret(ctx,value){
+  if(!ctx?.getRequestHeaders)throw Error('酒馆尚未就绪');
+  if(typeof value!=='string'||!value.trim())throw Error('请输入密钥');
+  const response=await fetch('/api/secrets/write',{
+    method:'POST',
+    headers:ctx.getRequestHeaders(),
+    body:JSON.stringify({key:'api_key_siliconflow',value:value.trim()})
+  });
+  if(!response.ok)throw Error('密钥未保存，请检查酒馆权限或接口');
+  return true;
+}

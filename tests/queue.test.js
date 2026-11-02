@@ -9,7 +9,7 @@ function fixture(){
    chatMetadata:{},getCurrentChatId:()=>id,getRequestHeaders:()=>({'Content-Type':'application/json'}),saveMetadataDebounced:()=>{saved++;}
  };
  const settings=defaultSettings();settings.summary.retry=0;settings.summary.chapterEvery=30;
- settings.api={...settings.api,url:'http://127.0.0.1:9999/v1',model:'test-model'};
+ settings.api={...settings.api,mode:'custom',url:'http://127.0.0.1:9999/v1',key:'synthetic-test-only',model:'test-model'};
  return {ctx,settings,setChatId:newId=>{id=newId;},getSaved:()=>saved};
 }
 async function idle(queue){

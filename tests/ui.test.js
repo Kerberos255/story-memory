@@ -28,7 +28,11 @@ function withUI(fn){
   const storage=new Map(),body=new FakeElement('body');
   globalThis.document={body,createElement:tag=>new FakeElement(tag),createElementNS:(_,tag)=>new FakeElement(tag)};
   globalThis.localStorage={getItem:key=>storage.get(key)||null,setItem:(key,value)=>storage.set(key,value)};
-  try{return fn(body,storage);}finally{globalThis.document=old.document;globalThis.localStorage=old.localStorage;}
+  const cleanup=()=>{globalThis.document=old.document;globalThis.localStorage=old.localStorage;};
+  let result;
+  try{result=fn(body,storage);}catch(error){cleanup();throw error;}
+  if(result&&typeof result.then==='function')return result.finally(cleanup);
+  cleanup();return result;
 }
 test('dark mode is default; sun and moon toggle persist without rebuilding form',()=>withUI((body,storage)=>{
   const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
@@ -64,3 +68,102 @@ test('theme CSS is scoped and does not rely on OS theme overriding user choice',
  assert.match(css,/\.sm-dialog::backdrop/);
  assert.doesNotMatch(css,/prefers-color-scheme/);
 });
+
+test('API settings expose follow-main mode and group all advanced parameters',()=>withUI((body)=>{
+ const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
+ let saved=null;
+ const api={context:()=>ctx,memory:freshMemory,settings:defaultSettings,queue:{busy:false,enqueueMissing(){}},saveSettings:x=>saved=x};
+ const view=mountUI(api);view.open();
+ const dialog=body.children[0].shadow.children[1];
+ find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+ const extras=find(dialog,x=>x.className?.includes('sm-extra'));
+ assert.ok(extras);
+ assert.equal(walk(extras).filter(x=>x.className==='sm-extra-section').length,3);
+ for(const name of ['包含主体参数','排除主体参数','包含请求标头'])
+   assert.ok(walk(extras).some(x=>x.textContent===name));
+ const options=walk(dialog).filter(x=>x.tag==='option');
+ assert.ok(options.some(x=>x.value==='main'&&x.textContent==='跟随主 API'));
+ const select=find(dialog,x=>x.tag==='select');
+ select.value='main';select.fire('change');
+ assert.equal(find(dialog,x=>x.className==='sm-form-stack')?.hidden,true);
+ const submit=find(dialog,x=>x.textContent==='保存设置'&&x.tag==='button');
+ assert.ok(submit);submit.fire('click');
+ assert.equal(saved.api.mode,'main');
+ assert.deepEqual(saved.api.headers,{});
+}));
+test('prompt editor displays full defaults for summary, chapter, and overview',()=>withUI((body)=>{
+ const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
+ const view=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,queue:{busy:false,enqueueMissing(){}}});view.open();
+ const dialog=body.children[0].shadow.children[1];
+ find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+ const groups=walk(dialog).filter(x=>x.className==='sm-prompt-group');
+ assert.equal(groups.length,3);
+ const values=groups.map(g=>walk(g).find(x=>x.tag==='textarea')?.value||'');
+ assert.ok(values[0].includes('characters'));
+ assert.ok(values[0].includes('items'));
+ assert.ok(values[0].includes('scenes'));
+ assert.ok(values[1].includes('章节'));
+ assert.ok(values[2].includes('长期'));
+ assert.ok(walk(dialog).some(x=>x.textContent==='SiliconFlow API Key'));
+}));
+
+test('independent summary API form shows URL, key and model without changing main API',()=>withUI(body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
+  let saved;
+  const api={context:()=>ctx,memory:freshMemory,settings:defaultSettings,queue:{busy:false,enqueueMissing(){}},
+    saveSettings:x=>{saved=x;},fetchSummaryModels:async()=>['model-a']};
+  const view=mountUI(api);view.open();
+  const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  assert.ok(walk(dialog).some(x=>x.textContent==='摘要 API'));
+  const mode=find(dialog,x=>x.tag==='select'&&x.children.some(y=>y.value==='custom'));
+  assert.equal(mode.value,'main');
+  const custom=find(dialog,x=>x.className==='sm-form-stack'&&walk(x).some(y=>y.textContent==='API 地址'));
+  assert.equal(custom.hidden,true);
+  mode.value='custom';mode.fire('change');
+  assert.equal(custom.hidden,false);
+  const key=walk(custom).find(x=>x.tag==='input'&&x.type==='password');
+  assert.ok(key);key.value='synthetic-key';
+  const url=walk(custom).find(x=>x.tag==='input'&&x.type==='url');
+  url.value='https://summary.example.invalid/v1';
+  const model=walk(custom).find(x=>x.tag==='input'&&x.placeholder==='填写模型 ID 或刷新获取');
+  model.value='model-a';
+  const submit=find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置');
+  submit.fire('click');
+  assert.equal(saved.api.mode,'custom');
+  assert.equal(saved.api.url,'https://summary.example.invalid/v1');
+  assert.equal(saved.api.model,'model-a');
+  assert.equal(saved.api.key,'synthetic-key');
+  assert.equal(saved.api.secretId,undefined);
+}));
+
+test('model refresh replaces entry with a selectable list and keeps the chosen model',()=>withUI(async body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''},cfg=defaultSettings();
+  let saved;
+  const view=mountUI({context:()=>ctx,memory:freshMemory,settings:()=>cfg,
+    queue:{busy:false,enqueueMissing(){}},
+    fetchSummaryModels:async ({url,key})=>{
+      assert.equal(url,'https://summary.example.invalid/v1');
+      assert.equal(key,'synthetic-key');
+      return ['model-a','model-b'];
+    },
+    saveSettings:value=>{saved=value;}
+  });
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  const mode=find(dialog,x=>x.tag==='select'&&x.children.some(y=>y.value==='custom'));
+  mode.value='custom';mode.fire('change');
+  const custom=find(dialog,x=>x.className==='sm-form-stack'&&walk(x).some(y=>y.textContent==='API 地址'));
+  walk(custom).find(x=>x.tag==='input'&&x.type==='url').value='https://summary.example.invalid/v1';
+  walk(custom).find(x=>x.tag==='input'&&x.type==='password').value='synthetic-key';
+  const refresh=find(dialog,x=>x.attrs['aria-label']==='刷新模型列表');
+  assert.ok(refresh);refresh.fire('click');
+  await new Promise(resolve=>setImmediate(resolve));
+  const picker=find(dialog,x=>x.attrs['aria-label']==='选择摘要模型');
+  assert.equal(picker.hidden,false);
+  assert.ok(picker.children.some(x=>x.value==='model-b'));
+  picker.value='model-b';picker.fire('change');
+  assert.equal(picker.hidden,true);
+  find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+  assert.equal(saved.api.model,'model-b');
+}));
