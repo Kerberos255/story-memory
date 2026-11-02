@@ -199,12 +199,12 @@ test('summary settings expose delayed floor count and automatic hiding toggle',(
    queue:{busy:false,enqueueMissing(){}},saveSettings:x=>{saved=x;}});
  view.open();const dialog=body.children[0].shadow.children[1];
  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
- const delay=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='延迟自动摘要（AI 楼层）'));
+ const delay=walk(dialog).find(x=>x.className==='sm-summary-number-card'&&walk(x).some(y=>y.textContent==='延迟摘要'));
  assert.ok(delay);
  const delayInput=walk(delay).find(x=>x.tag==='input');
  assert.equal(delayInput.value,'3');
  delayInput.value='4';
- const toggle=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='摘要成功后自动隐藏楼层'));
+ const toggle=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='摘要完成后自动隐藏'));
  assert.ok(toggle);const checkbox=walk(toggle).find(x=>x.tag==='input');
  assert.equal(checkbox.checked,false);
  checkbox.checked=true;
@@ -212,3 +212,86 @@ test('summary settings expose delayed floor count and automatic hiding toggle',(
  assert.equal(saved.summary.delayFloors,4);
  assert.equal(saved.summary.autoHide,true);
 }));
+test('restore defaults keeps connection secrets and remembers, asks before replacing settings',()=>withUI(body=>{
+  const previousWindow=globalThis.window;
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
+  let cfg=defaultSettings();
+  cfg.api.mode='custom';
+  cfg.api.key='synthetic-not-a-real-key';
+  cfg.api.url='https://example.invalid/v1';
+  cfg.api.model='synthetic-model';
+  cfg.api.headers={'X-Example':'synthetic'};
+  cfg.api.temperature=.2;cfg.api.maxTokens=4096;
+  cfg.vector.key='synthetic-vector-value';cfg.vector.model='custom-embedding';
+  cfg.summary.autoHide=true;cfg.summary.delayFloors=6;
+  cfg.prompts.summaryFull='Custom prompt';
+  let consent=false,saves=0;
+  globalThis.window={confirm:()=>consent};
+  try{
+    const ui=mountUI({context:()=>ctx,memory:freshMemory,settings:()=>cfg,
+      queue:{busy:false,enqueueMissing(){}},
+      saveSettings:value=>{cfg=structuredClone(value);saves++;}
+    });
+    ui.open();
+    const dialog=body.children[0].shadow.children[1];
+    find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+    const reset=find(dialog,x=>x.attrs['data-testid']==='reset-settings');
+    assert.ok(reset);
+    reset.fire('click');assert.equal(saves,0,'cancelled reset must not save');
+    consent=true;reset.fire('click');
+    assert.equal(saves,1);
+    assert.equal(cfg.api.temperature,0);
+    assert.equal(cfg.api.maxTokens,8192);
+    assert.equal(cfg.summary.autoHide,false);
+    assert.equal(cfg.summary.delayFloors,3);
+    assert.equal(cfg.prompts.summaryFull,'');
+    assert.equal(cfg.api.mode,'custom');
+    assert.equal(cfg.api.key,'synthetic-not-a-real-key');
+    assert.equal(cfg.api.url,'https://example.invalid/v1');
+    assert.equal(cfg.api.model,'synthetic-model');
+    assert.deepEqual(cfg.api.headers,{'X-Example':'synthetic'});
+    assert.equal(cfg.vector.key,'synthetic-vector-value');
+    assert.equal(cfg.vector.model,'custom-embedding');
+  }finally{globalThis.window=previousWindow;}
+}));
+
+test('compact compression strip edits three independent thresholds and retained L0 count',()=>withUI(body=>{
+ const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};let saved;
+ const view=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+   queue:{busy:false,enqueueMissing(){}},saveSettings:s=>{saved=s;}});
+ view.open();
+ const dialog=body.children[0].shadow.children[1];
+ find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+ const strips=walk(dialog).filter(x=>x.className==='sm-level-strip');
+ assert.equal(strips.length,1,'one shared level strip, not three independent cards');
+ const cells=walk(strips[0]).filter(x=>x.className==='sm-level-cell');
+ assert.equal(cells.length,3);
+ const thresholds=[
+   ['阶段总结触发阈值','10'],['二次总结触发阈值','5'],['高层总结触发阈值','2']
+ ];
+ for(const [label,value] of thresholds){
+   const input=walk(strips[0]).find(x=>x.tag==='input'&&x.attrs['aria-label']===label);
+   assert.ok(input,label);input.value=value;
+ }
+ const keep=find(dialog,x=>x.className==='sm-level-keep');
+ assert.ok(keep);
+ const keepInput=walk(keep).find(x=>x.tag==='input');
+ assert.ok(keepInput);keepInput.value='4';
+ const advanced=find(dialog,x=>x.className==='sm-summary-advanced');
+ assert.ok(advanced);
+ assert.equal(advanced.open,false,'advanced settings stay collapsed');
+ find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+ assert.equal(saved.summary.leafBatchThreshold,10);
+ assert.equal(saved.summary.resummaryThreshold,5);
+ assert.equal(saved.summary.higherResummaryThreshold,2);
+ assert.equal(saved.summary.leafKeepRecent,4);
+}));
+test('dark and light palettes have clear foreground and neutral cool backgrounds',()=>{
+ const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+ assert.match(css,/\.sm-dialog\{--bg:#101722;/);
+ assert.match(css,/--fg:#f4f6fc;/);
+ assert.match(css,/\.sm-dialog\[data-theme=light\]\{[\s\S]*?--bg:#f3f6fb;/);
+ assert.match(css,/\.sm-level-strip\{display:grid;grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+ assert.match(css,/@media\(max-width:610px\)/);
+ assert.doesNotMatch(css,/#f8f7f4|#fffefa|#d3a569/i);
+});

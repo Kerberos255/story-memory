@@ -1,4 +1,4 @@
-import {pendingFloors,automaticFloorIndices,deriveState,injectionText,validChapters} from './core.js';
+import {defaultSettings,pendingFloors,automaticFloorIndices,deriveState,injectionText,validChapters} from './core.js';
 import {DEFAULT_SUMMARY_PROMPT,DEFAULT_CHAPTER_PROMPT,DEFAULT_RESUMMARY2_PROMPT,DEFAULT_OVERVIEW_PROMPT,effectiveSummaryPrompt,parseExtraBody,parseExcluded,parseHeaderLines} from './api.js';
 
 const NAV=[['summaries','摘要','book'],['items','物品','package'],['scenes','场景','pin'],['characters','角色','users'],['settings','设置','sliders']];
@@ -312,30 +312,83 @@ export function mountUI(api){
       modeWrap,modeTip,customFields
     ]));
 
-    const recent=field('保留最近正文（AI 楼层）',cfg.summary.keepRecent,'number',
-      '始终保留在主对话上下文中，不自动隐藏；按 AI 回复数计算，不含用户消息。');
-    const delay=field('延迟自动摘要（AI 楼层）',cfg.summary.delayFloors??3,'number',
-      '默认 3：最新 3 个 AI 楼层暂不自动摘要，生成第 4 楼时才处理更早的楼层。手动补摘不受此限制。');
-    const auto=switchRow('自动摘要',cfg.autoSummary,'每次 AI 回复完成后，自动整理已离开延迟窗口的待摘要楼层。');
-    const hide=switchRow('摘要成功后自动隐藏楼层',cfg.summary.autoHide??false,
-      '仅隐藏摘要完整且有效、离开保护窗口的 AI 楼层及对应用户消息。关闭本选项不自动恢复已隐藏内容，可使用酒馆 /unhide 恢复。');
-    const leafBatch=field('首次总结阈值（L0 → L1）',cfg.summary.leafBatchThreshold??cfg.summary.chapterEvery??12,'number');
-    const leafKeep=field('L0 最近摘要不合并（条）',cfg.summary.leafKeepRecent??3,'number');
-    const second=field('二次总结阈值（L1 → L2）',cfg.summary.resummaryThreshold??6,'number');
-    const higher=field('高层总结阈值（L2+）',cfg.summary.higherResummaryThreshold??3,'number');
+    // Keep settings compact: one auto-summary panel and one three-column compression strip.
+    const auto=switchRow('自动摘要',cfg.autoSummary,'只处理已离开延迟窗口的楼层');
+    const hide=switchRow('摘要完成后自动隐藏',cfg.summary.autoHide??false,
+      '仅隐藏确认已摘要的旧楼层，原文仍可恢复');
+    const recent=field('保留正文',cfg.summary.keepRecent,'number');
+    const delay=field('延迟摘要',cfg.summary.delayFloors??3,'number');
+    recent.input.min='0';recent.input.max='50';delay.input.min='0';delay.input.max='50';
+    recent.input.setAttribute('aria-label','保留正文（AI 楼层）');
+    delay.input.setAttribute('aria-label','延迟摘要（AI 楼层）');
+    const autoPanel=el('section','sm-summary-panel');
+    const autoHead=el('div','sm-summary-head');
+    autoHead.append(el('strong','','自动整理'),el('small','','控制整理时机与正文保留'));
+    const autoGrid=el('div','sm-summary-control-grid');
+    for(const [entry,description] of [
+      [delay,'最近 AI 楼层暂不摘要'],[recent,'始终保留在上下文']
+    ]){
+      const card=el('div','sm-summary-number-card');
+      const label=el('div','sm-summary-number-copy');
+      label.append(el('strong','',entry===delay?'延迟摘要':'保留正文'),el('small','',description));
+      const inputWrap=el('div','sm-summary-input'),unit=el('span','sm-summary-unit','楼');
+      inputWrap.append(entry.input,unit);card.append(label,inputWrap);
+      autoGrid.append(card);
+    }
+    const hideNote=el('p','sm-summary-note','仅排除已成功摘要、离开保护窗口的旧楼层。');
+    autoPanel.append(autoHead,auto.wrapper,autoGrid,hide.wrapper,hideNote);
+
+    function levelSetting(level,name,description,value){
+      const panel=el('div','sm-level-cell');
+      const heading=el('div','sm-level-heading');
+      heading.append(el('span','sm-level-badge',level),el('strong','',name));
+      const lower=el('div','sm-level-bottom');
+      lower.append(el('small','',description));
+      const control=el('label','sm-level-input');
+      control.setAttribute('aria-label',name+'触发阈值');
+      const input=el('input');input.type='number';input.min='0';input.max='100';
+      input.value=String(value);input.setAttribute('aria-label',name+'触发阈值');
+      control.append(input,el('span','','条'));
+      lower.append(control);
+      panel.append(heading,lower);
+      return {panel,input};
+    }
+    const leafBatch=levelSetting('L1','阶段总结','合并楼层摘要',cfg.summary.leafBatchThreshold??cfg.summary.chapterEvery??12);
+    const second=levelSetting('L2','二次总结','融合多个阶段',cfg.summary.resummaryThreshold??6);
+    const higher=levelSetting('L3+','高层总结','浓缩长期主线',cfg.summary.higherResummaryThreshold??3);
+    const leafKeep=field('最近 L0 摘要暂不合并',cfg.summary.leafKeepRecent??3,'number');
+    leafKeep.input.min='0';leafKeep.input.max='50';
+    const compression=el('section','sm-summary-panel');
+    const compHead=el('div','sm-summary-head');
+    compHead.append(el('strong','','分层压缩'),el('small','','逐级融合旧摘要，保留原始记忆'));
+    const pipeline=el('div','sm-level-path');
+    for(const token of ['L0 楼层摘要','→','L1 阶段总结','→','L2 二次总结','→','L3+ 长期记忆']){
+      pipeline.append(el('span',token.includes('→')?'sm-level-arrow':'',token));
+    }
+    const levelStrip=el('div','sm-level-strip');
+    levelStrip.append(leafBatch.panel,second.panel,higher.panel);
+    const keepRow=el('div','sm-level-keep');
+    keepRow.append(el('span','','最近 L0 摘要暂不合并'));
+    const keepControl=el('label','sm-level-input');
+    keepControl.setAttribute('aria-label','最近 L0 摘要暂不合并');
+    keepControl.append(leafKeep.input,el('span','','条'));
+    keepRow.append(keepControl);
+    compression.append(compHead,pipeline,levelStrip,keepRow);
+
     const sourceLimit=field('单次正文上限（字符）',cfg.summary.maxInputChars,'number');
     const retries=field('网络失败重试次数',cfg.summary.retry,'number');
-    const autoHint=el('p','sm-help','自动隐藏只在摘要成功后执行，不会删除聊天记录。最近保留数量与延迟数量以较大值为保护窗口；摘要失败或内容变更时不会隐藏。');
-    box.append(accordion('summary','摘要设置','自动整理、延迟摘要、楼层隐藏与多级压缩',[
-      sectionTitle('自动整理','控制何时摘要，以及哪些原文可以从模型上下文排除'),
-      auto.wrapper,grid(delay.wrapper,recent.wrapper),hide.wrapper,autoHint,
-      sectionTitle('分层压缩','只合并旧摘要，保留底层记忆；阈值填 0 可关闭对应层级'),
-      grid(leafBatch.wrapper,leafKeep.wrapper),grid(second.wrapper,higher.wrapper),
-      sectionTitle('质量与稳定','限制单次材料长度，避免无效请求和重复尝试'),
-      grid(sourceLimit.wrapper,retries.wrapper)
+    const advanced=el('details','sm-summary-advanced'),advancedHead=el('summary','sm-summary-advanced-head');
+    const advancedCopy=el('span','sm-summary-advanced-copy');
+    advancedCopy.append(el('strong','','高级选项'),el('small','','正文限制、网络重试'));
+    advancedHead.append(advancedCopy,svg('chevron'));
+    const advancedBody=el('div','sm-summary-advanced-body');
+    advancedBody.append(grid(sourceLimit.wrapper,retries.wrapper));
+    advanced.append(advancedHead,advancedBody);
+    box.append(accordion('summary','摘要设置','自动整理、延迟摘要、楼层隐藏与分层压缩',[
+      autoPanel,compression,advanced
     ]));
 
-        const flags=[['summary','剧情摘要'],['inventory','物品状态'],
+    const flags=[['summary','剧情摘要'],['inventory','物品状态'],
       ['scenes','场景地点'],['characters','人物档案'],['vector','向量召回']]
       .map(([key,label])=>[key,switchRow(label,cfg.injection[key])]);
     const flagGroup=el('div','sm-switch-grid');
@@ -434,7 +487,34 @@ export function mountUI(api){
         api.saveSettings(next);showNotice('设置已保存');
       }catch(e){showNotice('保存失败：'+e.message);}
     },'sm-btn sm-btn-primary');
-    saveBar.append(save);box.append(saveBar);body.append(box);
+    const reset=button('恢复默认',()=>{
+      const ask=window.confirm(
+        '要恢复默认设置吗？\n\n会重置摘要、注入、向量检索参数和自定义提示词。\n保留独立摘要与向量 API 的地址、密钥、模型及附加参数。\n已生成的剧情记忆不会删除。'
+      );
+      if(!ask)return;
+      try{
+        const defaults=defaultSettings();
+        defaults.api={
+          ...defaults.api,
+          mode:cfg.api.mode||defaults.api.mode,
+          url:cfg.api.url||'',key:cfg.api.key||'',model:cfg.api.model||'',
+          headers:structuredClone(cfg.api.headers||{}),
+          exclude:[...(cfg.api.exclude||[])],
+          include:structuredClone(cfg.api.include||{})
+        };
+        defaults.vector={
+          ...defaults.vector,
+          url:cfg.vector.url||defaults.vector.url,
+          key:cfg.vector.key||'',
+          model:cfg.vector.model||defaults.vector.model
+        };
+        api.saveSettings(defaults);
+        render();
+        showNotice('已恢复默认设置（保留 API 连接信息）');
+      }catch(e){showNotice('恢复失败：'+e.message);}
+    },'sm-btn');
+    reset.setAttribute('data-testid','reset-settings');
+    saveBar.append(reset,save);box.append(saveBar);body.append(box);
   }
   function renderPreview(){
     const ctx=api.context(),result=injectionText(api.memory(),ctx?.chat||[],api.settings());
