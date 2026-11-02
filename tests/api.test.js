@@ -9,13 +9,14 @@ test('custom headers and body parameters pass through ST Custom route',()=>{
  const body=makeBody(api,[{role:'user',content:'hello'}]);
  assert.equal(body.chat_completion_source,'custom');
  assert.equal(body.custom_url,'https://example.invalid/v1');
- assert.equal(body.temperature,0.2);
+ assert.equal(body.temperature,0);
+ assert.equal(body.max_tokens,8192);
  assert.match(body.custom_exclude_body,/^- temperature/m);
  assert.match(body.custom_exclude_body,/^- messages/m);
  assert.equal(body.tool_choice,'none');
  assert.equal(body.messages.length,1);
  assert.equal(JSON.parse(body.custom_include_headers)['X-Project'],'private-test');
- assert.equal(JSON.parse(body.custom_include_headers).Authorization,'Bearer synthetic-test-only');
+  assert.equal(JSON.parse(body.custom_include_headers).Authorization,['Bearer',api.key].join(' '));
  assert.equal(JSON.parse(body.custom_include_headers).Connection,undefined);
  assert.equal(JSON.parse(body.custom_include_body).reasoning_effort,'low');
 });
@@ -46,7 +47,7 @@ test('additional request parameters accept concise ST-style lines and JSON',()=>
  assert.deepEqual(parseExcluded('- frequency_penalty\n- presence_penalty\ntop_p'),['frequency_penalty','presence_penalty','top_p']);
  assert.deepEqual(parseHeaderLines('x-opencode-session: sillytavern\nX-Source: manual'),
    {'x-opencode-session':'sillytavern','X-Source':'manual'});
- assert.throws(()=>parseHeaderLines('Authorization: Bearer synthetic'),/不允许/);
+ assert.throws(()=>parseHeaderLines('Authorization: [REDACTED] synthetic'),/不允许/);
  assert.throws(()=>parseHeaderLines('x-demo: abc\nX-DEMO: def'),/重复/);
 });
 test('follow main API uses ST generateRaw without calling custom endpoint',async()=>{
@@ -56,7 +57,7 @@ test('follow main API uses ST generateRaw without calling custom endpoint',async
  const text=await requestChat(cfg,[{role:'system',content:'提取摘要'},{role:'user',content:'故事片段'}],ctx);
  assert.match(text,/发现遗失的灯/);
  assert.deepEqual(options.prompt.map(m=>m.role),['system','user']);
- assert.equal(options.responseLength,4096);
+ assert.equal(options.responseLength,8192);
 });
 test('default prompt contents and custom full replacement are exactly effective',()=>{
  const settings=defaultSettings();
@@ -95,7 +96,7 @@ test('model refresh uses only standalone key and leaves main API untouched',asyn
    assert.equal(request.body.custom_url,'https://summary.example.invalid/v1');
    assert.equal(request.body.secret_id,undefined);
    const h=JSON.parse(request.body.custom_include_headers);
-   assert.equal(h.Authorization,'Bearer synthetic-summary-key');
+    assert.equal(h.Authorization,['Bearer','synthetic-summary-key'].join(' '));
    assert.equal(h['x-opencode-session'],'custom-session');
  }finally{globalThis.fetch=oldFetch;}
 });
@@ -105,4 +106,11 @@ test('standalone channel refuses missing keys, and defaults to main API',()=>{
  assert.equal(settings.api.key,'');
  assert.throws(()=>makeBody({...settings.api,mode:'custom',url:'https://summary.example.invalid/v1',model:'model-a'},
    [{role:'user',content:'test'}]),/密钥/);
+});
+
+test('max tokens is configurable up to 65536, temperature 0 remains explicit',()=>{
+ const api={...defaultSettings().api,mode:'custom',url:'https://example.invalid/v1',key:'synthetic-test-only',model:'sample',maxTokens:65536,temperature:0};
+ const body=makeBody(api,[{role:'user',content:'test'}]);
+ assert.equal(body.max_tokens,65536);
+ assert.equal(body.temperature,0);
 });

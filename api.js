@@ -1,4 +1,5 @@
 // Minimal ST-proxied OpenAI compatible client. Never log headers, keys, or story text.
+import {floorUserMessages,leafValid} from './core.js';
 const HOP=new Set(['host','connection','cookie','set-cookie','content-length','transfer-encoding','proxy-authorization','proxy-authenticate','origin','referer','authorization','x-api-key','api-key','x-auth-token','x-goog-api-key']);
 export class ApiFault extends Error {
   constructor(message,status=0,code='api_error'){super(message);this.name='ApiFault';this.status=status;this.code=code;}
@@ -68,8 +69,8 @@ export function makeBody(channel,messages) {
       .filter(name=>typeof name==='string'&&/^[a-zA-Z_][\w.-]{0,99}$/.test(name))
       .map(name=>'- '+name).join('\n'),
     model:channel.model.trim(),messages,stream:false,tool_choice:'none',
-    temperature:Number.isFinite(Number(channel.temperature))?Number(channel.temperature):0.2,
-    max_tokens:Math.max(256,Math.min(32768,Math.trunc(Number(channel.maxTokens)||4096)))
+    temperature:Number.isFinite(Number(channel.temperature))?Number(channel.temperature):0,
+    max_tokens:Math.max(256,Math.min(65536,Math.trunc(Number(channel.maxTokens)??8192)||8192))
   };
   // ST applies custom_exclude_body against the final upstream request; do not remove
   // local body fields, which would bypass ST's actual parameter exclusion logic.
@@ -86,7 +87,7 @@ export async function requestChat(channel,messages,ctx,externalSignal) {
     if(externalSignal?.aborted)throw new ApiFault('请求已取消',0,'cancelled');
     if(typeof ctx?.generateRaw!=='function')throw new ApiFault('当前酒馆不支持跟随主 API');
     try{
-      const text=await ctx.generateRaw({prompt:messages,responseLength:Math.max(256,Math.min(32768,Number(channel.maxTokens)||4096))});
+      const text=await ctx.generateRaw({prompt:messages,responseLength:Math.max(256,Math.min(65536,Number(channel.maxTokens)||8192))});
       if(externalSignal?.aborted)throw new ApiFault('请求已取消',0,'cancelled');
       if(typeof text!=='string'||!text.trim())throw new ApiFault('主 API 返回空内容',502,'empty_response');
       return text.trim();
@@ -159,6 +160,11 @@ export const DEFAULT_CHAPTER_PROMPT=[
   '避免复述不重要的对白，不增添新情节，时间或人物认知不确定时保持原状。',
   '输出简洁、连续的中文章节正文，不要 JSON、思考过程或格式说明。'
 ].join('\n');
+export const DEFAULT_RESUMMARY2_PROMPT=[
+  '你是剧情二次总结整理员。将相邻章节总结进一步压缩，保留跨章节人物关系和关键因果。',
+  '保留对后续剧情有影响的承诺、行动后果、未解决悬念与物品状态；删除重复描述。',
+  '只使用提供的内容，不编造新事件。输出简洁的连续中文正文，不要 JSON。'
+].join('\n');
 export const DEFAULT_OVERVIEW_PROMPT=[
   '你是长期剧情档案整理员。将多个章节总结整合成长期剧情概览。',
   '保留贯穿故事的主线、关系转折、重要物品与线索、长期计划及未解决的伏笔。',
@@ -172,14 +178,13 @@ export function effectiveSummaryPrompt(settings) {
   return DEFAULT_SUMMARY_PROMPT+(extras?'\n\n【补充要求】\n'+extras:'');
 }
 export function effectiveChapterPrompt(settings,kind='chapter') {
-  return settings.prompts?.[kind]?.trim()||(kind==='overview'?DEFAULT_OVERVIEW_PROMPT:DEFAULT_CHAPTER_PROMPT);
+  return settings.prompts?.[kind]?.trim()||(kind==='overview'?DEFAULT_OVERVIEW_PROMPT:kind==='resummary2'?DEFAULT_RESUMMARY2_PROMPT:DEFAULT_CHAPTER_PROMPT);
 }
 export function buildSummaryMessages(index,chat,memory,settings){
   const msg=chat[index];
-  if(!msg||msg.is_user||msg.is_system||!msg.mes?.trim())throw new ApiFault('楼层不是有效 AI 剧情');
-  let preceding='';
-  for(let j=index-1;j>=0;j--){const u=chat[j];if(u?.is_user&&!u?.is_system){preceding=String(u.mes||'').slice(-6000);break;}}
-  const prior=Object.keys(memory.leaves||{}).map(Number).filter(i=>i<index).sort((a,b)=>a-b).slice(-3).map(i=>memory.leaves[i]?.summary||'').join('\n').slice(-3500);
+  if(!msg||msg.is_user||(msg.is_system&&!msg.extra?.story_memory_hidden)||!msg.mes?.trim())throw new ApiFault('楼层不是有效 AI 剧情');
+  const preceding=floorUserMessages(chat,index).map(u=>String(u.mes||'')).join('\n\n').slice(-6000);
+  const prior=Object.keys(memory.leaves||{}).map(Number).filter(i=>i<index&&leafValid(memory,chat,i)).sort((a,b)=>a-b).slice(-3).map(i=>memory.leaves[i]?.summary||'').join('\n').slice(-3500);
   const maxChars=Math.max(2000,Math.min(30000,Number(settings.summary?.maxInputChars)||16000));
   const source='【本轮用户输入】\n'+preceding+'\n\n【本轮 AI 剧情】\n'+String(msg.mes).slice(-maxChars);
   const instruction=effectiveSummaryPrompt(settings).slice(0,14000);
@@ -187,7 +192,7 @@ export function buildSummaryMessages(index,chat,memory,settings){
 }
 export function buildChapterMessages(entries,settings,kind='chapter'){
   const rule=effectiveChapterPrompt(settings,kind);
-  return [{role:'system',content:rule},{role:'user',content:entries.map(e=>e.summary).join('\n\n').slice(0,25000)}];
+  return [{role:'system',content:rule},{role:'user',content:entries.map((e,i)=>'['+(i+1)+'] '+(e.time?'('+e.time+') ':'')+e.summary).join('\n\n').slice(0,25000)}];
 }
 
 /** Fetch remote models through ST's Custom proxy using only this channel's API key. */

@@ -1,5 +1,5 @@
-import {pendingFloors,deriveState,injectionText,validChapters} from './core.js';
-import {DEFAULT_SUMMARY_PROMPT,DEFAULT_CHAPTER_PROMPT,DEFAULT_OVERVIEW_PROMPT,effectiveSummaryPrompt,parseExtraBody,parseExcluded,parseHeaderLines} from './api.js';
+import {pendingFloors,automaticFloorIndices,deriveState,injectionText,validChapters} from './core.js';
+import {DEFAULT_SUMMARY_PROMPT,DEFAULT_CHAPTER_PROMPT,DEFAULT_RESUMMARY2_PROMPT,DEFAULT_OVERVIEW_PROMPT,effectiveSummaryPrompt,parseExtraBody,parseExcluded,parseHeaderLines} from './api.js';
 
 const NAV=[['summaries','摘要','book'],['items','物品','package'],['scenes','场景','pin'],['characters','角色','users'],['settings','设置','sliders']];
 const ICONS={
@@ -74,7 +74,7 @@ export function mountUI(api){
   topActions.append(themeButton,close);top.append(brand,topActions);
   const layout=el('div','sm-layout'),nav=el('nav','sm-nav'),body=el('main','sm-content');
   layout.append(nav,body);dialog.append(top,layout);
-  let active=false,page='summaries',notice='',settingsOpen=new Set(['api']);
+  let active=false,page='summaries',notice='',settingsOpen=new Set();
   let theme='dark';
   try{theme=localStorage.getItem('story-memory-theme')==='light'?'light':'dark';}catch{}
   const updateTheme=()=>{
@@ -176,23 +176,30 @@ export function mountUI(api){
   }
   function renderSummary(){
     const ctx=api.context(),mem=api.memory(),pending=pendingFloors(mem,ctx?.chat||[]);
+    const cfg=api.settings(),ready=automaticFloorIndices(mem,ctx?.chat||[],cfg.summary?.delayFloors??3);
+    const deferred=new Set(pending.filter(index=>!ready.includes(index)));
     const action=button(api.queue.busy?'正在整理':'批量补摘',()=>api.queue.enqueueMissing(80),'sm-btn sm-btn-primary');
     action.disabled=Boolean(api.queue.busy);
     title('剧情摘要','时间线、章节与重要事件',action);
     const metrics=el('div','sm-metrics');
-    for(const [count,label] of [[Object.keys(mem.leaves).length,'已摘要'],[pending.length,'待整理'],[validChapters(mem,ctx?.chat||[]).length,'章节']]){
+    for(const [count,label] of [[Object.keys(mem.leaves).length,'已摘要'],[ready.length,'可自动整理'],[deferred.size,'延迟中'],[validChapters(mem,ctx?.chat||[]).length,'已压缩']]){
       const item=el('div','sm-metric');item.append(el('span','sm-metric-number',count),el('span','sm-metric-label',label));metrics.append(item);
     }
     body.append(metrics);
     if(pending.length){
       const pendingBox=el('section','sm-pending-box'),heading=el('div','sm-pending-heading');
       heading.append(el('strong','', '待整理楼层'),el('span','sm-pending-count',pending.length+' 楼'));
+      if(deferred.size)heading.append(el('span','sm-muted-note','其中 '+deferred.size+' 楼暂缓自动摘要'));
       const strip=el('div','sm-pills');
-      for(const i of pending.slice(-24))strip.append(button('#'+i,()=>api.queue.enqueue([i]),'sm-pill'));
+      for(const i of pending.slice(-24)){
+        const pill=button('#'+i,()=>api.queue.enqueue([i]),'sm-pill'+(deferred.has(i)?' is-deferred':''));
+        pill.title=deferred.has(i)?'延迟窗口内，点击仍可手动补摘':'点击手动补摘';
+        strip.append(pill);
+      }
       pendingBox.append(heading,strip);body.append(pendingBox);
     }
     const valid=validChapters(mem,ctx?.chat||[]);
-    recordCards('章节回顾',valid.slice().reverse(),c=>({title:c.level===2?'长期概览':'章节总结 · '+c.children.length+' 段',description:c.summary}));
+    recordCards('分层剧情回顾',valid.slice().reverse(),c=>({title:'L'+c.level+' · '+(c.level===1?'首次总结':c.level===2?'二次总结':'高层总结')+' · '+c.children.length+' 段',description:c.summary}));
     const state=deriveState(mem,ctx?.chat||[]);
     recordCards('剧情时间线',state.timeline.slice(-50).reverse(),e=>({title:'#'+e.sourceIndex+(e.time?' · '+e.time:''),description:e.summary}));
     manualList('summaries',mem.manual.summaries);
@@ -240,8 +247,10 @@ export function mountUI(api){
     modeWrap.append(modeLabel,mode);
     const modeTip=el('p','sm-help','使用酒馆当前连接和模型生成摘要。');
     const apiUrl=field('API 地址',cfg.api.url,'url');
-    const apiKey=field('API 密钥',cfg.api.key||'','password');
-    apiKey.input.autocomplete='new-password';
+    const credentialLabel = 'API 密钥';
+    const credentialInput = field(credentialLabel, '', 'password');
+    credentialInput.input.value = cfg.api.key || '';
+    credentialInput.input.autocomplete='new-password';
     const modelWrap=el('div','sm-field'),modelLabel=el('span','sm-field-label','模型');
     const modelLine=el('div','sm-model-line'),modelInput=el('input','sm-input');
     modelInput.type='text';modelInput.value=cfg.api.model||'';modelInput.placeholder='填写模型 ID 或刷新获取';
@@ -251,7 +260,7 @@ export function mountUI(api){
       refreshModels.disabled=true;refreshModels.title='正在获取模型列表';
       try{
         const found=await api.fetchSummaryModels({
-          url:apiUrl.input.value,key:apiKey.input.value,
+          url:apiUrl.input.value,key:credentialInput.input.value,
           headers:parseHeaderLines(headers.value)
         });
         if(!found.length){showNotice('模型列表为空，可手动填写模型 ID');return;}
@@ -272,9 +281,10 @@ export function mountUI(api){
     });
     modelLine.append(modelInput,modelPicker,refreshModels);modelWrap.append(modelLabel,modelLine);
     const temp=field('温度',cfg.api.temperature,'number');
-    const max=field('最大输出 Tokens',cfg.api.maxTokens,'number');
+    const max=field('最大输出 Tokens',cfg.api.maxTokens,'number','上限 65536；具体可用上限以所选模型为准。');
+    max.input.max='65536';max.input.min='256';
     const customFields=el('div','sm-form-stack');
-    customFields.append(apiUrl.wrapper,apiKey.wrapper,modelWrap,grid(temp.wrapper,max.wrapper));
+    customFields.append(apiUrl.wrapper,credentialInput.wrapper,modelWrap,grid(temp.wrapper,max.wrapper));
     const updateMode=()=>{const custom=mode.value==='custom';customFields.hidden=!custom;modeTip.hidden=custom;};
     mode.addEventListener('change',updateMode);updateMode();
 
@@ -302,58 +312,66 @@ export function mountUI(api){
       modeWrap,modeTip,customFields
     ]));
 
-    const recent=field('最近保留楼层',cfg.summary.keepRecent,'number');
-    const chapter=field('每章合并摘要数',cfg.summary.chapterEvery,'number');
-    const sourceLimit=field('单次摘要正文上限（字符）',cfg.summary.maxInputChars,'number');
+    const recent=field('保留最近正文（AI 楼层）',cfg.summary.keepRecent,'number',
+      '始终保留在主对话上下文中，不自动隐藏；按 AI 回复数计算，不含用户消息。');
+    const delay=field('延迟自动摘要（AI 楼层）',cfg.summary.delayFloors??3,'number',
+      '默认 3：最新 3 个 AI 楼层暂不自动摘要，生成第 4 楼时才处理更早的楼层。手动补摘不受此限制。');
+    const auto=switchRow('自动摘要',cfg.autoSummary,'每次 AI 回复完成后，自动整理已离开延迟窗口的待摘要楼层。');
+    const hide=switchRow('摘要成功后自动隐藏楼层',cfg.summary.autoHide??false,
+      '仅隐藏摘要完整且有效、离开保护窗口的 AI 楼层及对应用户消息。关闭本选项不自动恢复已隐藏内容，可使用酒馆 /unhide 恢复。');
+    const leafBatch=field('首次总结阈值（L0 → L1）',cfg.summary.leafBatchThreshold??cfg.summary.chapterEvery??12,'number');
+    const leafKeep=field('L0 最近摘要不合并（条）',cfg.summary.leafKeepRecent??3,'number');
+    const second=field('二次总结阈值（L1 → L2）',cfg.summary.resummaryThreshold??6,'number');
+    const higher=field('高层总结阈值（L2+）',cfg.summary.higherResummaryThreshold??3,'number');
+    const sourceLimit=field('单次正文上限（字符）',cfg.summary.maxInputChars,'number');
     const retries=field('网络失败重试次数',cfg.summary.retry,'number');
-    const auto=switchRow('自动摘要新楼层',cfg.autoSummary,'新回复结束后整理，失败不修改剧情状态');
-    box.append(accordion('summary','摘要设置','整理频率、章节合并及失败重试',[
-      auto.wrapper,grid(recent.wrapper,chapter.wrapper),grid(sourceLimit.wrapper,retries.wrapper)
+    const autoHint=el('p','sm-help','自动隐藏只在摘要成功后执行，不会删除聊天记录。最近保留数量与延迟数量以较大值为保护窗口；摘要失败或内容变更时不会隐藏。');
+    box.append(accordion('summary','摘要设置','自动整理、延迟摘要、楼层隐藏与多级压缩',[
+      sectionTitle('自动整理','控制何时摘要，以及哪些原文可以从模型上下文排除'),
+      auto.wrapper,grid(delay.wrapper,recent.wrapper),hide.wrapper,autoHint,
+      sectionTitle('分层压缩','只合并旧摘要，保留底层记忆；阈值填 0 可关闭对应层级'),
+      grid(leafBatch.wrapper,leafKeep.wrapper),grid(second.wrapper,higher.wrapper),
+      sectionTitle('质量与稳定','限制单次材料长度，避免无效请求和重复尝试'),
+      grid(sourceLimit.wrapper,retries.wrapper)
     ]));
 
-    const flags=[['summary','剧情摘要'],['inventory','物品状态'],
+        const flags=[['summary','剧情摘要'],['inventory','物品状态'],
       ['scenes','场景地点'],['characters','人物档案'],['vector','向量召回']]
       .map(([key,label])=>[key,switchRow(label,cfg.injection[key])]);
     const flagGroup=el('div','sm-switch-grid');
-    flagGroup.append(...flags.map(([,s])=>s.wrapper));
+    flagGroup.append(...flags.map(([,x])=>x.wrapper));
     const budget=field('注入预算（估算 Tokens）',cfg.injection.budget,'number');
     box.append(accordion('inject','注入设置','控制发送给主模型的记忆类型',[
-      flagGroup,budget.wrapper,button('查看注入预览',()=>{page='preview';render();},'sm-btn')
+      flagGroup,budget.wrapper,
+      button('查看注入预览',()=>{page='preview';render();},'sm-btn')
     ]));
 
     const vector=switchRow('启用向量检索',cfg.vector.enabled);
+    const vectorUrl=field('Embedding API 地址',cfg.vector.url||'https://api.siliconflow.cn/v1','url');
+    const vectorKey=field('Embedding API 密钥',cfg.vector.key||'','password',
+      '独立于酒馆主 API 和酒馆的 SiliconFlow 密钥；保存在本插件设置，请保护配置备份。');
+    vectorKey.input.autocomplete='new-password';
     const vectorModel=field('Embedding 模型',cfg.vector.model);
     const topK=field('召回数量 Top-K',cfg.vector.topK,'number');
     const threshold=field('相似度阈值',cfg.vector.threshold,'number');
-    const secretField=field('SiliconFlow API Key','','password',
-      '保存在酒馆统一密钥库，不进入插件设置；保存会替换酒馆现有的 SiliconFlow Key。');
-    secretField.input.autocomplete='new-password';
-    const keySave=button('保存密钥',async()=>{
-      const secret=secretField.input.value;
-      if(!secret.trim()){showNotice('请输入 SiliconFlow API Key');return;}
-      keySave.disabled=true;
-      try{
-        await api.saveVectorKey(secret);
-        secretField.input.value='';
-        showNotice('密钥已保存到 SillyTavern 密钥管理');
-      }catch{showNotice('保存失败，请检查酒馆密钥接口');}
-      finally{keySave.disabled=false;}
-    },'sm-btn');
+    const vectorHelp=el('p','sm-help','直接向 Embedding 接口发送请求，不更改酒馆密钥。服务商需允许浏览器跨域（CORS）；索引缓存在当前浏览器，换电脑可重新建立。');
     const vectorActions=el('div','sm-row-actions');
     vectorActions.append(button('更新当前聊天索引',async()=>{
       showNotice('正在更新向量索引…');
       try{const count=await api.indexNow();showNotice('已更新 '+count+' 条记忆');}
-      catch{showNotice('更新失败，请检查向量模型和密钥');}
+      catch(e){showNotice(e?.message||'索引失败，请检查 API 与跨域设置');}
     },'sm-btn'));
-    box.append(accordion('vector','向量记忆','SiliconFlow Embedding 与历史剧情检索',[
-      vector.wrapper,grid(vectorModel.wrapper,topK.wrapper),threshold.wrapper,
-      sectionTitle('API 密钥','保存至酒馆服务器的密钥管理'),secretField.wrapper,keySave,vectorActions
+    box.append(accordion('vector','向量记忆','独立 Embedding API 与相关剧情召回',[
+      vector.wrapper,vectorUrl.wrapper,vectorKey.wrapper,vectorModel.wrapper,
+      grid(topK.wrapper,threshold.wrapper),vectorHelp,vectorActions
     ]));
+
 
     const promptConfigs=[
       {key:'summaryFull',name:'楼层摘要与状态提取',desc:'同时整理摘要、物品、场景、角色与计划',def:DEFAULT_SUMMARY_PROMPT,initial:effectiveSummaryPrompt(cfg)},
-      {key:'chapter',name:'章节总结',desc:'合并相邻楼层摘要',def:DEFAULT_CHAPTER_PROMPT,initial:cfg.prompts.chapter||DEFAULT_CHAPTER_PROMPT},
-      {key:'overview',name:'长期剧情概览',desc:'压缩多个章节，保留主线与伏笔',def:DEFAULT_OVERVIEW_PROMPT,initial:cfg.prompts.overview||DEFAULT_OVERVIEW_PROMPT}
+      {key:'chapter',name:'首次总结（L1）',desc:'将楼层摘要整理为章节',def:DEFAULT_CHAPTER_PROMPT,initial:cfg.prompts.chapter||DEFAULT_CHAPTER_PROMPT},
+      {key:'resummary2',name:'二次总结（L2）',desc:'进一步融合多条首次总结',def:DEFAULT_RESUMMARY2_PROMPT,initial:cfg.prompts.resummary2||DEFAULT_RESUMMARY2_PROMPT},
+      {key:'overview',name:'高层总结（L3+）',desc:'持续压缩旧剧情，保留长期主线',def:DEFAULT_OVERVIEW_PROMPT,initial:cfg.prompts.overview||DEFAULT_OVERVIEW_PROMPT}
     ];
     const promptEditors=new Map(),promptSections=[];
     for(const spec of promptConfigs){
@@ -377,29 +395,42 @@ export function mountUI(api){
         const next=structuredClone(cfg);
         next.enabled=enabled.input.checked;next.autoSummary=auto.input.checked;
         next.api.mode=mode.value==='main'?'main':'custom';
-        next.api.url=apiUrl.input.value.trim();next.api.key=apiKey.input.value.trim();
+        next.api.url=apiUrl.input.value.trim();next.api.key=credentialInput.input.value.trim();
         next.api.model=modelInput.value.trim();
-        next.api.temperature=Number(temp.input.value)||0;
-        next.api.maxTokens=Number(max.input.value)||4096;
+        next.api.temperature=Math.max(0,Math.min(2,Number(temp.input.value)||0));
+        next.api.maxTokens=Math.max(256,Math.min(65536,Number(max.input.value)||8192));
         next.api.include=parseExtraBody(included.value);
         next.api.exclude=parseExcluded(excluded.value);
         next.api.headers=parseHeaderLines(headers.value);
-        next.summary.keepRecent=Math.max(0,Math.min(30,Number(recent.input.value)||0));
-        next.summary.chapterEvery=Math.max(3,Math.min(30,Number(chapter.input.value)||8));
+        next.summary.keepRecent=Math.max(0,Math.min(50,Number(recent.input.value)||0));
+        next.summary.delayFloors=Math.max(0,Math.min(50,Number(delay.input.value)||0));
+        next.summary.autoHide=hide.input.checked;
+        next.summary.leafBatchThreshold=Math.max(0,Math.min(100,Number(leafBatch.input.value)||0));
+        next.summary.leafKeepRecent=Math.max(0,Math.min(50,Number(leafKeep.input.value)||0));
+        next.summary.resummaryThreshold=Math.max(0,Math.min(100,Number(second.input.value)||0));
+        next.summary.higherResummaryThreshold=Math.max(0,Math.min(100,Number(higher.input.value)||0));
+        delete next.summary.chapterEvery;
         next.summary.maxInputChars=Math.max(2000,Math.min(30000,Number(sourceLimit.input.value)||16000));
         next.summary.retry=Math.max(0,Math.min(2,Number(retries.input.value)||0));
         next.injection.budget=Number(budget.input.value)||4500;
         for(const [key,value] of flags)next.injection[key]=value.input.checked;
-        next.vector.enabled=vector.input.checked;next.vector.source='siliconflow';
+        next.vector.enabled=vector.input.checked;
+        next.vector.url=vectorUrl.input.value.trim();
+        next.vector.key=vectorKey.input.value.trim();
         next.vector.model=vectorModel.input.value.trim();
         next.vector.topK=Math.max(1,Math.min(10,Number(topK.input.value)||5));
         next.vector.threshold=Math.max(0,Math.min(1,Number(threshold.input.value)||0));
         next.prompts.summaryFull=promptEditors.get('summaryFull').value.trim();
         next.prompts.summary='';
         next.prompts.chapter=promptEditors.get('chapter').value.trim();
+        next.prompts.resummary2=promptEditors.get('resummary2').value.trim();
         next.prompts.overview=promptEditors.get('overview').value.trim();
-        if(!next.prompts.summaryFull)next.prompts.summaryFull='';
-        delete next.api.secretId;delete next.vector.key;delete next.vector.url;
+        // Unmodified defaults stay empty in settings, so later default improvements apply.
+        for(const [key,defaultText] of [['summaryFull',DEFAULT_SUMMARY_PROMPT],['chapter',DEFAULT_CHAPTER_PROMPT],
+          ['resummary2',DEFAULT_RESUMMARY2_PROMPT],['overview',DEFAULT_OVERVIEW_PROMPT]]){
+          if(next.prompts[key]===defaultText)next.prompts[key]='';
+        }
+        delete next.api.secretId;delete next.vector.source;
         api.saveSettings(next);showNotice('设置已保存');
       }catch(e){showNotice('保存失败：'+e.message);}
     },'sm-btn sm-btn-primary');

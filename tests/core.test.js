@@ -58,3 +58,109 @@ test('manual record deletion works without affecting other records',async()=>{
  assert.equal(next.manual.items[0].text,'青铜戒指');
  assert.equal(mem.manual.items.length,2);
 });
+
+test('multi-level compression preserves leaf sources and continues through L3+',async()=>{
+ const {nextCompression,commitCompression,validChapters,compressionRoots,recentAiStart}=await import('../core.js');
+ const cfg=defaultSettings();
+ cfg.summary.leafBatchThreshold=2;cfg.summary.leafKeepRecent=1;
+ cfg.summary.resummaryThreshold=2;cfg.summary.higherResummaryThreshold=2;
+ const chat=[],created=[];
+ let m=freshMemory();
+ for(let i=0;i<20;i++){
+   chat.push({is_user:true,mes:'输入 '+i},{is_user:false,mes:'剧情 '+i,swipe_id:0});
+   m=commitLeaf(m,2*i+1,messageFingerprint(chat[2*i+1]),event('第'+i+'条剧情'));
+ }
+ let count=0;
+ while(count++<45){
+   const plan=nextCompression(m,chat,cfg);
+   if(!plan)break;
+   created.push(plan.level);
+   m=commitCompression(m,chat,plan,'总结 L'+plan.level+' '+count);
+ }
+ assert.ok(created.includes(1),'L1 never created');
+ assert.ok(created.includes(2),'L2 never created');
+ assert.ok(created.includes(3),'L3 never created');
+ assert.equal(Object.keys(m.leaves).length,20,'lossless leaf storage');
+ assert.equal(validChapters(m,chat).length,m.chapters.length);
+ assert.ok(compressionRoots(m,chat,0).length>=1);
+ assert.equal(recentAiStart(chat,3),chat.length-5);
+ assert.equal(recentAiStart(chat,0),chat.length);
+ assert.ok(m.chapters.every(c=>c.children.length>=2));
+});
+test('compression rejects changed swipe and supports disabling each threshold',async()=>{
+ const {nextCompression,commitCompression}=await import('../core.js');
+ const chat=Array.from({length:6},(_,i)=>({is_user:false,mes:'场景'+i,swipe_id:0}));
+ let m=freshMemory();
+ for(let i=0;i<chat.length;i++)m=commitLeaf(m,i,messageFingerprint(chat[i]),event('剧情'+i));
+ const cfg=defaultSettings();cfg.summary.leafBatchThreshold=2;cfg.summary.leafKeepRecent=0;
+ const plan=nextCompression(m,chat,cfg);
+ assert.equal(plan.level,1);
+ chat[0].swipe_id=2;
+ assert.throws(()=>commitCompression(m,chat,plan,'不应保存的压缩'),/压缩源已变化/);
+ cfg.summary.leafBatchThreshold=0;
+ assert.equal(nextCompression(m,chat,cfg),null);
+});
+
+test('automatic summary delays the newest three AI replies and counts user messages correctly',async()=>{
+ const {automaticFloorIndices,hideReadyIndices,recentAiStart,userFingerprint,normalizeDelta,commitLeaf}=await import('../core.js');
+ const chat=[];
+ for(let i=0;i<5;i++)chat.push({is_user:true,mes:'用户'+i},
+   {is_user:false,mes:'AI'+i,swipe_id:0});
+ const cfg=defaultSettings(),mem0={version:1,leaves:{},chapters:[],manual:{summaries:[],items:[],scenes:[],characters:[]},tasks:{},revision:0};
+ assert.equal(recentAiStart(chat,3),5);
+ assert.deepEqual(automaticFloorIndices(mem0,chat,3),[1,3]);
+ assert.deepEqual(automaticFloorIndices(mem0,chat,0),[1,3,5,7,9]);
+ let mem=mem0;
+ for(let i of [1,3])mem=commitLeaf(mem,i,messageFingerprint(chat[i]),normalizeDelta({summary:'摘要 '+i}),userFingerprint(chat,i));
+ cfg.summary.autoHide=true;
+ assert.deepEqual(hideReadyIndices(mem,chat,cfg),[0,1,2,3]);
+ cfg.summary.autoHide=false;
+ assert.deepEqual(hideReadyIndices(mem,chat,cfg),[]);
+ cfg.summary.autoHide=true;
+ chat[3].swipe_id=1;
+ assert.deepEqual(hideReadyIndices(mem,chat,cfg),[0,1]);
+});
+test('hidden AI messages preserve leaf fingerprints; a manual unhide is respected',async()=>{
+ const {hideReadyIndices,userFingerprint,normalizeDelta,commitLeaf,automaticFloorIndices}=await import('../core.js');
+ const chat=[];
+ for(let i=0;i<5;i++)chat.push({is_user:true,mes:'对话'+i},{is_user:false,mes:'回复'+i,swipe_id:0});
+ let m=freshMemory();
+ m=commitLeaf(m,1,messageFingerprint(chat[1]),normalizeDelta({summary:'原始有效摘要'}),userFingerprint(chat,1));
+ const settings=defaultSettings();settings.summary.autoHide=true;
+ const [user,ai]=hideReadyIndices(m,chat,settings);
+ assert.deepEqual([user,ai],[0,1]);
+ chat[1].extra={story_memory_hidden:true};chat[1].is_system=true;
+ chat[0].extra={story_memory_hidden:true};chat[0].is_system=true;
+ assert.equal(messageFingerprint(chat[1]),m.leaves[1].fingerprint);
+ assert.ok(!automaticFloorIndices(m,chat,3).includes(1));
+ assert.equal(injectionText(m,chat,settings).includes('原始有效摘要'),true);
+ chat[1].is_system=false; // User performed /unhide
+ assert.ok(!hideReadyIndices(m,chat,settings).includes(1),'do not re-hide user-unhidden message');
+});
+
+test('edited user text invalidates leaf; oversized source cannot be auto-hidden',async()=>{
+ const {leafValid,userFingerprint,hideReadyIndices,staleHiddenIndices}=await import('../core.js');
+ const chat=[];
+ for(let i=0;i<5;i++)chat.push({is_user:true,mes:'用户 '+i},{is_user:false,mes:'回复 '+i});
+ let memory=freshMemory();
+ memory=commitLeaf(memory,1,messageFingerprint(chat[1]),normalizeDelta({summary:'旧剧情'}),userFingerprint(chat,1));
+ const cfg=defaultSettings();cfg.summary.autoHide=true;
+ assert.deepEqual(hideReadyIndices(memory,chat,cfg),[0,1]);
+ chat[0].mes='修改过的用户输入';
+ assert.equal(leafValid(memory,chat,1),false);
+ assert.deepEqual(pendingFloors(memory,chat).includes(1),true);
+ assert.deepEqual(hideReadyIndices(memory,chat,cfg),[]);
+ chat[0].mes='用户 0';
+ chat[0].is_system=true;chat[0].extra={story_memory_hidden:true};
+ chat[1].is_system=true;chat[1].extra={story_memory_hidden:true};
+ chat[1].mes='新剧情';
+ assert.deepEqual(staleHiddenIndices(memory,chat),[0,1]);
+ chat[1].mes='回复 0';
+ chat[0].is_system=false;chat[1].is_system=false;
+ chat[0].mes='超长'.repeat(3100);
+ memory=commitLeaf(memory,1,messageFingerprint(chat[1]),normalizeDelta({summary:'截断材料'}),userFingerprint(chat,1));
+ assert.deepEqual(hideReadyIndices(memory,chat,cfg),[]);
+ chat[0].mes='用户 0';chat[1].mes='超长'.repeat(9000);
+ memory=commitLeaf(memory,1,messageFingerprint(chat[1]),normalizeDelta({summary:'截断 AI'}),userFingerprint(chat,1));
+ assert.deepEqual(hideReadyIndices(memory,chat,cfg),[]);
+});

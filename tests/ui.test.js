@@ -97,14 +97,15 @@ test('prompt editor displays full defaults for summary, chapter, and overview',(
  const dialog=body.children[0].shadow.children[1];
  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
  const groups=walk(dialog).filter(x=>x.className==='sm-prompt-group');
- assert.equal(groups.length,3);
+ assert.equal(groups.length,4);
  const values=groups.map(g=>walk(g).find(x=>x.tag==='textarea')?.value||'');
  assert.ok(values[0].includes('characters'));
  assert.ok(values[0].includes('items'));
  assert.ok(values[0].includes('scenes'));
  assert.ok(values[1].includes('章节'));
- assert.ok(values[2].includes('长期'));
- assert.ok(walk(dialog).some(x=>x.textContent==='SiliconFlow API Key'));
+ assert.ok(values[2].includes('二次总结'));
+ assert.ok(values[3].includes('长期'));
+ assert.ok(walk(dialog).some(x=>x.textContent==='Embedding API 密钥'));
 }));
 
 test('independent summary API form shows URL, key and model without changing main API',()=>withUI(body=>{
@@ -166,4 +167,48 @@ test('model refresh replaces entry with a selectable list and keeps the chosen m
   assert.equal(picker.hidden,true);
   find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
   assert.equal(saved.api.model,'model-b');
+}));
+
+test('vector API settings are private to the plugin and save without ST secret calls',()=>withUI(body=>{
+ const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
+ let next;
+ const view=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+   queue:{busy:false,enqueueMissing(){}},saveSettings:value=>{next=value;}});
+ view.open();
+ const dialog=body.children[0].shadow.children[1];
+ find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+ const field=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='Embedding API 密钥'));
+ assert.ok(field);
+ const key=walk(field).find(x=>x.tag==='input');
+ assert.ok(key);key.value='synthetic-embedding-key';
+ find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+ assert.equal(next.vector.key,'synthetic-embedding-key');
+ assert.equal(next.vector.url,'https://api.siliconflow.cn/v1');
+ assert.equal(next.api.temperature,0);
+ assert.equal(next.api.maxTokens,8192);
+ assert.equal(next.summary.leafBatchThreshold,12);
+ assert.equal(next.summary.resummaryThreshold,6);
+ assert.equal(next.summary.higherResummaryThreshold,3);
+ assert.equal(next.prompts.resummary2,'','unmodified default must not be pinned');
+}));
+
+test('summary settings expose delayed floor count and automatic hiding toggle',()=>withUI(body=>{
+ const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
+ let saved;
+ const view=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+   queue:{busy:false,enqueueMissing(){}},saveSettings:x=>{saved=x;}});
+ view.open();const dialog=body.children[0].shadow.children[1];
+ find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+ const delay=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='延迟自动摘要（AI 楼层）'));
+ assert.ok(delay);
+ const delayInput=walk(delay).find(x=>x.tag==='input');
+ assert.equal(delayInput.value,'3');
+ delayInput.value='4';
+ const toggle=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='摘要成功后自动隐藏楼层'));
+ assert.ok(toggle);const checkbox=walk(toggle).find(x=>x.tag==='input');
+ assert.equal(checkbox.checked,false);
+ checkbox.checked=true;
+ find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+ assert.equal(saved.summary.delayFloors,4);
+ assert.equal(saved.summary.autoHide,true);
 }));

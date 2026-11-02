@@ -1,7 +1,7 @@
 import {defaultSettings,SETTINGS_KEY,readMemory,writeMemory,addManual,editManual,removeManual,injectionText} from './core.js';
 import {SummaryQueue} from './queue.js';
 import {listSummaryModels} from './api.js';
-import {indexSummaries,recall,saveSiliconFlowSecret} from './vector-st.js';
+import {indexSummaries,recall} from './vector-local.js';
 import {mountUI} from './ui.js';
 // Pure private ST extension. No external scripts, analytics or dependencies.
 let ui,queue,lastChat='',settings;
@@ -32,6 +32,7 @@ function inject(hits=[]){
 }
 function afterMemoryChanged(){
   inject();ui?.refresh();
+  void queue?.restoreStale().catch(()=>{});
 }
 function add(kind,text){
   const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
@@ -54,9 +55,10 @@ async function indexNow(){
 }
 async function onGeneration(){
   const ctx=getContext(),cfg=getSettings();
-  if(!cfg.enabled||!cfg.autoSummary||!ctx?.chat?.length)return;
-  const index=ctx.chat.length-1;
-  if(ctx.chat[index]&&!ctx.chat[index].is_user&&!ctx.chat[index].is_system)queue.enqueue([index]);
+  if(!cfg.enabled||!ctx?.chat?.length)return;
+  await queue.restoreStale();
+  await queue.hideCompleted();
+  if(cfg.autoSummary)queue.enqueueAutomatic(80);
 }
 async function generateInterceptor(_chat,_contextSize,_abort,type){
   if(['quiet','impersonate','continue'].includes(String(type||'').toLowerCase()))return;
@@ -93,7 +95,7 @@ function init(){
   getSettings();
   queue=new SummaryQueue(getContext,getSettings,afterMemoryChanged);
   ui=mountUI({context:getContext,memory:()=>readMemory(getContext()),settings:getSettings,saveSettings,
-    addManual:add,editManual:edit,removeManual:remove,queue,indexNow,saveVectorKey:value=>saveSiliconFlowSecret(getContext(),value),fetchSummaryModels});
+    addManual:add,editManual:edit,removeManual:remove,queue,indexNow,fetchSummaryModels});
   lastChat=ctx.getCurrentChatId?.()||'';
   const onChatChanged=()=>{const now=getContext()?.getCurrentChatId?.()||'';if(now!==lastChat){lastChat=now;queue.cancel();}inject();ui?.refresh();};
   ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED,onChatChanged);

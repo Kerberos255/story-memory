@@ -1,5 +1,5 @@
 import {ApiFault,requestChat,extractJSONObject,buildSummaryMessages,buildChapterMessages} from './api.js';
-import {readMemory,writeMemory,messageFingerprint,normalizeDelta,commitLeaf,pendingFloors,validChapters} from './core.js';
+import {readMemory,writeMemory,messageFingerprint,userFingerprint,leafValid,normalizeDelta,commitLeaf,pendingFloors,automaticFloorIndices,hideReadyIndices,staleHiddenIndices,nextCompression,commitCompression} from './core.js';
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 export class SummaryQueue{
   constructor(getContext,getSettings,onChange){
@@ -22,6 +22,98 @@ export class SummaryQueue{
     const ctx=this.getContext();if(!ctx)return;
     this.enqueue(pendingFloors(readMemory(ctx),ctx.chat).slice(0,Math.max(1,limit)));
   }
+  enqueueAutomatic(limit=100){
+    const ctx=this.getContext();if(!ctx||!this.getSettings().autoSummary)return;
+    this.enqueue(automaticFloorIndices(readMemory(ctx),ctx.chat,this.getSettings().summary?.delayFloors??3).slice(0,Math.max(1,limit)));
+  }
+  async restoreStale(key=this.currentKey()){
+    if(this.restoring)return this.restoring;
+    const task=async()=>{
+      const ctx=this.getContext();
+      if(!ctx||key!==this.currentKey()||typeof ctx.saveChat!=='function')return 0;
+      const indices=staleHiddenIndices(readMemory(ctx),ctx.chat||[]);
+      if(!indices.length)return 0;
+      const changed=[];
+      try{
+        for(const index of indices){
+          if(key!==this.currentKey())throw Error('聊天已切换');
+          const message=ctx.chat[index];
+          if(!message?.is_system||!message.extra?.story_memory_hidden)continue;
+          const beforeExtra=message.extra;
+          message.extra={...beforeExtra};delete message.extra.story_memory_hidden;
+          message.is_system=false;
+          const element=typeof document==='undefined'?null:document.querySelector(`.mes[mesid="${index}"]`);
+          const oldAttr=element?.getAttribute('is_system');
+          if(element)element.setAttribute('is_system','false');
+          changed.push({message,beforeExtra,element,oldAttr});
+        }
+        if(!changed.length)return 0;
+        await ctx.saveChat();this.onChange?.();
+        return changed.length;
+      }catch{
+        for(const item of changed){
+          item.message.is_system=true;
+          item.message.extra=item.beforeExtra;
+          if(item.element){
+            if(item.oldAttr===null)item.element.removeAttribute('is_system');
+            else item.element.setAttribute('is_system',item.oldAttr);
+          }
+        }
+        this.onChange?.();
+        return 0;
+      }
+    };
+    this.restoring=task();
+    try{return await this.restoring;}finally{this.restoring=null;}
+  }
+  async hideCompleted(key=this.currentKey()){
+    if(this.hiding)return this.hiding;
+    const task=async()=>{
+      const ctx=this.getContext();
+      if(!ctx||key!==this.currentKey()||!this.getSettings().enabled||!this.getSettings().summary?.autoHide)return 0;
+      if(typeof ctx.saveChat!=='function')return 0;
+      const indices=hideReadyIndices(readMemory(ctx),ctx.chat||[],this.getSettings());
+      if(!indices.length)return 0;
+      const changed=[];
+      try{
+        for(const index of indices){
+          if(key!==this.currentKey())throw Error('聊天已切换');
+          const message=ctx.chat[index];
+          if(!message||message.is_system)continue;
+          // Mark our excluded AI replies, preserving their swipe fingerprints.
+          const beforeExtra=message.extra;
+          const beforeFlag=message.extra?.story_memory_hidden;
+          message.extra={...(message.extra||{}),story_memory_hidden:true};
+          message.is_system=true;
+          const element=typeof document==='undefined'?null:document.querySelector(`.mes[mesid="${index}"]`);
+          const oldAttr=element?.getAttribute('is_system');
+          if(element)element.setAttribute('is_system','true');
+          changed.push({message,beforeExtra,beforeFlag,element,oldAttr});
+        }
+        if(!changed.length)return 0;
+        await ctx.saveChat();
+        this.hideError='';
+        this.onChange?.();
+        return changed.length;
+      }catch{
+        // Save failed or the user changed chats. Never silently leave excluded
+        // messages in memory when their persisted chat state is uncertain.
+        for(const item of changed){
+          item.message.is_system=false;
+          item.message.extra=item.beforeExtra;
+          if(item.element){
+            if(item.oldAttr===null)item.element.removeAttribute('is_system');
+            else item.element.setAttribute('is_system',item.oldAttr);
+          }
+        }
+        this.hideError='自动隐藏未保存，请检查当前聊天';
+        this.onChange?.();
+        return 0;
+      }
+    };
+    this.hiding=task();
+    try{return await this.hiding;}finally{this.hiding=null;}
+  }
   async drain(){
     if(this.busy)return;
     this.busy=true;
@@ -38,9 +130,10 @@ export class SummaryQueue{
     let ctx=this.getContext();
     if(!ctx||key!==this.currentKey())return;
     const fingerprint=messageFingerprint(ctx.chat?.[index]);
+    const userFp=userFingerprint(ctx.chat,index);
     if(!fingerprint)return;
     let memory=readMemory(ctx);
-    if(memory.leaves[index]?.fingerprint===fingerprint)return;
+    if(leafValid(memory,ctx.chat,index))return;
     const settings=this.getSettings();
     const controller=new AbortController();this.abort=controller;
     const maxRetries=Math.max(0,Math.min(2,Number(settings.summary?.retry)||0));
@@ -55,9 +148,10 @@ export class SummaryQueue{
         const parsed=normalizeDelta(extractJSONObject(text));
         if(key!==this.currentKey()||controller.signal.aborted)return;
         ctx=this.getContext();
-        if(messageFingerprint(ctx?.chat?.[index])!==fingerprint)return;
-        memory=commitLeaf(readMemory(ctx),index,fingerprint,parsed);
+        if(messageFingerprint(ctx?.chat?.[index])!==fingerprint||userFingerprint(ctx.chat,index)!==userFp)return;
+        memory=commitLeaf(readMemory(ctx),index,fingerprint,parsed,userFp);
         writeMemory(ctx,memory);this.onChange?.();
+        await this.hideCompleted(key);
         await this.maybeChapter(key);
         return;
       }catch(err){
@@ -72,49 +166,31 @@ export class SummaryQueue{
     }
   }
   async maybeChapter(key){
-    const ctx=this.getContext(),settings=this.getSettings();
-    if(!ctx||key!==this.currentKey()||(settings.api?.mode!=='main'&&!settings.api?.model))return;
-    const memory=readMemory(ctx),min=Math.max(3,Math.min(30,Number(settings.summary?.chapterEvery)||8));
-    if((memory.chapterPauseUntil||0)>Date.now())return;
-    const covered=new Set(validChapters(memory,ctx.chat).flatMap(c=>c.children||[]));
-    const eligible=Object.keys(memory.leaves).map(Number).sort((a,b)=>a-b)
-      .filter(i=>messageFingerprint(ctx.chat[i])===memory.leaves[i].fingerprint&&!covered.has('floor:'+i));
-    if(eligible.length<min)return;
-    const group=eligible.slice(0,min),rows=group.map(i=>memory.leaves[i]);
-    const controller=new AbortController();this.abort=controller;
-    try{
-      const content=await requestChat(settings.api,buildChapterMessages(rows,settings),ctx,controller.signal);
-      if(key!==this.currentKey()||controller.signal.aborted)return;
-      const current=this.getContext(),next=readMemory(current);
-      if(group.some(i=>messageFingerprint(current?.chat?.[i])!==next.leaves[i]?.fingerprint))return;
-      next.chapters.push({id:'chapter:'+Date.now(),level:1,children:group.map(i=>'floor:'+i),summary:content.slice(0,7000),updatedAt:Date.now()});
-      next.revision++;writeMemory(current,next);this.onChange?.();
-      await this.maybeHigher(key);
-    }catch{
-      // A failed optional chapter must never roll back the committed leaf.
-      if(key===this.currentKey()){
-        const now=this.getContext(),snapshot=readMemory(now);
-        snapshot.chapterPauseUntil=Date.now()+10*60*1000;
-        writeMemory(now,snapshot);
-      }
-    }
-  }
-  async maybeHigher(key){
+    // Retain the former method name for existing callers, now handles all levels.
     const ctx=this.getContext(),cfg=this.getSettings();
     if(!ctx||key!==this.currentKey())return;
-    const memory=readMemory(ctx),valid=validChapters(memory,ctx.chat);
-    const nested=new Set(valid.filter(c=>c.level===2).flatMap(c=>c.children||[]));
-    const chapters=valid.filter(c=>c.level===1&&!nested.has(c.id)).slice(0,4);
-    if(chapters.length<4)return;
-    const controller=new AbortController();this.abort=controller;
-    try{
-      const content=await requestChat(cfg.api,buildChapterMessages(chapters,cfg,'overview'),ctx,controller.signal);
-      if(key!==this.currentKey()||controller.signal.aborted)return;
-      const current=this.getContext(),next=readMemory(current);
-      const ids=new Set(validChapters(next,current.chat).map(c=>c.id));
-      if(chapters.some(c=>!ids.has(c.id)))return;
-      next.chapters.push({id:'overview:'+Date.now(),level:2,children:chapters.map(c=>c.id),summary:content.slice(0,8000),updatedAt:Date.now()});
-      next.revision++;writeMemory(current,next);this.onChange?.();
-    }catch{/* Optional overview compression failure is nonfatal. */}
+    let memory=readMemory(ctx);
+    if((memory.chapterPauseUntil||0)>Date.now())return;
+    for(let count=0;count<5;count++){
+      if(key!==this.currentKey())return;
+      const current=this.getContext();
+      const plan=nextCompression(readMemory(current),current.chat,cfg);
+      if(!plan)return;
+      const controller=new AbortController();this.abort=controller;
+      try{
+        const kind=plan.level===1?'chapter':plan.level===2?'resummary2':'overview';
+        const content=await requestChat(cfg.api,buildChapterMessages(plan.rows,cfg,kind),current,controller.signal);
+        if(key!==this.currentKey()||controller.signal.aborted)return;
+        const latest=this.getContext();
+        memory=commitCompression(readMemory(latest),latest.chat,plan,content);
+        writeMemory(latest,memory);this.onChange?.();
+      }catch{
+        if(key!==this.currentKey()||controller.signal.aborted)return;
+        const latest=this.getContext(),snapshot=readMemory(latest);
+        snapshot.chapterPauseUntil=Date.now()+10*60*1000;
+        writeMemory(latest,snapshot);
+        return;
+      }
+    }
   }
 }

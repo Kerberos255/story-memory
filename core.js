@@ -4,11 +4,11 @@ export const SETTINGS_KEY = 'story_memory_settings_v1';
 
 export function defaultSettings() {
   return {
-    enabled: true, autoSummary: false, api: {name:'摘要 API',mode:'main',url:'',key:'',model:'',headers:{},exclude:[],include:{},maxTokens:4096,timeout:90,temperature:0.2},
-    summary: {keepRecent:6,chapterEvery:8,retry:1,maxInputChars:16000},
+    enabled: true, autoSummary: false, api: {name:'摘要 API',mode:'main',url:'',key:'',model:'',headers:{},exclude:[],include:{},maxTokens:8192,timeout:90,temperature:0},
+    summary: {keepRecent:3,autoHide:false,delayFloors:3,leafBatchThreshold:12,leafKeepRecent:3,resummaryThreshold:6,higherResummaryThreshold:3,retry:1,maxInputChars:16000},
     injection: {summary:true,inventory:true,scenes:true,characters:true,vector:false,budget:4500},
-    prompts: {summary:'',summaryFull:'',chapter:'',overview:''},
-    vector: {enabled:false,source:'siliconflow',model:'Qwen/Qwen3-Embedding-8B',topK:5,threshold:0.35}
+    prompts: {summary:'',summaryFull:'',chapter:'',resummary2:'',overview:''},
+    vector: {enabled:false,url:'https://api.siliconflow.cn/v1',key:'',model:'BAAI/bge-m3',topK:5,threshold:0.35}
   };
 }
 export function freshMemory() {
@@ -31,15 +31,32 @@ export function hashText(text) {
   return (h>>>0).toString(16).padStart(8,'0');
 }
 export function messageFingerprint(message) {
-  if(!message || message.is_user || message.is_system) return '';
+  if(!message || message.is_user || (message.is_system&&!message.extra?.story_memory_hidden)) return '';
   return hashText(String(message.mes||'')+'|swipe='+String(message.swipe_id??0));
+}
+export function floorUserMessages(chat,index){
+  const users=[];
+  for(let j=index-1;j>=0;j--){
+    const m=chat?.[j];
+    if(!m?.is_user || (m.is_system&&!m.extra?.story_memory_hidden))break;
+    users.unshift(m);
+  }
+  return users;
+}
+export function userFingerprint(chat,index){
+  return hashText(floorUserMessages(chat,index).map(m=>String(m.mes||'')).join('\u001f'));
+}
+export function leafValid(memory,chat,index){
+  const leaf=memory.leaves?.[index];
+  if(!leaf||leaf.fingerprint!==messageFingerprint(chat?.[index]))return false;
+  return !leaf.userFingerprint||leaf.userFingerprint===userFingerprint(chat,index);
 }
 export function pendingFloors(memory,chat) {
   const pending=[];
   for(let i=0;i<(chat?.length||0);i++){
     const m=chat[i],fingerprint=messageFingerprint(m);
     if(!fingerprint) continue;
-    if(memory.leaves[i]?.fingerprint===fingerprint)continue;
+    if(leafValid(memory,chat,i))continue;
     pending.push(i);
   }
   return pending;
@@ -67,10 +84,10 @@ export function normalizeDelta(raw) {
   }
   return {summary,time:cleanString(raw.time,100),location:cleanString(raw.location,180),delta};
 }
-export function commitLeaf(memory,index,fingerprint,data) {
+export function commitLeaf(memory,index,fingerprint,data,userFp='') {
   if(!Number.isInteger(index)||index<0||!fingerprint)throw Error('楼层标识无效');
   const next=structuredClone(memory);
-  next.leaves[index]={id:'floor:'+index,sourceIndex:index,fingerprint,summary:data.summary,time:data.time,location:data.location,delta:data.delta,updatedAt:Date.now()};
+  next.leaves[index]={id:'floor:'+index,sourceIndex:index,fingerprint,userFingerprint:userFp,summary:data.summary,time:data.time,location:data.location,delta:data.delta,updatedAt:Date.now()};
   delete next.tasks[index];
   // Any changed leaf invalidates its ancestor compression chain, not other chapters.
   const invalid=new Set(['floor:'+index]);
@@ -114,7 +131,7 @@ export function validChapters(memory,chat){
     const okay=c.children.every(id=>{
       if(id.startsWith('floor:')){
         const index=Number(id.slice(6)),leaf=memory.leaves?.[index];
-        return Boolean(leaf&&leaf.fingerprint===messageFingerprint(chat?.[index]));
+        return Boolean(leaf&&leafValid(memory,chat,index));
       }
       return valid.has(id);
     });
@@ -128,7 +145,7 @@ export function deriveState(memory,chat) {
   const timeline=[];
   for(const i of floors){
     const entry=memory.leaves[i];
-    if(!entry || messageFingerprint(chat?.[i])!==entry.fingerprint)continue;
+    if(!entry || !leafValid(memory,chat,i))continue;
     timeline.push(entry);
     for(const [kind,rows] of Object.entries(entry.delta||{})){
       const map=sections[kind];if(!map||!Array.isArray(rows))continue;
@@ -155,9 +172,10 @@ export function injectionText(memory,chat,settings,vectorHits=[]) {
   if(cfg.summary){
     const chapters=validChapters(memory,chat);
     const nested=new Set(chapters.filter(c=>c.level>1).flatMap(c=>c.children||[]));
-    if(chapters.length)blocks.push('【章节记忆】\n'+chapters.filter(c=>!nested.has(c.id)).slice(-5).map(c=>c.summary).join('\n'));
+    if(chapters.length)blocks.push('【分层剧情记忆】\n'+chapters.filter(c=>!nested.has(c.id)).slice(-12).map(c=>'[L'+c.level+'] '+c.summary).join('\n'));
     const recent=Math.max(0,Number(settings.summary?.keepRecent??6));
-    const eligible=state.timeline.slice(0,Math.max(0,state.timeline.length-recent));
+    const keepStart=recentAiStart(chat,recent);
+    const eligible=state.timeline.filter(leaf=>leaf.sourceIndex<keepStart);
     const covered=new Set(chapters.flatMap(c=>c.children||[]));
     const visible=eligible.filter(l=>!covered.has(l.id)).slice(-22);
     if(visible.length)blocks.push('【剧情摘要】\n'+visible.map(l=>(l.time?'['+l.time+'] ':'')+l.summary).join('\n'));
@@ -180,4 +198,120 @@ export function injectionText(memory,chat,settings,vectorHits=[]) {
     if(remaining<=0)break;
   }
   return result.trim();
+}
+
+/** Resolve AI-message-only keep boundary. User messages are not counted. */
+export function recentAiStart(chat,keep=3){
+  const indices=[];
+  for(let i=0;i<(chat?.length||0);i++)if(messageFingerprint(chat[i]))indices.push(i);
+  const n=Math.max(0,Number(keep)||0);
+  if(!indices.length)return 0;
+  return n===0?chat.length:indices.length<=n?0:indices[indices.length-n];
+}
+/** Valid root forest, ordered by their earliest source floor rather than creation time. */
+export function compressionRoots(memory,chat,level){
+  const chapters=validChapters(memory,chat),byId=new Map(chapters.map(c=>[c.id,c]));
+  const parented=new Set(chapters.flatMap(c=>c.children));
+  function firstFloor(id,seen=new Set()){
+    if(seen.has(id))return Infinity;
+    seen.add(id);
+    if(id.startsWith('floor:'))return Number(id.slice(6));
+    const node=byId.get(id);
+    return node?Math.min(...node.children.map(x=>firstFloor(x,new Set(seen)))):Infinity;
+  }
+  if(level===0)return Object.keys(memory.leaves||{}).map(Number)
+    .filter(i=>leafValid(memory,chat,i)&&!parented.has('floor:'+i))
+    .sort((a,b)=>a-b).map(i=>({id:'floor:'+i,summary:memory.leaves[i].summary,time:memory.leaves[i].time,floor:i}));
+  return chapters.filter(c=>c.level===level&&!parented.has(c.id))
+    .map(c=>({id:c.id,summary:c.summary,time:c.time,floor:firstFloor(c.id)}))
+    .sort((a,b)=>a.floor-b.floor);
+}
+/** Pure planner. Threshold of zero disables that compression level. */
+export function nextCompression(memory,chat,settings){
+  const opts=settings.summary||{};
+  const thresholds=[
+    Number(opts.leafBatchThreshold??opts.chapterEvery??12),
+    Number(opts.resummaryThreshold??6),
+    Number(opts.higherResummaryThreshold??3)
+  ];
+  const maxLevel=Math.min(8,Math.max(0,...(memory.chapters||[]).map(c=>Number(c.level)||0)));
+  for(let level=0;level<=maxLevel;level++){
+    const threshold=Math.trunc(thresholds[Math.min(level,2)]);
+    if(!Number.isFinite(threshold)||threshold<2||threshold>100)continue;
+    const roots=compressionRoots(memory,chat,level);
+    const keep=level===0?Math.max(0,Math.trunc(Number(opts.leafKeepRecent??3))):0;
+    if(roots.length<threshold+keep)continue;
+    const batch=roots.slice(0,threshold);
+    return {level:level+1,children:batch.map(x=>x.id),rows:batch};
+  }
+  return null;
+}
+/** Reject changed source or concurrent compression before adding an ancestor. */
+export function commitCompression(memory,chat,plan,summary){
+  const text=cleanString(summary,12000);
+  if(!text)throw Error('压缩结果为空');
+  const roots=compressionRoots(memory,chat,plan.level-1);
+  const live=new Set(roots.map(x=>x.id));
+  if(plan.children.some(id=>!live.has(id)))throw Error('压缩源已变化');
+  const next=structuredClone(memory);
+  next.chapters.push({
+    id:'comp:'+Date.now()+':'+Math.random().toString(36).slice(2,8),
+    level:plan.level,children:plan.children,summary:text,updatedAt:Date.now(),
+    time:plan.rows.find(x=>x.time)?.time||''
+  });
+  next.revision++;
+  return next;
+}
+
+/** Automatic summaries wait until an AI reply is outside the newest N AI replies. */
+export function automaticFloorIndices(memory,chat,delay=3){
+  const cutoff=recentAiStart(chat,Math.max(0,Math.min(100,Math.trunc(Number(delay)||0))));
+  return pendingFloors(memory,chat).filter(index=>index<cutoff);
+}
+/**
+ * Only exclude messages already covered by an unchanged AI leaf. A leaf covers
+ * its AI reply and contiguous user inputs since the preceding AI reply.
+ * Other system messages, unprocessed AI replies and the recent window are
+ * never hidden. The actual chat contents are not deleted.
+ */
+export function hideReadyIndices(memory,chat,settings){
+  const cfg=settings.summary||{};
+  if(!cfg.autoHide)return [];
+  const preserved=Math.max(0,Number(cfg.keepRecent)||0,Number(cfg.delayFloors)||0);
+  const cutoff=recentAiStart(chat,preserved);
+  const result=new Set();
+  for(let index=0;index<cutoff;index++){
+    const m=chat[index],fp=messageFingerprint(m);
+    if(!fp || !leafValid(memory,chat,index) || !memory.leaves[index].userFingerprint)continue;
+    const fullText=String(m.mes||'');
+    const maxChars=Math.max(2000,Math.min(30000,Number(cfg.maxInputChars)||16000));
+    const inputs=floorUserMessages(chat,index);
+    // Never exclude material the summary request truncated.
+    if(fullText.length>maxChars||inputs.map(u=>String(u.mes||'')).join('\n\n').length>6000)continue;
+    if(!m.is_system && !m.extra?.story_memory_hidden)result.add(index);
+    // The summary request includes user messages belonging to this floor.
+    for(let i=index-1;i>=0;i--){
+      const user=chat[i];
+      if(!user||user.is_system&&!user.extra?.story_memory_hidden)break;
+      if(!user.is_user)break;
+      if(!user.is_system&&!user.extra?.story_memory_hidden)result.add(i);
+    }
+  }
+  return [...result].sort((a,b)=>a-b);
+}
+
+/** A changed AI reply or edited source user text must be restored to the prompt. */
+export function staleHiddenIndices(memory,chat){
+  const result=new Set();
+  for(let i=0;i<(chat?.length||0);i++){
+    const m=chat[i];
+    if(!m?.is_system||m.is_user||!m.extra?.story_memory_hidden)continue;
+    if(leafValid(memory,chat,i))continue;
+    result.add(i);
+    for(let j=i-1;j>=0;j--){
+      const u=chat[j];if(!u?.is_user)break;
+      if(u.is_system&&u.extra?.story_memory_hidden)result.add(j);
+    }
+  }
+  return [...result].sort((a,b)=>a-b);
 }
