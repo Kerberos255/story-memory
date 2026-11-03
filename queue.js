@@ -1,5 +1,5 @@
 import {ApiFault,requestChat,extractJSONObject,buildSummaryMessages,buildChapterMessages} from './api.js';
-import {readMemory,writeMemory,messageFingerprint,userFingerprint,leafValid,normalizeDelta,commitLeaf,pendingFloors,automaticFloorIndices,hideReadyIndices,staleHiddenIndices,nextCompression,commitCompression} from './core.js';
+import {readMemory,writeMemory,messageFingerprint,userFingerprint,floorUserMessages,leafValid,normalizeDelta,commitLeaf,pendingFloors,automaticFloorIndices,hideReadyIndices,staleHiddenIndices,nextCompression,commitCompression} from './core.js';
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 export class SummaryQueue{
   constructor(getContext,getSettings,onChange){
@@ -145,7 +145,8 @@ export class SummaryQueue{
       try{
         const messages=buildSummaryMessages(index,ctx.chat,memory,settings);
         const text=await requestChat(settings.api,messages,ctx,controller.signal);
-        const parsed=normalizeDelta(extractJSONObject(text));
+        const sourceEvidence=[...floorUserMessages(ctx.chat,index).map(m=>String(m.mes||'')),String(ctx.chat[index]?.mes||'')].join('\n');
+        const parsed=normalizeDelta(extractJSONObject(text),sourceEvidence);
         if(key!==this.currentKey()||controller.signal.aborted)return;
         ctx=this.getContext();
         if(messageFingerprint(ctx?.chat?.[index])!==fingerprint||userFingerprint(ctx.chat,index)!==userFp)return;

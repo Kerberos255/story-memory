@@ -16,7 +16,7 @@ test('custom headers and body parameters pass through ST Custom route',()=>{
  assert.equal(body.tool_choice,'none');
  assert.equal(body.messages.length,1);
  assert.equal(JSON.parse(body.custom_include_headers)['X-Project'],'private-test');
- assert.equal(JSON.parse(body.custom_include_headers).Authorization,['Bearer',api.key].join(' '));
+ assert.equal(JSON.parse(body.custom_include_headers).Authorization,'Bearer synthetic-test-only');
  assert.equal(JSON.parse(body.custom_include_headers).Connection,undefined);
  assert.equal(JSON.parse(body.custom_include_body).reasoning_effort,'low');
 });
@@ -40,6 +40,14 @@ test('summary payload is small, tool-free, independent from RP preset',()=>{
 });
 
 import {parseExtraBody,parseExcluded,parseHeaderLines,requestChat,DEFAULT_SUMMARY_PROMPT,DEFAULT_CHAPTER_PROMPT,DEFAULT_OVERVIEW_PROMPT,effectiveSummaryPrompt,buildChapterMessages} from '../api.js';
+test('default extraction prompts defend evidence and NPC knowledge; chapter input is never clipped',()=>{
+ const cfg=defaultSettings();
+ assert.match(DEFAULT_SUMMARY_PROMPT,/knowledge/);
+ assert.match(DEFAULT_SUMMARY_PROMPT,/原文证据/);
+ assert.match(DEFAULT_SUMMARY_PROMPT,/未听见/);
+ assert.match(DEFAULT_CHAPTER_PROMPT,/全部输入|所有输入/);
+ assert.throws(()=>buildChapterMessages([{summary:'序章'},{summary:'后半段'.repeat(9000)}],cfg,'chapter'),/安全上限/);
+});
 test('additional request parameters accept concise ST-style lines and JSON',()=>{
  const params=parseExtraBody('prefix: true\nreasoning_effort: low\nmax_tokens: 8192');
  assert.deepEqual(params,{prefix:true,reasoning_effort:'low',max_tokens:8192});
@@ -47,7 +55,7 @@ test('additional request parameters accept concise ST-style lines and JSON',()=>
  assert.deepEqual(parseExcluded('- frequency_penalty\n- presence_penalty\ntop_p'),['frequency_penalty','presence_penalty','top_p']);
  assert.deepEqual(parseHeaderLines('x-opencode-session: sillytavern\nX-Source: manual'),
    {'x-opencode-session':'sillytavern','X-Source':'manual'});
- assert.throws(()=>parseHeaderLines('Authorization: [REDACTED] synthetic'),/不允许/);
+ assert.throws(()=>parseHeaderLines('Authorization: Bearer synthetic'),/不允许/);
  assert.throws(()=>parseHeaderLines('x-demo: abc\nX-DEMO: def'),/重复/);
 });
 test('follow main API uses ST generateRaw without calling custom endpoint',async()=>{
@@ -96,7 +104,7 @@ test('model refresh uses only standalone key and leaves main API untouched',asyn
    assert.equal(request.body.custom_url,'https://summary.example.invalid/v1');
    assert.equal(request.body.secret_id,undefined);
    const h=JSON.parse(request.body.custom_include_headers);
-   assert.equal(h.Authorization,['Bearer','synthetic-summary-key'].join(' '));
+   assert.equal(h.Authorization,'Bearer synthetic-summary-key');
    assert.equal(h['x-opencode-session'],'custom-session');
  }finally{globalThis.fetch=oldFetch;}
 });

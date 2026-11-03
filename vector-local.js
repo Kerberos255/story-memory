@@ -38,7 +38,7 @@ export function embeddingEndpoint(url){
   let u;
   try{u=new URL(String(url||'').trim());}catch{throw Error('请填写有效的 Embedding API 地址');}
   if(!['https:','http:'].includes(u.protocol)||u.username||u.password||u.search||u.hash)throw Error('Embedding API 地址无效');
-  const base=u.href.replace(/\/+$/,'').replace(/\/(?:embeddings|chat\/completions)$/i,'');
+  const base=u.href.replace(/\/+$/,'').replace(/\/(?:embeddings|rerank|chat\/completions)$/i,'');
   return base+'/embeddings';
 }
 export async function embed(settings,texts,signal){
@@ -76,6 +76,41 @@ function normalized(v){
 export function cosine(a,b){
   if(a.length!==b.length)return -1;
   let sum=0;for(let i=0;i<a.length;i++)sum+=a[i]*b[i];return sum;
+}
+/** Standard /v1/rerank endpoint, sharing the independent embedding provider credentials. */
+export function rerankEndpoint(url){
+  return embeddingEndpoint(url).replace(/\/embeddings$/,'/rerank');
+}
+export async function rerankCandidates(settings,query,ranked,signal){
+  if(!ranked?.length||!settings.vector?.rerankEnabled)return ranked||[];
+  const cfg=settings.vector;
+  if(!cfg.key?.trim()||!cfg.rerankModel?.trim())throw Error('请配置重排模型和向量 API Key');
+  if(signal?.aborted)throw Error('重排已取消');
+  const controller=new AbortController(),cancel=()=>controller.abort();
+  const timer=setTimeout(()=>controller.abort(),12000);
+  signal?.addEventListener('abort',cancel,{once:true});
+  try{
+    const response=await fetch(rerankEndpoint(cfg.url),{
+      method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+cfg.key.trim()},
+      body:JSON.stringify({model:cfg.rerankModel.trim(),query:String(query).slice(-1800),
+        documents:ranked.map(x=>String(x.text||'').slice(0,2400)),
+        top_n:ranked.length,return_documents:false}),signal:controller.signal
+    });
+    if(!response.ok)throw Error('重排请求失败（HTTP '+response.status+'）');
+    const data=await response.json();
+    if(!Array.isArray(data?.results)||!data.results.length)throw Error('重排结果无效');
+    const seen=new Set(),sorted=[];
+    for(const hit of data.results){
+      const i=hit?.index,score=hit?.relevance_score;
+      if(!Number.isInteger(i)||i<0||i>=ranked.length||seen.has(i)||!Number.isFinite(score))
+        throw Error('重排结果索引或分数不合法');
+      seen.add(i);sorted.push({...ranked[i],rerankScore:score});
+    }
+    // Some providers return partial rankings. Retain all missing candidates in vector order.
+    return [...sorted.sort((a,b)=>b.rerankScore-a.rerankScore),...ranked.filter((_,i)=>!seen.has(i))];
+  }finally{
+    clearTimeout(timer);signal?.removeEventListener('abort',cancel);
+  }
 }
 export function scopeId(ctx,settings){
   const chat=ctx?.getCurrentChatId?.();
@@ -119,14 +154,22 @@ export async function indexSummaries(ctx,memory,settings,signal){
   if(prefix===scopeId(ctx,settings))await write([],stale);
   return count;
 }
+/** Cheap preselection and fail-open rerank, independently testable without IndexedDB. */
+export async function selectRecallHits(settings,query,ranked,signal){
+  const limit=Math.max(1,Math.min(10,Number(settings.vector?.topK)||5));
+  if(!settings.vector?.rerankEnabled||ranked.length<2)return ranked.slice(0,limit);
+  const pool=Math.max(limit,Math.min(30,Number(settings.vector.rerankCandidates)||15));
+  try{return (await rerankCandidates(settings,query,ranked.slice(0,pool),signal)).slice(0,limit);}
+  catch{return ranked.slice(0,limit);} // Never lose vector candidates if rerank is unavailable.
+}
 export async function recall(ctx,memory,settings,query,signal){
   if(!settings.vector?.enabled||!query?.trim())return [];
   const prefix=scopeId(ctx,settings),current=new Map(candidates(ctx,memory).map(x=>[x.key,x.text]));
   const [q]=await embed(settings,[query.slice(-1800)],signal),target=normalized(q);
-  const cached=await rows(prefix),limit=Math.max(1,Math.min(10,Number(settings.vector.topK)||5));
+  const cached=await rows(prefix);
   const threshold=Math.max(-1,Math.min(1,Number(settings.vector.threshold)||0.35));
-  return cached.filter(row=>current.get(row.key)===row.text)
+  const ranked=cached.filter(row=>current.get(row.key)===row.text)
     .map(row=>({text:row.text,score:cosine(target,row.vector),key:row.key}))
-    .filter(row=>row.score>=threshold)
-    .sort((a,b)=>b.score-a.score).slice(0,limit);
+    .filter(row=>row.score>=threshold).sort((a,b)=>b.score-a.score);
+  return selectRecallHits(settings,query,ranked,signal);
 }

@@ -192,6 +192,25 @@ test('vector API settings are private to the plugin and save without ST secret c
  assert.equal(next.prompts.resummary2,'','unmodified default must not be pinned');
 }));
 
+test('rerank settings expose independent model while sharing vector API connection',()=>withUI(body=>{
+ const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};let saved;
+ const view=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+   queue:{busy:false,enqueueMissing(){}},saveSettings:next=>{saved=next;}});
+ view.open();const dialog=body.children[0].shadow.children[1];
+ find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+ const toggle=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='启用重排（Rerank）'));
+ assert.ok(toggle);const check=walk(toggle).find(x=>x.tag==='input');assert.equal(check.checked,false);
+ check.checked=true;
+ const modelLabel=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='重排模型'));
+ assert.ok(modelLabel);const model=walk(modelLabel).find(x=>x.tag==='input');
+ assert.equal(model.value,'BAAI/bge-reranker-v2-m3');
+ model.value='Qwen/Qwen3-Reranker-0.6B';
+ find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+ assert.equal(saved.vector.rerankEnabled,true);
+ assert.equal(saved.vector.rerankModel,'Qwen/Qwen3-Reranker-0.6B');
+ assert.equal(saved.vector.rerankCandidates,15);
+ assert.equal(saved.vector.model,'BAAI/bge-m3');
+}));
 test('summary settings expose delayed floor count and automatic hiding toggle',()=>withUI(body=>{
  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
  let saved;
@@ -206,11 +225,11 @@ test('summary settings expose delayed floor count and automatic hiding toggle',(
  delayInput.value='4';
  const toggle=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='摘要完成后自动隐藏'));
  assert.ok(toggle);const checkbox=walk(toggle).find(x=>x.tag==='input');
- assert.equal(checkbox.checked,true);
- checkbox.checked=false;
+  assert.equal(checkbox.checked,true);
+  checkbox.checked=false;
  find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
  assert.equal(saved.summary.delayFloors,4);
- assert.equal(saved.summary.autoHide,false);
+  assert.equal(saved.summary.autoHide,false);
 }));
 
 test('restore defaults keeps connection secrets and remembers, asks before replacing settings',()=>withUI(body=>{
@@ -224,7 +243,7 @@ test('restore defaults keeps connection secrets and remembers, asks before repla
   cfg.api.headers={'X-Example':'synthetic'};
   cfg.api.temperature=.2;cfg.api.maxTokens=4096;
   cfg.vector.key='synthetic-vector-value';cfg.vector.model='custom-embedding';
-  cfg.autoSummary=false;cfg.summary.autoHide=false;cfg.summary.delayFloors=6;
+   cfg.autoSummary=false;cfg.summary.autoHide=false;cfg.summary.delayFloors=6;
   cfg.prompts.summaryFull='Custom prompt';
   let consent=false,saves=0;
   globalThis.window={confirm:()=>consent};
@@ -243,8 +262,8 @@ test('restore defaults keeps connection secrets and remembers, asks before repla
     assert.equal(saves,1);
     assert.equal(cfg.api.temperature,0);
     assert.equal(cfg.api.maxTokens,8192);
-    assert.equal(cfg.summary.autoHide,true);
-    assert.equal(cfg.autoSummary,true);
+     assert.equal(cfg.summary.autoHide,true);
+     assert.equal(cfg.autoSummary,true);
     assert.equal(cfg.summary.delayFloors,3);
     assert.equal(cfg.prompts.summaryFull,'');
     assert.equal(cfg.api.mode,'custom');

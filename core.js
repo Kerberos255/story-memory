@@ -8,7 +8,7 @@ export function defaultSettings() {
     summary: {keepRecent:3,autoHide:true,delayFloors:3,leafBatchThreshold:12,leafKeepRecent:3,resummaryThreshold:6,higherResummaryThreshold:3,retry:1,maxInputChars:16000},
     injection: {summary:true,inventory:true,scenes:true,characters:true,vector:false,budget:4500},
     prompts: {summary:'',summaryFull:'',chapter:'',resummary2:'',overview:''},
-    vector: {enabled:false,url:'https://api.siliconflow.cn/v1',key:'',model:'BAAI/bge-m3',topK:5,threshold:0.35}
+    vector: {enabled:false,url:'https://api.siliconflow.cn/v1',key:'',model:'BAAI/bge-m3',topK:5,threshold:0.35,rerankEnabled:false,rerankModel:'BAAI/bge-reranker-v2-m3',rerankCandidates:15}
   };
 }
 export function freshMemory() {
@@ -91,7 +91,7 @@ export function formatStoryTime(value) {
   const time=pad(h)+':'+pad(min)+(h2===null?'':'–'+pad(h2)+':'+pad(min2));
   return (prefix?prefix+' · ':'')+time;
 }
-export function normalizeDelta(raw) {
+export function normalizeDelta(raw,sourceText='') {
   if(!raw||typeof raw!=='object'||Array.isArray(raw))throw Error('摘要 JSON 必须是对象');
   const summary=cleanString(raw.summary,8000);
   if(!summary) throw Error('缺少 summary');
@@ -107,6 +107,23 @@ export function normalizeDelta(raw) {
       if(typeof item.entity_id==='string'&&/^(?:items|scenes|characters|plans):\d+:[a-f0-9]{8}$/.test(item.entity_id))out.entity_id=item.entity_id;
       for(const key of ['description','location','owner','status','relationship','time','kind']) {
         const value=cleanString(item[key],600);if(value)out[key]=value;
+      }
+      // Evidence is a contiguous quote from this turn, never an invented explanation.
+      const evidence=cleanString(item.evidence,160);
+      if(evidence&&sourceText&&!sourceText.includes(evidence))continue;
+      if(evidence)out.evidence=evidence;
+      if(kind==='characters'&&Array.isArray(item.knowledge)){
+        const entries=[];
+        for(const note of item.knowledge.slice(0,12)){
+          if(!note||typeof note!=='object')continue;
+          const fact=cleanString(note.fact,220),stance=cleanString(note.stance,20);
+          const quote=cleanString(note.evidence,160);
+          const knowledgeOp=note.op==='remove'?'remove':'upsert';
+          if(!fact||!['knows','suspects','believes','hides'].includes(stance))continue;
+          if(!quote||(sourceText&&!sourceText.includes(quote)))continue;
+          entries.push({fact,stance,op:knowledgeOp,...(quote?{evidence:quote}:{})});
+        }
+        if(entries.length)out.knowledge=entries;
       }
       if(Number.isFinite(item.quantity)&&item.quantity>=0&&item.quantity<=1000000)out.quantity=item.quantity;
       delta[kind].push(out);
@@ -302,7 +319,15 @@ export function deriveState(memory,chat) {
         const aliases=[...(old?.aliases||[])];
         if(raw!==entityNameKey(display)&&!aliases.some(x=>entityNameKey(x)===raw)&&aliases.length<12)
           aliases.push(change.name);
-        map.set(key,{...old,...change,name:display,entity_id,aliases,op:undefined,sourceIndex:i});
+        const previousKnowledge=Array.isArray(old?.knowledge)?old.knowledge:[];
+        const knowledge=new Map(previousKnowledge.map(x=>[entityNameKey(x.fact),x]));
+        if(kind==='characters')for(const update of change.knowledge||[]){
+          const id=entityNameKey(update.fact);
+          if(update.op==='remove')knowledge.delete(id);
+          else knowledge.set(id,{fact:update.fact,stance:update.stance,evidence:update.evidence||'',sourceIndex:i});
+        }
+        map.set(key,{...old,...change,name:display,entity_id,aliases,op:undefined,sourceIndex:i,
+          ...(kind==='characters'?{knowledge:[...knowledge.values()]}:{})});
         byId[kind].set(entity_id,key);
         if(raw!==key&&!map.has(raw))knownAliases[kind].set(raw,key);
       }
@@ -318,41 +343,55 @@ export function deriveState(memory,chat) {
   return {timeline,...state};
 }
 export function injectionText(memory,chat,settings,vectorHits=[]) {
-  const state=deriveState(memory,chat),cfg=settings.injection||{},blocks=[];
+  const state=deriveState(memory,chat),cfg=settings.injection||{},sections=[];
+  const add=(title,entries)=>{if(entries.length)sections.push({title,entries});};
+  const note=text=>({text:String(text||'').trim(),identity:String(text||'').trim()});
+  const entityLine=entity=>{
+    if(entity.manual)return note(entity.name);
+    // Keep each JSON record intact. Internal source/identity IDs are not RP facts.
+    const {entity_id,aliases,sourceIndex,op,evidence,knowledge,...publicState}=entity;
+    if(Array.isArray(knowledge)&&knowledge.length)
+      publicState.knowledge=knowledge.map(x=>({stance:x.stance,fact:x.fact}));
+    return note(JSON.stringify(publicState));
+  };
+  // High priority: user-authored memories and currently effective facts.
+  if(cfg.summary)add('【人工补充记忆】',(memory.manual?.summaries||[]).slice(-12).map(x=>note(x.text)));
+  if(cfg.characters)add('【人物】',(state.characters||[]).slice(-45).map(entityLine));
+  if(cfg.summary)add('【计划与伏笔】',(state.plans||[]).filter(x=>x.status!=='已完成').slice(-25).map(entityLine));
+  if(cfg.inventory)add('【物品】',(state.items||[]).slice(-45).map(entityLine));
+  if(cfg.scenes)add('【场景】',(state.scenes||[]).slice(-45).map(entityLine));
   if(cfg.summary){
     const chapters=validChapters(memory,chat);
     const nested=new Set(chapters.filter(c=>c.level>1).flatMap(c=>c.children||[]));
-    if(chapters.length)blocks.push('【分层剧情记忆】\n'+chapters.filter(c=>!nested.has(c.id)).slice(-12).map(c=>'[L'+c.level+'] '+c.summary).join('\n'));
-    const recent=Math.max(0,Number(settings.summary?.keepRecent??6));
-    const keepStart=recentAiStart(chat,recent);
-    const eligible=state.timeline.filter(leaf=>leaf.sourceIndex<keepStart);
     const covered=new Set(chapters.flatMap(c=>c.children||[]));
-    const visible=eligible.filter(l=>!covered.has(l.id)).slice(-22);
-    if(visible.length)blocks.push('【剧情摘要】\n'+visible.map(l=>(l.time?'['+l.time+'] ':'')+l.summary).join('\n'));
-    if(memory.manual?.summaries?.length)blocks.push('【人工补充记忆】\n'+memory.manual.summaries.slice(-12).map(x=>x.text).join('\n'));
+    const keepStart=recentAiStart(chat,Math.max(0,Number(settings.summary?.keepRecent??6)));
+    const visible=state.timeline.filter(leaf=>leaf.sourceIndex<keepStart&&!covered.has(leaf.id)).slice(-22);
+    add('【剧情摘要】',visible.map(x=>({text:(x.time?'['+x.time+'] ':'')+x.summary,identity:x.summary})));
+    const roots=chapters.filter(c=>!nested.has(c.id)).slice(-12);
+    add('【分层剧情记忆】',roots.map(x=>({text:'[L'+x.level+'] '+x.summary,identity:x.summary})));
   }
-  for(const [flag,key,label] of [['inventory','items','物品'],['scenes','scenes','场景'],['characters','characters','人物']]){
-    if(!cfg[flag]||!state[key]?.length)continue;
-    blocks.push('【'+label+'】\n'+state[key].slice(-45).map(x=>{
-      if(x.manual)return x.name;
-      // Internal reconciliation IDs belong in summary requests, not RP context.
-      const {entity_id,aliases,sourceIndex,op,...publicState}=x;
-      return JSON.stringify(publicState);
-    }).join('\n'));
-  }
-  if(cfg.vector&&vectorHits.length)blocks.push('【相关旧记忆】\n'+vectorHits.map(x=>x.text).join('\n'));
+  if(cfg.vector)add('【相关旧记忆】',vectorHits.map(x=>note(x.text)));
   const budget=Math.max(400,Math.min(18000,Number(cfg.budget)||4500))*3;
-  // Keep the newest chunks first when enforcing a character budget.
-  let result='',remaining=budget;
-  for(const block of blocks.reverse()){
-    const safe=block.trim();
-    if(!safe)continue;
-    const keep=safe.slice(-remaining);
-    if(!keep)break;
-    result=keep+'\n\n'+result;remaining-=keep.length;
-    if(remaining<=0)break;
+  let remaining=budget;
+  const result=[],seen=new Set();
+  // Select entire entries by priority, newest within a section; never slice JSON
+  // or prose in the middle. Preserve chronology when presenting chosen entries.
+  for(const {title,entries} of sections){
+    const extra=(result.length?2:0)+title.length+1;
+    if(remaining<=extra)continue;
+    let available=remaining-extra;
+    const chosen=[];
+    for(const item of entries.slice().reverse()){
+      const text=item.text.trim(),identity=item.identity||text;
+      if(!text||seen.has(identity)||text.length+1>available)continue;
+      chosen.push(text);seen.add(identity);available-=text.length+1;
+    }
+    if(!chosen.length)continue;
+    const section=title+'\n'+chosen.reverse().join('\n');
+    result.push(section);
+    remaining-=section.length+(result.length>1?2:0);
   }
-  return result.trim();
+  return result.join('\n\n');
 }
 
 /** Resolve AI-message-only keep boundary. User messages are not counted. */

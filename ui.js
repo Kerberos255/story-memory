@@ -13,7 +13,9 @@ const ICONS={
   x:['M18 6 6 18','M6 6l12 12'],
   chevron:['m6 9 6 6 6-6'],
   plus:['M12 5v14','M5 12h14'],
-  arrow:['M7 17 17 7','M8 7h9v9']
+  arrow:['M7 17 17 7','M8 7h9v9'],
+  pencil:['M12 20h9','M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5Z'],
+  trash:['M3 6h18','M8 6V4h8v2','M6 6l1 15h10l1-15','M10 10v7','M14 10v7']
 };
 const el=(tag,cls,text)=>{
   const result=document.createElement(tag);
@@ -363,7 +365,8 @@ export function mountUI(api){
     const rules=Object.entries(mem.entityAliases?.[kind]||{});
     recordCards('当前'+heading,entries,x=>({title:x.name,description:[
       x.description,x.location&&'位置：'+x.location,x.owner&&'归属：'+x.owner,
-      x.relationship&&'关系：'+x.relationship,x.status,x.quantity!==undefined&&'数量：'+x.quantity
+      x.relationship&&'关系：'+x.relationship,x.status,x.quantity!==undefined&&'数量：'+x.quantity,
+      kind==='characters'&&x.knowledge?.length&&('知情：'+x.knowledge.map(k=>({knows:'知道',suspects:'怀疑',believes:'误信',hides:'隐瞒'}[k.stance]||k.stance)+'「'+k.fact+'」').join('；'))
     ].filter(Boolean).join(' · ')}),null,x=>entityMergeControl(kind,x,entries,
       rules.filter(([,rule])=>entityNameKey(rule.to)===entityNameKey(x.name))
         .map(([,rule])=>rule)));
@@ -453,10 +456,8 @@ export function mountUI(api){
     modeWrap.append(modeLabel,mode);
     const modeTip=el('p','sm-help','使用酒馆当前连接和模型生成摘要。');
     const apiUrl=field('API 地址',cfg.api.url,'url');
-    const credentialLabel = 'API 密钥';
-    const credentialInput = field(credentialLabel, '', 'password');
-    credentialInput.input.value = cfg.api.key || '';
-    credentialInput.input.autocomplete='new-password';
+    const apiKey=field('API 密钥',cfg.api.key||'','password');
+    apiKey.input.autocomplete='new-password';
     const modelWrap=el('div','sm-field'),modelLabel=el('span','sm-field-label','模型');
     const modelLine=el('div','sm-model-line'),modelInput=el('input','sm-input');
     modelInput.type='text';modelInput.value=cfg.api.model||'';modelInput.placeholder='填写模型 ID 或刷新获取';
@@ -466,7 +467,7 @@ export function mountUI(api){
       refreshModels.disabled=true;refreshModels.title='正在获取模型列表';
       try{
         const found=await api.fetchSummaryModels({
-          url:apiUrl.input.value,key:credentialInput.input.value,
+          url:apiUrl.input.value,key:apiKey.input.value,
           headers:parseHeaderLines(headers.value)
         });
         if(!found.length){showNotice('模型列表为空，可手动填写模型 ID');return;}
@@ -490,7 +491,7 @@ export function mountUI(api){
     const max=field('最大输出 Tokens',cfg.api.maxTokens,'number','上限 65536；具体可用上限以所选模型为准。');
     max.input.max='65536';max.input.min='256';
     const customFields=el('div','sm-form-stack');
-    customFields.append(apiUrl.wrapper,credentialInput.wrapper,modelWrap,grid(temp.wrapper,max.wrapper));
+    customFields.append(apiUrl.wrapper,apiKey.wrapper,modelWrap,grid(temp.wrapper,max.wrapper));
     const updateMode=()=>{const custom=mode.value==='custom';customFields.hidden=!custom;modeTip.hidden=custom;};
     mode.addEventListener('change',updateMode);updateMode();
 
@@ -569,7 +570,7 @@ export function mountUI(api){
     compHead.append(el('strong','','分层压缩'),el('small','','逐级融合旧摘要，保留原始记忆'));
     const pipeline=el('div','sm-level-path');
     for(const token of ['L0 楼层摘要','→','L1 阶段总结','→','L2 二次总结','→','L3+ 长期记忆']){
-      pipeline.append(el('span',token.includes('→')?'sm-level-arrow':'',token));
+      pipeline.append(el('span',token==='→'?'sm-level-arrow':'',token));
     }
     const levelStrip=el('div','sm-level-strip');
     levelStrip.append(leafBatch.panel,second.panel,higher.panel);
@@ -613,7 +614,12 @@ export function mountUI(api){
     const vectorModel=field('Embedding 模型',cfg.vector.model);
     const topK=field('召回数量 Top-K',cfg.vector.topK,'number');
     const threshold=field('相似度阈值',cfg.vector.threshold,'number');
-    const vectorHelp=el('p','sm-help','直接向 Embedding 接口发送请求，不更改酒馆密钥。服务商需允许浏览器跨域（CORS）；索引缓存在当前浏览器，换电脑可重新建立。');
+    const rerank=switchRow('启用重排（Rerank）',cfg.vector.rerankEnabled??false,
+      '先通过向量筛选候选，再用专用重排模型排序；失败自动回退向量结果');
+    const rerankModel=field('重排模型',cfg.vector.rerankModel||'BAAI/bge-reranker-v2-m3');
+    const rerankCount=field('重排候选数',cfg.vector.rerankCandidates??15,'number');
+    rerankCount.input.min='2';rerankCount.input.max='30';
+    const vectorHelp=el('p','sm-help','Embedding 和重排共用此 API 地址、密钥，但模型不同。默认重排模型 BAAI/bge-reranker-v2-m3；服务商需支持 /rerank 及浏览器 CORS。重排会增加请求和费用，默认关闭。需同时开启向量检索与「注入设置 → 向量召回」才会发送旧记忆。索引在浏览器本地，可重新建立。');
     const vectorActions=el('div','sm-row-actions');
     vectorActions.append(button('更新当前聊天索引',async()=>{
       showNotice('正在更新向量索引…');
@@ -622,7 +628,8 @@ export function mountUI(api){
     },'sm-btn'));
     box.append(accordion('vector','向量记忆','独立 Embedding API 与相关剧情召回',[
       vector.wrapper,vectorUrl.wrapper,vectorKey.wrapper,vectorModel.wrapper,
-      grid(topK.wrapper,threshold.wrapper),vectorHelp,vectorActions
+      grid(topK.wrapper,threshold.wrapper),rerank.wrapper,
+      grid(rerankModel.wrapper,rerankCount.wrapper),vectorHelp,vectorActions
     ]));
 
 
@@ -654,7 +661,7 @@ export function mountUI(api){
         const next=structuredClone(cfg);
         next.enabled=enabled.input.checked;next.autoSummary=auto.input.checked;
         next.api.mode=mode.value==='main'?'main':'custom';
-        next.api.url=apiUrl.input.value.trim();next.api.key=credentialInput.input.value.trim();
+        next.api.url=apiUrl.input.value.trim();next.api.key=apiKey.input.value.trim();
         next.api.model=modelInput.value.trim();
         next.api.temperature=Math.max(0,Math.min(2,Number(temp.input.value)||0));
         next.api.maxTokens=Math.max(256,Math.min(65536,Number(max.input.value)||8192));
@@ -679,6 +686,9 @@ export function mountUI(api){
         next.vector.model=vectorModel.input.value.trim();
         next.vector.topK=Math.max(1,Math.min(10,Number(topK.input.value)||5));
         next.vector.threshold=Math.max(0,Math.min(1,Number(threshold.input.value)||0));
+        next.vector.rerankEnabled=rerank.input.checked;
+        next.vector.rerankModel=rerankModel.input.value.trim()||'BAAI/bge-reranker-v2-m3';
+        next.vector.rerankCandidates=Math.max(2,Math.min(30,Number(rerankCount.input.value)||15));
         next.prompts.summaryFull=promptEditors.get('summaryFull').value.trim();
         next.prompts.summary='';
         next.prompts.chapter=promptEditors.get('chapter').value.trim();
@@ -695,7 +705,7 @@ export function mountUI(api){
     },'sm-btn sm-btn-primary');
     const reset=button('恢复默认',()=>{
       const ask=window.confirm(
-        '要恢复默认设置吗？\n\n会重置摘要、注入、向量检索参数和自定义提示词。\n保留 API 地址与密钥、摘要 API 模型及附加参数。Embedding 模型将恢复 BAAI/bge-m3。\n已生成的剧情记忆不会删除。'
+        '要恢复默认设置吗？\n\n会重置摘要、注入、向量检索参数和自定义提示词。\n保留 API 地址与密钥、摘要 API 模型及附加参数。Embedding 模型将恢复 BAAI/bge-m3，重排模型恢复 BAAI/bge-reranker-v2-m3（默认关闭）。\n已生成的剧情记忆不会删除。'
       );
       if(!ask)return;
       try{

@@ -14,6 +14,47 @@ test('auto-summary and auto-hide default on with a three-floor protection window
  assert.equal(cfg.autoSummary,true);
  assert.equal(cfg.summary.keepRecent,3);
 });
+test('NPC knowledge is an evidence-backed update on the existing character identity',()=>{
+ const source='守门人听到了密令：青松。';
+ const chat=[{is_user:false,mes:source,swipe_id:0},{is_user:false,mes:'守门人得知密令已失效。',swipe_id:0}];
+ let mem=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+   summary:'守门人得知密令',characters:[{op:'add',name:'守门人',knowledge:[
+     {fact:'密令是青松',stance:'knows',evidence:'守门人听到了密令：青松。'},
+     {fact:'不知道的秘密',stance:'knows',evidence:'本轮没有的句子'}
+   ]}]
+ },source));
+ let state=deriveState(mem,chat);
+ assert.equal(state.characters.length,1);
+ assert.deepEqual(state.characters[0].knowledge.map(x=>x.fact),['密令是青松']);
+ const charId=state.characters[0].entity_id;
+ mem=commitLeaf(mem,1,messageFingerprint(chat[1]),normalizeDelta({
+   summary:'密令失效',characters:[{op:'update',entity_id:charId,name:'老门卫',knowledge:[
+     {fact:'密令是青松',stance:'knows',evidence:'守门人得知密令已失效。',op:'remove'}
+   ]}]
+ },chat[1].mes));
+ state=deriveState(mem,chat);
+ assert.equal(state.characters.length,1,'same character identity');
+ assert.equal(state.characters[0].entity_id,charId);
+ assert.deepEqual(state.characters[0].knowledge,[],'explicit removal revokes only this knowledge');
+ assert.deepEqual(normalizeDelta({summary:'状态',items:[{name:'钥匙',evidence:'伪造证据'}]},source).delta.items,[]);
+});
+test('injection skips over-budget full entries instead of slicing memory or JSON',()=>{
+ const cfg=defaultSettings();cfg.injection.budget=400;cfg.summary.keepRecent=0;
+ cfg.injection.vector=true;
+ const chat=[{is_user:false,mes:'剧情',swipe_id:0}];
+ let memory=freshMemory();
+ memory.manual.summaries.push({id:'manual:large',text:'极长笔记开始'+ '甲'.repeat(1600)});
+ memory=commitLeaf(memory,0,messageFingerprint(chat[0]),normalizeDelta({summary:'完整短摘要',characters:[
+   {op:'add',name:'甲',description:'角色描述'.repeat(45)},
+   {op:'add',name:'乙',status:'在场'}
+ ]}));
+ const output=injectionText(memory,chat,cfg,[{text:'不可截断的长召回'.repeat(150)}]);
+ assert.ok(output.includes('完整短摘要'));
+ assert.ok(!output.includes('极长笔记开始'));
+ assert.ok(!output.includes('不可截断的长召回'));
+ assert.ok(output.length<=1200,'approximate budget is respected');
+ for(const line of output.split('\n').filter(x=>x.startsWith('{')))assert.doesNotThrow(()=>JSON.parse(line));
+});
 test('invalid model JSON cannot mutate memory',()=>{
  const memory=freshMemory();
  assert.throws(()=>normalizeDelta({items:[]}),/summary/);

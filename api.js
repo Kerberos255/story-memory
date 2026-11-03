@@ -137,13 +137,15 @@ export function extractJSONObject(response) {
 export const DEFAULT_SUMMARY_PROMPT=[
   '【角色】你负责维护互动小说的事实记忆。只对本次提供的用户发言和 AI 剧情进行摘要，不扮演人物、不续写、不评价剧情。',
   '【来源边界】区分「本轮新剧情」和「以前的摘要」。已有摘要只用于去重与理解因果，不得当作本轮新事件重复登记。',
-  '【剧情摘要】按事件发生顺序描述关键行动、对话意图、冲突、决定、结果与转折。明确谁做了什么、如何影响谁，以及仍然悬而未决的问题。',
-  '【真实性】以原文为准，区分已发生事实、人物主观认知、传闻与推测。模糊的时间、地点、姓名不要自行补全。',
+  '【剧情摘要】按「用户的行动或话语 → 其他人物/AI 的反应 → 确认结果或仍未解决的问题」整理本轮事件。记录对话双方的实际行为，不把用户指令或传闻写成已完成剧情。',
+  '【事实边界】区分叙事已经确认、人物声称/误信/怀疑、将来计划、条件性承诺、已发生结果。「打算做」不等于「已经做」，「停止瞄准」不等于「解除武装」。原文无依据就保留未知，禁止补造时间、数字、人物知识或好感。',
+  '【持续事实】一次性动作只进 summary；状态表只更新结束后仍有效的身份、归属、关系、任务、人物知情等。场景结束、角色离场或许久没提，不等于持续事实自动终止；同一事项更新旧实体，不新增同义记录。无变化就输出空数组。',
+  '【原文证据】结构化条目的新事实或状态变更尽量附 evidence：从本轮用户或 AI 正文逐字摘取连续原句，不可改写、跨句拼接或引用已有记忆作为证据。确实没有依据就不输出该变更；矛盾未确认时留在摘要中作为争议信息，不覆盖旧状态。',
   '【时间 time】只记录原文明确提供的剧情时间；完整日期与时刻统一 YYYY/MM/DD HH:mm，范围统一 YYYY/MM/DD HH:mm–HH:mm。不要添加星期、地点、装饰符号。只有时刻则用 HH:mm 或 HH:mm–HH:mm，时间不明确则留空。地点单独填写 location。',
   '【物品 items】只记录本轮确实发生的取得、交付、消耗、遗失或状态变化；写明归属 owner、存放地点 location、证据确凿的数量 quantity。已有物品没有变化就不更新。',
   '【实体身份】物品、场景、人物各自都有稳定身份，不能因为称呼、归属、位置或状态变化就新建实体。先查下方现有实体表：如果是同一个对象，使用已有的 entity_id，并尽量沿用其 name；仅有证据证明是不同对象时才新增。不能只凭类似名称、同类别或同一主人认定为同一个实体。每类同一实体在同一轮最多输出一次变化，记录最终状态。',
   '【场景 scenes】只记录重要的新地点、环境变化和地点间关系；角色的短暂位移可以写进剧情摘要，必要时在 characters.location 更新。',
-  '【人物 characters】只记录人物的可核实身份、状态、所在位置、关系变化及其知情范围。不要根据一句情绪化对白擅自量化好感度。',
+  '【人物 characters】记录人物可核实的身份、当前状态、位置与关系变化。知识边界直接挂在已有 characters 的 knowledge 数组：每项 {fact,stance,evidence,op?}，stance 只能为 knows（确知）、suspects（怀疑）、believes（误信）、hides（明确隐瞒）；每条事实须有本轮原文连续引文 evidence。人物未听见、未在场或全知叙述揭露的信息，不能自动算作该人物知道。知识无变化时不发送 knowledge；获悉新事实用 upsert，明确得知旧认知不再成立时才用 op=remove。不要为同一 NPC 的知情信息另建角色。',
   '【计划 plans】保留承诺、约定、正在执行的计划、已结束的任务与长期伏笔；status 表示当前进度，kind 为 plan 或 suspense。',
   '【变更操作】op=add 表示新出现，update 表示原记录被改变，remove 仅在原文明确删除、失去或终止时使用。不得重复结算同一事件。',
   '【内容处理】忽略对话外的控制标签、思考过程和格式噪声。只概括符合服务规则、对剧情连续性必要的非露骨事实。',
@@ -152,25 +154,25 @@ export const DEFAULT_SUMMARY_PROMPT=[
   '{"summary":"按时间顺序整理本轮剧情","time":"有依据时填写故事时间","location":"有依据时填写当前地点",',
   '"items":[{"op":"update","entity_id":"已存在实体的完整 ID（新物品省略）","name":"沿用旧名称","quantity":1,"owner":"持有者","location":"存放地点","description":"物品变化"}],',
   '"scenes":[{"op":"update","entity_id":"匹配旧地点才填写","name":"地点名称","location":"上级地点","description":"环境或结构变化"}],',
-  '"characters":[{"op":"update","entity_id":"匹配旧人物才填写","name":"人物名称","location":"当前位置","relationship":"关系变化","status":"当前状态","description":"人物背景与认知变化"}],',
+  '"characters":[{"op":"update","entity_id":"匹配旧人物才填写","name":"人物名称","location":"当前位置","relationship":"关系变化","status":"当前状态","evidence":"本轮原文短句","knowledge":[{"fact":"具体获知的事","stance":"knows","evidence":"角色获知此事的原文短句"}]}],',
   '"plans":[{"op":"add","name":"约定或悬念","kind":"plan","status":"未完成","description":"来源与进度"}]}',
   '没有变化的 items、scenes、characters、plans 可以省略或输出空数组。数量与状态不能凭空推断。'
 ].join('\n');
 export const DEFAULT_CHAPTER_PROMPT=[
-  '你是剧情章节记忆整理员。把以下按时间顺序排列的楼层摘要归纳成一个章节。',
-  '只陈述来源中出现的事件和因果，保留人物关系、关键决定、物品交接、地点变化及尚未解决的计划。',
-  '避免复述不重要的对白，不增添新情节，时间或人物认知不确定时保持原状。',
+  '你是剧情章节记忆整理员。逐条核对以下按编号排列的楼层摘要，归纳成一个章节；开头、中段、结尾都必须核对，不能只处理前几条。',
+  '按用户行动→其他人物反应→结果组织因果；保留有后续影响的承诺、人物知情范围、持续状态及未解决线索。已发生、计划、猜测、误信必须分清；旧事实没有明确变化就不能宣告消失。',
+  '逐项覆盖所有输入编号，但不必逐条照抄；摘要不允许漏掉最后一段，不能捏造原文证据、具体日期或人物知情。删掉修辞、重复动作而非关键决定和结果。',
   '输出简洁、连续的中文章节正文，不要 JSON、思考过程或格式说明。'
 ].join('\n');
 export const DEFAULT_RESUMMARY2_PROMPT=[
   '你是剧情二次总结整理员。将相邻章节总结进一步压缩，保留跨章节人物关系和关键因果。',
-  '保留对后续剧情有影响的承诺、行动后果、未解决悬念与物品状态；删除重复描述。',
+  '保留有源依据的关键事件、人物关系变化、持续事实、人物知情边界、承诺、行动后果与未解决悬念。逐项核对全部输入，尤其最后一段；删重复修辞，不删因果或重要状态。',
   '只使用提供的内容，不编造新事件。输出简洁的连续中文正文，不要 JSON。'
 ].join('\n');
 export const DEFAULT_OVERVIEW_PROMPT=[
   '你是长期剧情档案整理员。将多个章节总结整合成长期剧情概览。',
   '保留贯穿故事的主线、关系转折、重要物品与线索、长期计划及未解决的伏笔。',
-  '对于已经结束的阶段进行压缩，避免人物状态或事件因果前后矛盾。',
+  '逐项处理全部输入；对已结束阶段压缩，但必须区分已证实事实、角色说法、误信、未完成计划和最终结果。未再提及不等于关系、承诺或重要状态已结束。',
   '只依赖提供的章节，不臆测后续。输出清晰精炼的中文正文，不要 JSON 或解释。'
 ].join('\n');
 export function effectiveSummaryPrompt(settings) {
@@ -205,7 +207,8 @@ export function buildSummaryMessages(index,chat,memory,settings){
     for(const entity of rows){
       const line=JSON.stringify({entity_id:entity.entity_id,name:entity.name,
         aliases:entity.aliases?.slice(-3)||[],owner:entity.owner||'',
-        location:entity.location||'',status:entity.status||''});
+        location:entity.location||'',status:entity.status||'',
+        ...(kind==='characters'?{knowledge:(entity.knowledge||[]).slice(-5).map(x=>({fact:x.fact,stance:x.stance}))}:{})});
       if(section.length+line.length+1>remaining)break;
       section+='\n'+line;
     }
@@ -220,7 +223,9 @@ export function buildSummaryMessages(index,chat,memory,settings){
 }
 export function buildChapterMessages(entries,settings,kind='chapter'){
   const rule=effectiveChapterPrompt(settings,kind);
-  return [{role:'system',content:rule},{role:'user',content:entries.map((e,i)=>'['+(i+1)+'] '+(e.time?'('+e.time+') ':'')+e.summary).join('\n\n').slice(0,25000)}];
+  const source=entries.map((e,i)=>'['+(i+1)+'] '+(e.time?'('+e.time+') ':'')+e.summary).join('\n\n');
+  if(source.length>25000)throw new ApiFault('分层摘要输入超过安全上限，请先缩短源摘要，不能截断后强行合并',422,'chapter_input_oversize');
+  return [{role:'system',content:rule},{role:'user',content:source}];
 }
 
 /** Fetch remote models through ST's Custom proxy using only this channel's API key. */
