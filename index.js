@@ -150,14 +150,15 @@ function init(){
   ui=mountUI({context:getContext,memory:()=>peekMemory(getContext()),settings:getSettings,saveSettings,
     addManual:add,editManual:edit,removeManual:remove,
     editLeaf,deleteLeaf,resumeLeaf,editChapter,deleteChapter,mergeEntity,unmergeAlias,queue,indexNow,fetchSummaryModels,
-    previewHistory:(ctx,memory)=>{
+    previewHistory:(ctx,memory,previewCfg)=>{
+      const settings=previewCfg||getSettings();
       const query=[...(ctx.chat||[])].reverse().find(x=>x?.is_user&&!x?.is_system)?.mes||'';
-      const hits=selectHistory(ctx,memory,query,[],getSettings().retrieval?.maxHits||5);
-      const sourceLimit=Math.max(0,Math.min(5,Number(getSettings().retrieval?.maxSources??3)));
+      const hits=selectHistory(ctx,memory,query,[],settings.retrieval?.maxHits||5);
+      const sourceLimit=Math.max(0,Math.min(5,Number(settings.retrieval?.maxSources??3)));
       return [...(sourceLimit?historyEvidence(ctx,memory,hits,query,sourceLimit):[]),
         ...hits.map(x=>({key:x.key,text:'[历史] '+x.summary}))];
     },
-    sourcePreview:(ctx,memory,key)=>sourcePreview(ctx,memory,key,3)});
+    sourcePreview:(ctx,memory,key,limit,offset)=>sourcePreview(ctx,memory,key,limit,offset)});
   lastChat=ctx.getCurrentChatId?.()||'';
   const onChatChanged=()=>{const now=getContext()?.getCurrentChatId?.()||'';if(now!==lastChat){lastChat=now;queue.cancel();}inject();ui?.refresh();};
   ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED,onChatChanged);

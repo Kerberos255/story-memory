@@ -197,14 +197,34 @@ export function historyEvidence(ctx,memory,hits,query,maxSources=3){
   }
   return output;
 }
-/** Used by the manual "view source" action, without relying on the query. */
-export function sourcePreview(ctx,memory,key,limit=3){
-  const chat=ctx?.chat||[],idx=searchIndex(ctx,memory);
+/** The manual source viewer preserves complete text and pages through all descendants. */
+export function sourcePreview(ctx,memory,key,limit=5,offset=0){
+  const chat=ctx?.chat||[];
   const chapters=new Set(validChapters(memory,chat).map(x=>x.id));
   if(!validKey(key,memory,chat,chapters))return [];
-  const floors=childFloor(key,memory,idx,searchTerms(idx.docs.get(key)?.summary||''),Math.min(limit,5));
-  return floors.filter(i=>leafValid(memory,chat,i)).slice(0,limit).map(i=>({
-    index:i,
-    text:[...floorUserMessages(chat,i).map(m=>'用户：'+String(m.mes||'')),'剧情：'+String(chat[i]?.mes||'')].join('\n').slice(0,1800)
-  }));
+  const chapterById=new Map((memory.chapters||[]).map(c=>[c.id,c]));
+  const pageSize=Math.max(1,Math.min(20,Math.trunc(Number(limit)||5)));
+  const skip=Math.max(0,Math.trunc(Number(offset)||0));
+  const visited=new Set(),stack=[key],rows=[];
+  let matched=0;
+  while(stack.length&&rows.length<pageSize){
+    const id=stack.pop();
+    if(visited.has(id))continue;
+    visited.add(id);
+    if(id.startsWith('floor:')){
+      const index=Number(id.slice(6));
+      if(!Number.isInteger(index)||!leafValid(memory,chat,index))continue;
+      if(matched++<skip)continue;
+      rows.push({index,
+        text:[...floorUserMessages(chat,index).map(m=>'用户：'+String(m.mes||'')),
+          '剧情：'+String(chat[index]?.mes||'')].join('\n')
+      });
+      continue;
+    }
+    const chapter=chapterById.get(id);
+    if(!chapter)continue;
+    // Traverse source chapters in their original chronological order.
+    for(let i=chapter.children.length-1;i>=0;i--)stack.push(chapter.children[i]);
+  }
+  return rows;
 }

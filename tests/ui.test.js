@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mountUI} from '../ui.js';
-import {freshMemory,defaultSettings,commitLeaf,normalizeDelta,messageFingerprint,userFingerprint,editGeneratedLeaf,deleteGeneratedLeaf,editGeneratedChapter,deleteGeneratedChapter,mergeEntities,unmergeEntity,deriveState} from '../core.js';
+import {freshMemory,defaultSettings,commitLeaf,normalizeDelta,messageFingerprint,userFingerprint,editGeneratedLeaf,deleteGeneratedLeaf,editGeneratedChapter,deleteGeneratedChapter,mergeEntities,unmergeEntity,deriveState,addManual} from '../core.js';
 import {readFileSync} from 'node:fs';
 
 class FakeElement{
@@ -185,7 +185,7 @@ test('vector API settings are private to the plugin and save without ST secret c
  assert.equal(next.vector.key,'synthetic-embedding-key');
  assert.equal(next.vector.url,'https://api.siliconflow.cn/v1');
  assert.equal(next.api.temperature,0);
- assert.equal(next.api.maxTokens,8192);
+ assert.equal(next.api.maxTokens,null);
  assert.equal(next.summary.leafBatchThreshold,12);
  assert.equal(next.summary.resummaryThreshold,6);
  assert.equal(next.summary.higherResummaryThreshold,3);
@@ -261,7 +261,7 @@ test('restore defaults keeps connection secrets and remembers, asks before repla
     consent=true;reset.fire('click');
     assert.equal(saves,1);
     assert.equal(cfg.api.temperature,0);
-    assert.equal(cfg.api.maxTokens,8192);
+    assert.equal(cfg.api.maxTokens,null);
      assert.equal(cfg.summary.autoHide,true);
      assert.equal(cfg.autoSummary,true);
     assert.equal(cfg.summary.delayFloors,3);
@@ -566,8 +566,12 @@ test('settings cards stay in one consistent workflow and rerank options reveal o
    '摘要 API','摘要设置','历史检索','向量记忆','注入设置','自定义提示词'
  ]);
  const inject=groups[4],switches=walk(inject).filter(x=>x.className==='sm-switch-row');
- assert.equal(switches.length,6,'injection toggles form three balanced pairs');
+ assert.equal(switches.length,6,'three balanced rows of optional injection switches');
+  assert.ok(!walk(inject).some(x=>x.textContent==='剧情摘要'),
+    'story summaries have no separate injection switch');
+  assert.equal(walk(inject).filter(x=>x.className==='sm-switch-grid').length,1);
  assert.ok(walk(inject).some(x=>x.textContent==='相关历史'));
+  assert.ok(walk(inject).some(x=>x.textContent==='计划与伏笔'));
  const rerank=walk(groups[3]).find(x=>x.className==='sm-vector-rerank');
  assert.ok(rerank,'reranking is visually separated from embeddings');
  const fields=walk(rerank).find(x=>x.className==='sm-fields-grid');
@@ -582,4 +586,306 @@ test('settings cards stay in one consistent workflow and rerank options reveal o
  assert.match(css,/sm-vector-rerank\{border-top/);
  assert.match(css,/@media\(max-width:700px\)/);
  assert.match(css,/\.sm-fields-grid,\.sm-switch-grid\{grid-template-columns:1fr\}/);
+}));
+
+test('settings save shows a centered transient success card and keeps the form in place',()=>withUI(body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
+  const previousTimeout=globalThis.setTimeout,previousClear=globalThis.clearTimeout;
+  const timers=new Map();let sequence=0,shouldFail=false,saves=0;
+  globalThis.setTimeout=(fn,ms)=>{const id=++sequence;timers.set(id,{fn,ms});return id;};
+  globalThis.clearTimeout=id=>timers.delete(id);
+  try{
+    const view=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+      queue:{busy:false,enqueueMissing(){}},
+      saveSettings:()=>{if(shouldFail)throw Error('模拟保存失败');saves++;}});
+    view.open();
+    const dialog=body.children[0].shadow.children[1];
+    find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+    const form=find(dialog,x=>x.tag==='main'),button=find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置');
+    form.scrollTop=138;
+    button.fire('click');
+    assert.equal(saves,1);
+    const toast=find(dialog,x=>x.className==='sm-save-toast');
+    assert.ok(toast,'success card is visible');
+    assert.equal(toast.parent,dialog,'centered relative to the dialog rather than the scrolling form');
+    assert.equal(toast.attrs.role,'status');
+    assert.ok(walk(toast).some(x=>x.textContent==='设置已保存'));
+    assert.ok(walk(toast).some(x=>x.tag==='svg'),'success icon is shown');
+    assert.equal(form.scrollTop,138,'saving must not move the settings scroll position');
+    assert.equal(find(dialog,x=>x.className==='sm-notice'),undefined,'success is not duplicated at the top');
+    assert.equal([...timers.values()][0]?.ms,2000);
+    button.fire('click');
+    assert.equal(walk(dialog).filter(x=>x.className==='sm-save-toast').length,1,'repeated saves replace the card');
+    assert.equal(timers.size,1,'previous dismiss timer was canceled');
+    [...timers.values()][0].fn();
+    assert.equal(find(dialog,x=>x.className==='sm-save-toast'),undefined,'success card disappears automatically');
+    shouldFail=true;button.fire('click');
+    assert.equal(find(dialog,x=>x.className==='sm-save-toast'),undefined);
+    assert.ok(find(dialog,x=>x.className==='sm-notice')?.textContent.includes('模拟保存失败'),
+      'save errors still use the persistent error notice');
+    shouldFail=false;button.fire('click');view.open(false);
+    assert.equal(timers.size,0,'closing the extension cancels pending timers');
+    assert.equal(find(dialog,x=>x.className==='sm-save-toast'),undefined);
+    const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+    assert.match(css,/\.sm-save-toast\{position:absolute;left:50%;top:50%/);
+    assert.match(css,/pointer-events:none/);
+  }finally{globalThis.setTimeout=previousTimeout;globalThis.clearTimeout=previousClear;}
+}));
+
+test('entity merge panel aligns with other full-width cards and preserves inline controls',()=>withUI(body=>{
+  const ctx={chat:[
+    {is_user:false,mes:'发现银钥匙'},{is_user:false,mes:'改叫旧钥匙'}
+  ],getCurrentChatId:()=> 'layout-merge'};
+  let memory=commitLeaf(freshMemory(),0,messageFingerprint(ctx.chat[0]),
+    normalizeDelta({summary:'第一把钥匙',items:[{op:'add',name:'银钥匙'}],
+      characters:[{op:'add',name:'向导'}]}));
+  memory=commitLeaf(memory,1,messageFingerprint(ctx.chat[1]),
+    normalizeDelta({summary:'另一把钥匙',items:[{op:'add',name:'旧钥匙'}],
+      characters:[{op:'add',name:'旅者'}]}));
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}}});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  const selectPage=label=>find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent===label)).fire('click');
+  for(const page of ['物品','角色']){
+    selectPage(page);
+    const list=find(dialog,x=>x.className==='sm-record-list');
+    const panel=find(dialog,x=>x.className==='sm-manual sm-entity-merge-panel');
+    const manual=find(dialog,x=>x.className==='sm-manual');
+    assert.ok(list&&panel&&manual,page+' should have both merge and add panels');
+    assert.equal(panel.parent,manual.parent,'merge panel is a full-width sibling, not inside a record');
+    assert.equal(panel.parent.tag,'main');
+    assert.ok(walk(panel).some(x=>x.textContent==='合并同一实体的不同称呼'));
+    assert.ok(walk(panel).some(x=>x.className==='sm-btn sm-btn-primary sm-entity-merge-confirm'));
+    assert.ok(walk(list).some(x=>x.className==='sm-entity-merge'),'record-level merge retains its own controls');
+    assert.ok(walk(panel).every(x=>x.className!=='sm-entity-merge'),'outer panel no longer inherits narrow record spacing');
+  }
+  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+  assert.match(css,/\.sm-record>\.sm-entity-merge\{margin:0 15px 15px;/);
+  assert.match(css,/\.sm-entity-merge-panel \.sm-manual-content\{display:grid;gap:12px/);
+  assert.doesNotMatch(css,/(?:^|\n)\.sm-entity-merge\{margin:0 15px/m);
+}));
+
+test('long original story opens fully and older chapter floors load in pages',()=>withUI(body=>{
+  const chat=[],base=freshMemory(),floors=[];let memory=base;
+  for(let i=0;i<12;i++){
+    const text='第'+i+'幕开头：'+'很长的剧情内容。'.repeat(260)+'第'+i+'幕最后的约定。';
+    chat.push({is_user:false,mes:text,swipe_id:0});
+    memory=commitLeaf(memory,i,messageFingerprint(chat[i]),normalizeDelta({summary:'第'+i+'幕完成'}));
+    floors.push('floor:'+i);
+  }
+  memory.chapters.push({id:'chapter:all',level:1,children:floors,summary:'十二幕主线'});
+  const ctx={chat,chatMetadata:{},getCurrentChatId:()=> 'paged-ui'};
+  let shownArgs=[];
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},
+    sourcePreview:(_ctx,_memory,_key,limit,offset)=>{
+      shownArgs.push({limit,offset});
+      return chat.slice(offset,offset+limit).map((item,i)=>({index:offset+i,text:item.mes}));
+    }});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  const chapter=find(dialog,x=>x.className==='sm-record');
+  const source=find(chapter,x=>x.tag==='button'&&x.textContent==='查看原文');
+  source.fire('click');
+  const overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+  assert.ok(overlay);
+  const areas=()=>walk(overlay).filter(x=>x.tag==='textarea');
+  assert.equal(areas().length,5);
+  assert.ok(areas()[0].value.endsWith('第0幕最后的约定。'));
+  assert.ok(areas()[0].value.length>1800);
+  const more=find(overlay,x=>x.tag==='button'&&x.textContent==='加载更多');
+  assert.ok(more);assert.equal(more.hidden,false);
+  more.fire('click');assert.equal(areas().length,10);
+  more.fire('click');assert.equal(areas().length,12);
+  assert.equal(more.hidden,true);
+  assert.deepEqual(shownArgs.map(x=>x.offset),[0,5,10]);
+  find(overlay,x=>x.tag==='button'&&x.textContent==='关闭').fire('click');
+  assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
+}));
+
+test('individual floor summaries show structured entity extraction counts',()=>withUI(body=>{
+  const ctx={chat:[{is_user:false,mes:'发现古堡，遇见守卫，获得钥匙。'}],getCurrentChatId:()=> 'extraction-counts'};
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(ctx.chat[0]),normalizeDelta({
+    summary:'进入古堡，遇见守卫，获得钥匙',items:[{op:'add',name:'铜钥匙'}],
+    scenes:[{op:'add',name:'古堡大厅'}],characters:[{op:'add',name:'守卫'}]
+  }));
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}}});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  const card=find(dialog,x=>x.className==='sm-record');
+  const stats=find(card,x=>x.className==='sm-record-state');
+  assert.equal(stats?.textContent,'本楼层更新：物品 1 · 场景 1 · 角色 1 · 计划 0');
+  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+  assert.match(css,/\.sm-record-state\{margin:/);
+}));
+
+test('redundant source cap is not shown in settings and old values are discarded on save',()=>withUI(body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=> 'max-source-ui'};let saved;
+  const view=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},saveSettings:s=>{saved=s;}});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  assert.ok(!walk(dialog).some(x=>x.textContent==='单楼层原文上限（字符）'));
+  find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+  assert.equal('maxInputChars' in saved.summary,false);
+}));
+
+test('legacy failed floor is retryable after automatic long-text processing',()=>withUI(body=>{
+  const ctx={chat:[{is_user:true,mes:'继续'},{is_user:false,mes:'长剧情',swipe_id:0}],getCurrentChatId:()=> 'failed-floor'};
+  const memory=freshMemory();memory.tasks[1]={status:'failed',code:'summary_source_oversize'};
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){},enqueue(){}}});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  const failed=find(dialog,x=>x.className?.includes('sm-pill')&&x.className?.includes('is-failed'));
+  assert.ok(failed);
+  assert.ok(failed.textContent.includes('失败'));
+  assert.ok(failed.title.includes('自动分段'));
+  assert.equal(find(dialog,x=>x.className==='sm-pending-error'),undefined);
+}));
+
+test('summary limits use distinct names and auto summary has a real toggle instead of an empty heading',()=>withUI(body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=> 'settings-clarity'};
+  let settings=defaultSettings(),saved=null;
+  const view=mountUI({context:()=>ctx,memory:freshMemory,settings:()=>settings,
+    queue:{busy:false,enqueueMissing(){}},saveSettings:next=>{saved=next;settings=next;}});
+  view.open();
+  const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  const labels=walk(dialog).filter(x=>x.tag==='label');
+  const fieldByName=name=>labels.find(x=>walk(x).some(y=>y.className==='sm-field-label'&&y.textContent===name));
+  const out=fieldByName('输出上限（可选）');
+  assert.ok(out);
+  assert.ok(walk(out).some(x=>String(x.textContent||'').includes('留空')));
+  const outInput=find(out,x=>x.tag==='input');
+  assert.equal(outInput.value,'');outInput.value='4096';
+  const summary=walk(dialog).find(x=>x.className==='sm-accordion'&&walk(x).some(y=>y.textContent==='摘要设置'));
+  assert.ok(summary);
+  assert.ok(!walk(summary).some(x=>x.className==='sm-summary-head'&&x.textContent==='自动整理'));
+  const toggle=walk(summary).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='自动摘要'));
+  assert.ok(toggle);
+  const checkbox=find(toggle,x=>x.tag==='input');
+  const delay=walk(summary).find(x=>x.className==='sm-summary-number-card'&&walk(x).some(y=>y.textContent==='延迟摘要'));
+  const delayInput=find(delay,x=>x.tag==='input');
+  const recent=walk(summary).find(x=>x.className==='sm-summary-number-card'&&walk(x).some(y=>y.textContent==='保留正文'));
+  const recentInput=find(recent,x=>x.tag==='input');
+  assert.equal(checkbox.checked,true);assert.equal(delayInput.disabled,false);
+  checkbox.checked=false;checkbox.fire('change');
+  assert.equal(delayInput.disabled,true,'delay is irrelevant while auto summary is off');
+  assert.equal(recentInput.disabled,undefined,'manual summary still retains protected recent floors');
+  checkbox.checked=true;checkbox.fire('change');assert.equal(delayInput.disabled,false);
+  find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+  assert.equal(saved.autoSummary,true);
+  assert.equal(saved.api.maxTokens,4096);
+  assert.equal('maxInputChars' in saved.summary,false);
+}));
+
+test('injection preview opens a centered dialog without navigating away or losing settings drafts',()=>withUI(body=>{
+  const ctx={chat:[{is_user:false,mes:'回忆最初的约定'}],chatMetadata:{},getCurrentChatId:()=> 'preview-modal'};
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(ctx.chat[0]),
+    normalizeDelta({summary:'回忆最初的约定',plans:[{op:'add',name:'完成约定',status:'未完成'}]}));
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},previewHistory:()=>[]});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  const form=find(dialog,x=>x.tag==='main'),input=find(form,x=>x.tag==='input'&&x.placeholder==='自动');
+  assert.ok(input);input.value='7777';form.scrollTop=156;
+  const button=find(form,x=>x.tag==='button'&&x.textContent==='查看注入预览');
+  assert.ok(button);button.fire('click');
+  const overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+  assert.ok(overlay);
+  const panel=find(overlay,x=>x.className==='sm-record-modal sm-preview-modal');
+  assert.equal(panel.parent,overlay);
+  assert.equal(panel.attrs.role,'dialog');
+  assert.equal(panel.attrs['aria-modal'],'true');
+  const area=find(panel,x=>x.tag==='textarea');
+  assert.equal(area.readOnly,true);
+  assert.ok(area.value.includes('计划与伏笔'),'plans are previewed in the same injection');
+  assert.ok(walk(dialog).some(x=>x.className?.includes('sm-nav-item is-current')&&walk(x).some(y=>y.textContent==='设置')));
+  const done=find(overlay,x=>x.tag==='button'&&x.textContent==='关闭');
+  assert.ok(done);done.fire('click');
+  assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
+  assert.equal(input.value,'7777');
+  assert.equal(form.scrollTop,156,'preview does not reset scroll position');
+  button.fire('click');
+  find(dialog,x=>x.className==='sm-record-modal-overlay').fire('keydown',{
+    key:'Escape',preventDefault(){},stopPropagation(){}
+  });
+  assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
+  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+  assert.match(css,/\.sm-preview-modal\{width:min\(720px,100%\)/);
+}));
+
+test('plans have a standalone page, work with old memory and can be manually maintained',()=>withUI(body=>{
+  const ctx={chat:[{is_user:false,mes:'守门人承诺明日归还银盒。'}],getCurrentChatId:()=> 'plans-tab'};
+  let memory=commitLeaf(freshMemory(),0,messageFingerprint(ctx.chat[0]),
+    normalizeDelta({summary:'守门人承诺明日归还银盒',plans:[{
+      op:'add',name:'归还银盒',status:'未完成',kind:'plan'
+    }]}));
+  delete memory.manual.plans; // A chat saved with an older version.
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},
+    addManual:(kind,text)=>{memory=addManual(memory,kind,text);}});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  const plansNav=find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='计划'));
+  assert.ok(plansNav);plansNav.fire('click');
+  const record=find(dialog,x=>x.className==='sm-record');
+  assert.ok(record);assert.ok(walk(record).some(x=>x.textContent==='归还银盒'));
+  const entry=find(dialog,x=>x.tag==='textarea'&&x.placeholder==='写下需要长期保留的信息…');
+  assert.ok(entry);entry.value='查明密室真相';
+  find(dialog,x=>x.tag==='button'&&x.textContent==='保存记录').fire('click');
+  assert.equal(memory.manual.plans.length,1);
+  assert.ok(deriveState(memory,ctx.chat).plans.some(x=>x.name==='查明密室真相'));
+}));
+
+test('plans injection is independent from narrative and character toggles',()=>withUI(body=>{
+  const chat=[{is_user:false,mes:'守门人许诺明日送还银盒。'}];
+  let memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),
+    normalizeDelta({summary:'守门人许诺明日送还银盒',plans:[{
+      op:'add',name:'归还银盒',status:'未完成',kind:'plan'
+    }]}));
+  const settings=defaultSettings();settings.summary.keepRecent=0;
+  settings.injection.plans=true;settings.injection.summary=false;settings.injection.characters=false;
+  const api={context:()=>({chat,getCurrentChatId:()=> 'plans-injection'}),memory:()=>memory,settings:()=>settings,
+    queue:{busy:false,enqueueMissing(){}},saveSettings:next=>{Object.assign(settings,next);}};
+  const view=mountUI(api);view.open();
+  const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  const planSwitch=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='计划与伏笔'));
+  assert.ok(planSwitch);
+  assert.equal(find(planSwitch,x=>x.tag==='input').checked,true);
+  const preview=find(dialog,x=>x.tag==='button'&&x.textContent==='查看注入预览');
+  preview.fire('click');
+  let value=find(dialog,x=>x.tag==='textarea'&&x.attrs['aria-label']==='注入预览内容').value;
+  assert.match(value,/计划与伏笔/);assert.match(value,/【剧情摘要】/);
+  find(dialog,x=>x.className==='sm-record-modal-overlay').fire('click',{target:find(dialog,x=>x.className==='sm-record-modal-overlay')});
+  find(planSwitch,x=>x.tag==='input').checked=false;
+  find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+  preview.fire('click');
+  value=find(dialog,x=>x.tag==='textarea'&&x.attrs['aria-label']==='注入预览内容').value;
+  assert.doesNotMatch(value,/【计划与伏笔】/);
+}));
+
+test('preview honors unsaved history retrieval changes without saving unrelated form settings',()=>withUI(body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=> 'unsaved-retrieval'};
+  let saves=0,lookups=0;
+  const api={context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},
+    previewHistory:()=>{lookups++;return [{text:'遥远的记忆片段'}];},
+    saveSettings:()=>{saves++;}};
+  const view=mountUI(api);view.open();
+  const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  const button=find(dialog,x=>x.tag==='button'&&x.textContent==='查看注入预览');
+  button.fire('click');
+  let overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+  assert.ok(walk(overlay).some(x=>x.tag==='textarea'&&x.value.includes('遥远的记忆片段')));
+  find(overlay,x=>x.tag==='button'&&x.textContent==='关闭').fire('click');
+  const history=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='自动查找历史'));
+  assert.ok(history);
+  const checkbox=find(history,x=>x.tag==='input');checkbox.checked=false;
+  button.fire('click');
+  overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+  const contents=find(overlay,x=>x.tag==='textarea').value;
+  assert.doesNotMatch(contents,/遥远的记忆片段/);
+  assert.equal(lookups,1,'disabled draft does not trigger history preview search');
+  assert.equal(saves,0,'preview does not save drafts');
 }));

@@ -244,7 +244,7 @@ test('edited user text invalidates leaf; oversized source cannot be auto-hidden'
  chat[0].mes='超长'.repeat(3100);
  memory=commitLeaf(memory,1,messageFingerprint(chat[1]),normalizeDelta({summary:'截断材料'}),userFingerprint(chat,1));
  assert.deepEqual(hideReadyIndices(memory,chat,cfg),[]);
- chat[0].mes='用户 0';chat[1].mes='超长'.repeat(9000);
+ chat[0].mes='用户 0';chat[1].mes='超长'.repeat(33000);
  memory=commitLeaf(memory,1,messageFingerprint(chat[1]),normalizeDelta({summary:'截断 AI'}),userFingerprint(chat,1));
  assert.deepEqual(hideReadyIndices(memory,chat,cfg),[]);
 });
@@ -441,4 +441,50 @@ test('scene and character IDs avoid duplicate records without mixing categories'
  assert.equal(result.characters[1].name,'林静的妹妹');
  assert.equal(result.scenes[0].status,'雨中');
  assert.equal(result.characters[0].status,'平静');
+});
+
+test('entity changes nested under delta/entities are validated and retained',()=>{
+  const source='守门人把铜钥匙交给主角，主角进入石塔。';
+  const a=normalizeDelta({summary:'收到钥匙',delta:{
+    items:[{op:'add',name:'铜钥匙',owner:'主角',evidence:'守门人把铜钥匙交给主角'}],
+    characters:[{op:'add',name:'守门人',evidence:'守门人把铜钥匙交给主角'}]
+  }},source);
+  assert.equal(a.delta.items[0].name,'铜钥匙');
+  assert.equal(a.delta.characters[0].name,'守门人');
+  const b=normalizeDelta({summary:'进入石塔',entities:{
+    scenes:[{op:'add',name:'石塔',evidence:'主角进入石塔'}]
+  }},source);
+  assert.equal(b.delta.scenes[0].name,'石塔');
+  assert.throws(()=>normalizeDelta({summary:'坏记录',delta:{items:{name:'铜钥匙'}}}),/items 必须为数组/);
+  const c=normalizeDelta({summary:'过滤伪造',delta:{items:[{op:'add',name:'铜钥匙',evidence:'从未发生的赠送'}]}},source);
+  assert.deepEqual(c.delta.items,[],'evidence verification also applies to nested entities');
+});
+
+test('plan injection can be disabled independently of story summaries and character profiles',()=>{
+  const chat=[{is_user:false,mes:'守门人承诺在日落前归还银盒。'}];
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),
+    normalizeDelta({summary:'守门人承诺归还银盒',plans:[{
+      op:'add',name:'归还银盒',kind:'plan',status:'未完成'
+    }],characters:[{op:'add',name:'守门人'}]}));
+  const cfg=defaultSettings();cfg.summary.keepRecent=0;
+  cfg.injection.summary=false;cfg.injection.characters=false;cfg.injection.plans=true;
+  assert.match(injectionText(memory,chat,cfg),/【计划与伏笔】/);
+  assert.match(injectionText(memory,chat,cfg),/【剧情摘要】/,
+    'old summary=false setting must not disable automatic story summaries');
+  cfg.injection.plans=false;cfg.injection.summary=false;
+  const text=injectionText(memory,chat,cfg);
+  assert.match(text,/【剧情摘要】/);
+  assert.doesNotMatch(text,/【计划与伏笔】/);
+});
+test('manual plans survive old chat metadata without a plans array',()=>{
+  const old=freshMemory();delete old.manual.plans;
+  const next=addManual(old,'plans','守住密室的秘密');
+  assert.ok(next.manual.plans.some(x=>x.text==='守住密室的秘密'));
+  assert.deepEqual(old.manual.plans,undefined);
+  const state=deriveState(next,[]);
+  assert.ok(state.plans.some(x=>x.name==='守住密室的秘密'));
+  const cfg=defaultSettings();
+  assert.match(injectionText(next,[],cfg),/守住密室的秘密/);
+  cfg.injection.plans=false;
+  assert.doesNotMatch(injectionText(next,[],cfg),/守住密室的秘密/);
 });

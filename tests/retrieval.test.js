@@ -84,3 +84,31 @@ test('locally indexed memory retains only a bounded number of chat scopes',()=>{
   ctx.getCurrentChatId=()=> 'retrieval-test-chat';
   assert.ok(searchIndex(ctx,memory).docs.size>=5);
 });
+
+test('source viewer reads the entire original reply without the former 1800-character cap',()=>{
+  const original='剧情开头：'+ '远方的钟声和雨夜。'.repeat(450)+'剧情结束的约定。';
+  const chat=[{is_user:true,mes:'我问起那段故事。'},{is_user:false,mes:original,swipe_id:0}];
+  const memory=commitLeaf(freshMemory(),1,messageFingerprint(chat[1]),normalizeDelta({summary:'雨夜的约定'}),userFingerprint(chat,1));
+  const ctx={chat,chatMetadata:{[META_KEY]:memory},getCurrentChatId:()=> 'source-long'};
+  const items=sourcePreview(ctx,memory,'floor:1');
+  assert.equal(items.length,1);
+  assert.ok(items[0].text.length>3500);
+  assert.ok(items[0].text.includes('剧情开头：'));
+  assert.ok(items[0].text.endsWith('剧情结束的约定。'));
+});
+test('chapter source viewer can page through every original floor in chronological order',()=>{
+  const chat=[],leaves=[];let memory=freshMemory();
+  for(let i=0;i<14;i++){
+    chat.push({is_user:false,mes:'第'+i+'幕结束。',swipe_id:0});
+    memory=commitLeaf(memory,i,messageFingerprint(chat[i]),normalizeDelta({summary:'第'+i+'幕'}));
+    leaves.push('floor:'+i);
+  }
+  memory.chapters.push({id:'chapter:long',level:1,children:leaves,summary:'完整剧情'});
+  const ctx={chat,chatMetadata:{[META_KEY]:memory},getCurrentChatId:()=> 'source-paged'};
+  const first=sourcePreview(ctx,memory,'chapter:long',6,0);
+  const second=sourcePreview(ctx,memory,'chapter:long',6,5);
+  const third=sourcePreview(ctx,memory,'chapter:long',6,10);
+  assert.deepEqual(first.map(x=>x.index),[0,1,2,3,4,5]);
+  assert.deepEqual(second.map(x=>x.index),[5,6,7,8,9,10]);
+  assert.deepEqual(third.map(x=>x.index),[10,11,12,13]);
+});

@@ -1,5 +1,6 @@
-import {ApiFault,requestChat,extractJSONObject,buildSummaryMessages,buildChapterMessages} from './api.js';
-import {readMemory,writeMemory,messageFingerprint,userFingerprint,floorUserMessages,leafValid,normalizeDelta,commitLeaf,pendingFloors,automaticFloorIndices,hideReadyIndices,staleHiddenIndices,nextCompression,commitCompression} from './core.js';
+import {ApiFault} from './api.js';
+import {summarizeFloor,summarizeChapter} from './summary-workflow.js';
+import {readMemory,writeMemory,messageFingerprint,userFingerprint,leafValid,commitLeaf,pendingFloors,automaticFloorIndices,hideReadyIndices,staleHiddenIndices,nextCompression,commitCompression} from './core.js';
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 export class SummaryQueue{
   constructor(getContext,getSettings,onChange){
@@ -143,14 +144,11 @@ export class SummaryQueue{
       memory.tasks[index]={status:'running',attempts:attempt+1,updatedAt:Date.now()};
       writeMemory(this.getContext(),memory);this.onChange?.();
       try{
-        const messages=buildSummaryMessages(index,ctx.chat,memory,settings);
-        const text=await requestChat(settings.api,messages,ctx,controller.signal);
-        const sourceEvidence=[...floorUserMessages(ctx.chat,index).map(m=>String(m.mes||'')),String(ctx.chat[index]?.mes||'')].join('\n');
-        const parsed=normalizeDelta(extractJSONObject(text),sourceEvidence);
+        const parsed=await summarizeFloor(index,ctx,memory,settings,controller.signal);
         if(key!==this.currentKey()||controller.signal.aborted)return;
         ctx=this.getContext();
         if(messageFingerprint(ctx?.chat?.[index])!==fingerprint||userFingerprint(ctx.chat,index)!==userFp)return;
-        memory=commitLeaf(readMemory(ctx),index,fingerprint,parsed,userFp);
+        memory=commitLeaf(readMemory(ctx),index,fingerprint,parsed,userFp,true);
         writeMemory(ctx,memory);this.onChange?.();
         await this.hideCompleted(key);
         await this.maybeChapter(key);
@@ -180,7 +178,7 @@ export class SummaryQueue{
       const controller=new AbortController();this.abort=controller;
       try{
         const kind=plan.level===1?'chapter':plan.level===2?'resummary2':'overview';
-        const content=await requestChat(cfg.api,buildChapterMessages(plan.rows,cfg,kind),current,controller.signal);
+        const content=await summarizeChapter(plan.rows,cfg,kind,current,controller.signal);
         if(key!==this.currentKey()||controller.signal.aborted)return;
         const latest=this.getContext();
         memory=commitCompression(readMemory(latest),latest.chat,plan,content);

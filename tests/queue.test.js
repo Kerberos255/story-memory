@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {SummaryQueue} from '../queue.js';
-import {defaultSettings,freshMemory,writeMemory,readMemory,pendingFloors,messageFingerprint} from '../core.js';
+import {defaultSettings,freshMemory,writeMemory,readMemory,pendingFloors,messageFingerprint,deriveState} from '../core.js';
 function fixture(){
  let id='chat-1',saved=0;
  const ctx={
@@ -27,6 +27,33 @@ test('queue commits a validated summary and reprocessing does nothing',async()=>
    assert.equal(f.getSaved()>0,true);
  }finally{globalThis.fetch=oldFetch;}
 });
+test('manual backfill also updates items, scenes and characters, but skips completed floors',async()=>{
+  const f=fixture(),oldFetch=globalThis.fetch;let calls=0;
+  globalThis.fetch=async()=>{
+    calls++;
+    return {ok:true,json:async()=>({choices:[{message:{content:JSON.stringify({
+      summary:'角色拿着钥匙进入古堡',
+      items:[{op:'add',name:'铜钥匙',owner:'主角'}],
+      scenes:[{op:'add',name:'古堡大厅',description:'有高窗的大厅'}],
+      characters:[{op:'add',name:'守门人',status:'看见主角进门'}]
+    })}}]})};
+  };
+  try{
+    const q=new SummaryQueue(()=>f.ctx,()=>f.settings,()=>{});
+    q.enqueueMissing(5);await idle(q);
+    const memory=readMemory(f.ctx),state=deriveState(memory,f.ctx.chat);
+    assert.equal(calls,1);
+    assert.equal(memory.leaves[1].delta.items.length,1);
+    assert.equal(memory.leaves[1].delta.scenes.length,1);
+    assert.equal(memory.leaves[1].delta.characters.length,1);
+    assert.equal(state.items[0].name,'铜钥匙');
+    assert.equal(state.scenes[0].name,'古堡大厅');
+    assert.equal(state.characters[0].name,'守门人');
+    q.enqueueMissing(5);await idle(q);
+    assert.equal(calls,1,'completed floor is not processed again by manual backfill');
+  }finally{globalThis.fetch=oldFetch;}
+});
+
 test('HTTP 400 preserves pending floor, never applies partial state',async()=>{
  const f=fixture(),oldFetch=globalThis.fetch;let calls=0;
  globalThis.fetch=async()=>{calls++;return{ok:false,status:400};};
@@ -160,4 +187,79 @@ test('deleting a hidden generated leaf restores excluded AI and corresponding us
  assert.equal(chat[1].is_system,false);
  assert.ok(!pendingFloors(readMemory(f.ctx),chat).includes(1),
    'deleted floor remains skipped until explicit retry or source change');
+});
+
+test('one-floor-at-a-time manual backfill persists character and item changes',async()=>{
+  const f=fixture(),oldFetch=globalThis.fetch;let call=0;
+  f.ctx.chat.push({is_user:true,mes:'守门人带着大家到了大厅。'},
+    {is_user:false,mes:'守门人走进古堡大厅，取出了第二件物品。',swipe_id:0});
+  globalThis.fetch=async()=>{
+    const data=++call===1?
+      {summary:'主角拿到铜钥匙',delta:{items:[{op:'add',name:'铜钥匙',owner:'主角'}],characters:[{op:'add',name:'守门人'}]}}:
+      {summary:'守门人带大家到大厅',entities:{scenes:[{op:'add',name:'古堡大厅'}],items:[{op:'add',name:'银杯'}]}};
+    return {ok:true,json:async()=>({choices:[{message:{content:JSON.stringify(data)}}]})};
+  };
+  try{
+    const q=new SummaryQueue(()=>f.ctx,()=>f.settings,()=>{});
+    q.enqueue([1]);await idle(q);
+    assert.equal(call,1);
+    assert.equal(deriveState(readMemory(f.ctx),f.ctx.chat).items[0]?.name,'铜钥匙');
+    assert.equal(deriveState(readMemory(f.ctx),f.ctx.chat).characters[0]?.name,'守门人');
+    q.enqueue([3]);await idle(q);
+    assert.equal(call,2);
+    const state=deriveState(readMemory(f.ctx),f.ctx.chat);
+    assert.deepEqual(state.items.map(x=>x.name).sort(),['铜钥匙','银杯']);
+    assert.equal(state.scenes[0]?.name,'古堡大厅');
+    assert.equal(state.characters[0]?.name,'守门人');
+    assert.equal(Object.keys(readMemory(f.ctx).leaves).length,2);
+  }finally{globalThis.fetch=oldFetch;}
+});
+
+test('legacy source cap is ignored; a network failure still keeps the floor pending',async()=>{
+  const f=fixture(),oldFetch=globalThis.fetch;let sent=0;
+  f.settings.summary.maxInputChars=2000;
+  f.ctx.chat[1].mes='正文关键开头：'+('很长的故事。'.repeat(340))+'结尾决定：归还钥匙。';
+  globalThis.fetch=async()=>{sent++;throw Error('API must not be called for oversized input');};
+  try{
+    const q=new SummaryQueue(()=>f.ctx,()=>f.settings,()=>{});
+    q.enqueue([1]);await idle(q);
+    const mem=readMemory(f.ctx);
+    assert.equal(sent,1);
+    assert.equal(mem.leaves[1],undefined);
+    assert.equal(mem.tasks[1].status,'failed');
+    assert.equal(mem.tasks[1].code,'network_error');
+    assert.deepEqual(pendingFloors(mem,f.ctx.chat),[1]);
+  }finally{globalThis.fetch=oldFetch;}
+});
+
+test('manual queue commits long floor entities only after all extraction and merge calls finish',async()=>{
+  const f=fixture(),previousFetch=globalThis.fetch;
+  f.ctx.chat[0].mes='玩家第一次开口。';
+  f.ctx.chat[1].mes='开头拿到蓝色地图。'+('在山路上行走。'.repeat(3400))+'最后遇见引路人。';
+  const sent=[];
+  globalThis.fetch=async (_url,{body})=>{
+    const payload=JSON.parse(body),content=payload.messages[1].content;
+    sent.push(content);
+    const merge=payload.messages[0].content.includes('同一楼层按时间顺序提取');
+    const story=merge?{summary:'携带蓝色地图，在山路最后遇见引路人。'}:
+      content.includes('原文 1/')?
+        {summary:'拿到蓝色地图',items:[{op:'add',name:'蓝色地图'}]}:
+        content.includes('最后遇见引路人。')?
+          {summary:'遇见引路人',characters:[{op:'add',name:'引路人'}]}:
+          {summary:'山路经过'};
+    return {ok:true,json:async()=>({choices:[{message:{content:JSON.stringify(story)}}]})};
+  };
+  try{
+    const q=new SummaryQueue(()=>f.ctx,()=>f.settings,()=>{});
+    q.enqueue([1]);await idle(q);
+    const memory=readMemory(f.ctx),state=deriveState(memory,f.ctx.chat);
+    assert.ok(sent.length>=3);
+    assert.equal(memory.leaves[1].sourceComplete,true);
+    assert.ok(memory.leaves[1].sourceParts.length>1);
+    assert.ok(sent.some(x=>x.includes('开头拿到蓝色地图。')));
+    assert.ok(sent.some(x=>x.includes('最后遇见引路人。')));
+    assert.ok(state.items.some(x=>x.name==='蓝色地图'));
+    assert.ok(state.characters.some(x=>x.name==='引路人'));
+    assert.equal(memory.tasks[1],undefined);
+  }finally{globalThis.fetch=previousFetch;}
 });

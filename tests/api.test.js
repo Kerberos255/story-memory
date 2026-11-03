@@ -10,7 +10,7 @@ test('custom headers and body parameters pass through ST Custom route',()=>{
  assert.equal(body.chat_completion_source,'custom');
  assert.equal(body.custom_url,'https://example.invalid/v1');
  assert.equal(body.temperature,0);
- assert.equal(body.max_tokens,8192);
+ assert.equal(Object.hasOwn(body,'max_tokens'),false,'blank output limit uses provider defaults');
  assert.match(body.custom_exclude_body,/^- temperature/m);
  assert.match(body.custom_exclude_body,/^- messages/m);
  assert.equal(body.tool_choice,'none');
@@ -65,7 +65,7 @@ test('follow main API uses ST generateRaw without calling custom endpoint',async
  const text=await requestChat(cfg,[{role:'system',content:'提取摘要'},{role:'user',content:'故事片段'}],ctx);
  assert.match(text,/发现遗失的灯/);
  assert.deepEqual(options.prompt.map(m=>m.role),['system','user']);
- assert.equal(options.responseLength,8192);
+ assert.equal(Object.hasOwn(options,'responseLength'),false,'following main API keeps its response setting');
 });
 test('default prompt contents and custom full replacement are exactly effective',()=>{
  const settings=defaultSettings();
@@ -147,4 +147,22 @@ test('summary request provides bounded prior entity IDs without leaking later st
  assert.ok(req[1].content.includes('旅人'));
  assert.ok(!req[1].content.includes('后来才出现的访客'));
  assert.ok(req[0].content.includes('稳定身份'));
+});
+
+test('legacy source cap is ignored and the summary builder preserves complete input',()=>{
+  const cfg=defaultSettings();
+  assert.equal(cfg.summary.maxInputChars,undefined);
+  const start='前文关键事实：铜钥匙已被交付。';
+  const last='最后确认：角色抵达石塔。';
+  const exact=start+'中间剧情'.repeat(20000);
+  const allowed=exact.slice(0,65535-last.length)+last;
+  assert.equal(allowed.length,65535);
+  const chat=[{is_user:true,mes:'现在继续。'},{is_user:false,mes:allowed}];
+  const ok=buildSummaryMessages(1,chat,freshMemory(),cfg);
+  assert.ok(ok[1].content.includes(start));
+  assert.ok(ok[1].content.includes(last));
+  chat[1].mes=allowed+'又一个字符';
+  assert.ok(buildSummaryMessages(1,chat,freshMemory(),cfg)[1].content.includes('又一个字符'));
+  cfg.summary.maxInputChars=2000;
+  assert.ok(buildSummaryMessages(1,chat,freshMemory(),cfg)[1].content.includes('又一个字符'));
 });

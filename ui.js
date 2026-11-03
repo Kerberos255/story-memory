@@ -1,13 +1,15 @@
 import {defaultSettings,entityNameKey,formatStoryTime,messageFingerprint,userFingerprint,pendingFloors,automaticFloorIndices,deriveState,injectionText,validChapters} from './core.js';
 import {DEFAULT_SUMMARY_PROMPT,DEFAULT_CHAPTER_PROMPT,DEFAULT_RESUMMARY2_PROMPT,DEFAULT_OVERVIEW_PROMPT,effectiveSummaryPrompt,parseExtraBody,parseExcluded,parseHeaderLines} from './api.js';
 
-const NAV=[['summaries','摘要','book'],['items','物品','package'],['scenes','场景','pin'],['characters','角色','users'],['settings','设置','sliders']];
+const NAV=[['summaries','摘要','book'],['items','物品','package'],['scenes','场景','pin'],
+  ['characters','角色','users'],['plans','计划','target'],['settings','设置','sliders']];
 const ICONS={
   book:['M4 19.5A2.5 2.5 0 0 1 6.5 17H20','M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z','M8 7h8','M8 11h6'],
   package:['m12 3 9 5-9 5-9-5 9-5Z','M3 8v8l9 5 9-5V8','M12 13v8'],
   pin:['M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z','M12 10h.01'],
   users:['M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2','M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z','M22 21v-2a4 4 0 0 0-3-3.87','M16 3.13a4 4 0 0 1 0 7.75'],
   sliders:['M4 7h16','M4 17h16','M9 4v6','M15 14v6'],
+  target:['M20 12a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z','M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z','M12 10v4','M10 12h4'],
   moon:['M20.5 13A8.5 8.5 0 0 1 11 3.5 8.5 8.5 0 1 0 20.5 13Z'],
   sun:['M12 2v2','M12 20v2','M4.93 4.93l1.42 1.42','m17.65 17.65 1.42 1.42','M2 12h2','M20 12h2','m6.35 17.65-1.42 1.42','m19.07 4.93-1.42 1.42','M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z'],
   x:['M18 6 6 18','M6 6l12 12'],
@@ -15,7 +17,8 @@ const ICONS={
   plus:['M12 5v14','M5 12h14'],
   arrow:['M7 17 17 7','M8 7h9v9'],
   pencil:['M12 20h9','M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5Z'],
-  trash:['M3 6h18','M8 6V4h8v2','M6 6l1 15h10l1-15','M10 10v7','M14 10v7']
+  trash:['M3 6h18','M8 6V4h8v2','M6 6l1 15h10l1-15','M10 10v7','M14 10v7'],
+  check:['M20 6 9 17l-5-5']
 };
 const el=(tag,cls,text)=>{
   const result=document.createElement(tag);
@@ -77,6 +80,7 @@ export function mountUI(api){
   const layout=el('div','sm-layout'),nav=el('nav','sm-nav'),body=el('main','sm-content');
   layout.append(nav,body);dialog.append(top,layout);
   let active=false,page='summaries',notice='',settingsOpen=new Set();
+  let saveToast=null,saveToastTimer=null;
   let theme='dark';
   try{theme=localStorage.getItem('story-memory-theme')==='light'?'light':'dark';}catch{}
   const updateTheme=()=>{
@@ -91,12 +95,28 @@ export function mountUI(api){
     updateTheme();
   };
   updateTheme();
+  function clearSaveToast(){
+    if(saveToastTimer!==null){clearTimeout(saveToastTimer);saveToastTimer=null;}
+    saveToast?.remove();saveToast=null;
+  }
   const showNotice=(message)=>{
+    clearSaveToast();
     notice=String(message||'');
     if(!active)return;
     const old=body.querySelector('.sm-notice');if(old)old.remove();
     if(notice){const toast=el('div','sm-notice',notice);body.prepend(toast);}
   };
+  function showSaveSuccess(message='设置已保存'){
+    if(!active)return;
+    clearSaveToast();notice='';
+    body.querySelector('.sm-notice')?.remove();
+    const toast=el('div','sm-save-toast');
+    toast.setAttribute('role','status');toast.setAttribute('aria-live','polite');
+    const mark=el('span','sm-save-toast-mark');mark.append(svg('check'));
+    toast.append(mark,el('span','sm-save-toast-text',message));
+    dialog.append(toast);saveToast=toast;
+    saveToastTimer=setTimeout(()=>{if(saveToast===toast)clearSaveToast();},2000);
+  }
   dialog.addEventListener('cancel',e=>{e.preventDefault();if(recordOverlay)closeRecordModal();else open(false);});
   dialog.addEventListener('click',e=>{
     if(e.target!==dialog)return;
@@ -110,7 +130,7 @@ export function mountUI(api){
       active=true;if(!dialog.open)dialog.showModal();
       render();close.focus();
     }else{
-      closeRecordModal(false);
+      clearSaveToast();closeRecordModal(false);
       active=false;if(dialog.open)dialog.close();
       body.replaceChildren();nav.replaceChildren();
       api.onClose?.();
@@ -215,7 +235,7 @@ export function mountUI(api){
   function openSourceModal(entry,type,trigger){
     closeRecordModal(false);
     recordReturnFocus=trigger||null;
-    const overlay=el('div','sm-record-modal-overlay'),panel=el('section','sm-record-modal');
+    const overlay=el('div','sm-record-modal-overlay'),panel=el('section','sm-record-modal sm-source-modal');
     recordOverlay=overlay;
     panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');
     const header=el('div','sm-record-modal-head');
@@ -224,16 +244,24 @@ export function mountUI(api){
     const close=button('',()=>closeRecordModal(),'sm-record-modal-close');
     close.append(svg('x'));close.setAttribute('aria-label','关闭');header.append(title,close);
     const content=el('div','sm-record-modal-body');
-    const ctx=api.context(),key=type==='floor'?'floor:'+entry.sourceIndex:entry.id;
-    const records=api.sourcePreview?.(ctx,api.memory(),key)||[];
-    if(!records.length)content.append(el('p','sm-help','没有找到可查看的原文。'));
-    for(const item of records){
-      const label=el('p','sm-field-label','#'+item.index);
-      const text=textArea(item.text,7);text.readOnly=true;
-      content.append(label,text);
-    }
+    const key=type==='floor'?'floor:'+entry.sourceIndex:entry.id;
+    let shown=0;
     const footer=el('div','sm-record-modal-footer');
-    footer.append(button('关闭',()=>closeRecordModal(),'sm-btn sm-btn-primary'));
+    const more=button('加载更多',()=>appendSourcePage(),'sm-btn');
+    function appendSourcePage(){
+      const records=api.sourcePreview?.(api.context(),api.memory(),key,6,shown)||[];
+      const page=records.slice(0,5);
+      if(!shown&&!page.length)content.append(el('p','sm-help','没有找到可查看的原文。'));
+      for(const item of page){
+        const label=el('p','sm-field-label','#'+item.index);
+        const text=textArea(item.text,8);text.readOnly=true;
+        content.append(label,text);
+      }
+      shown+=page.length;
+      more.hidden=records.length<=5;
+    }
+    footer.append(more,button('关闭',()=>closeRecordModal(),'sm-btn sm-btn-primary'));
+    appendSourcePage();
     panel.append(header,content,footer);overlay.append(panel);dialog.append(overlay);
     layout.inert=true;top.inert=true;
     overlay.addEventListener('click',e=>{if(e.target===overlay)closeRecordModal();});
@@ -256,6 +284,7 @@ export function mountUI(api){
       if(value.subtitle)headingCopy.append(el('small','sm-record-subtitle',value.subtitle));
       head.append(headingCopy,svg('chevron'));
       details.append(head,el('p','sm-record-text',value.description||'暂无详情'));
+      if(value.meta)details.append(el('p','sm-record-state',value.meta));
       if(detailFactory)details.append(detailFactory(entry));
       if(type){
         const actions=el('div','sm-record-actions');
@@ -326,8 +355,11 @@ export function mountUI(api){
       if(deferred.size)heading.append(el('span','sm-muted-note','其中 '+deferred.size+' 楼暂缓自动摘要'));
       const strip=el('div','sm-pills');
       for(const i of pending.slice(-24)){
-        const pill=button('#'+i,()=>api.queue.enqueue([i]),'sm-pill'+(deferred.has(i)?' is-deferred':''));
-        pill.title=deferred.has(i)?'延迟窗口内，点击仍可手动补摘':'点击手动补摘';
+        const failed=mem.tasks?.[i]?.status==='failed';
+        const pill=button('#'+i+(failed?' · 失败':''),()=>api.queue.enqueue([i]),
+          'sm-pill'+(failed?' is-failed':'')+(deferred.has(i)?' is-deferred':''));
+        pill.title=failed?'整理未完成，点击重新尝试（长正文会自动分段）':
+          deferred.has(i)?'延迟窗口内，点击仍可手动补摘':'点击手动补摘';
         strip.append(pill);
       }
       pendingBox.append(heading,strip);body.append(pendingBox);
@@ -335,7 +367,12 @@ export function mountUI(api){
     const valid=validChapters(mem,ctx?.chat||[]);
     recordCards('分层剧情回顾',valid.slice().reverse(),c=>({title:'L'+c.level+' · '+(c.level===1?'阶段总结':c.level===2?'二次总结':'高层总结'),subtitle:c.children.length+' 段剧情',description:c.summary}),'chapter');
     const state=deriveState(mem,ctx?.chat||[]);
-    recordCards('剧情时间线',state.timeline.slice(-50).reverse(),e=>({title:'#'+e.sourceIndex+(e.time?' · '+formatStoryTime(e.time):''),subtitle:e.location||'',description:e.summary}),'floor');
+    recordCards('剧情时间线',state.timeline.slice(-50).reverse(),e=>({
+      title:'#'+e.sourceIndex+(e.time?' · '+formatStoryTime(e.time):''),
+      subtitle:e.location||'',description:e.summary,
+      meta:'本楼层更新：物品 '+(e.delta?.items?.length||0)+' · 场景 '+(e.delta?.scenes?.length||0)+
+        ' · 角色 '+(e.delta?.characters?.length||0)+' · 计划 '+(e.delta?.plans?.length||0)
+    }),'floor');
     const skipped=Object.keys(mem.skippedFloors||{}).map(Number).filter(i=>
       mem.skippedFloors[i]?.fingerprint===messageFingerprint(ctx?.chat?.[i])&&
       mem.skippedFloors[i]?.userFingerprint===userFingerprint(ctx.chat,i)).sort((a,b)=>a-b);
@@ -406,13 +443,13 @@ export function mountUI(api){
 
     const aliases=Object.values(mem.entityAliases?.[kind]||{});
     if(entries.length>=2||aliases.length){
-      const panel=el('details','sm-manual sm-entity-merge');
+      const panel=el('details','sm-manual sm-entity-merge-panel');
       const heading=el('summary','sm-manual-head');
       const label=el('span','sm-manual-title');
       label.append(el('span','','合并同一实体的不同称呼'));
       heading.append(label,svg('chevron'));
       const inside=el('div','sm-manual-content');
-      inside.append(el('p','sm-help','只有确定是同一个物品、场景或角色时才合并；不删除原始摘要，可撤销合并。'));
+      inside.append(el('p','sm-help','确认是同一对象后再合并，之后可以撤销。'));
       if(entries.length>=2){
         const pair=el('div','sm-fields-grid');
         function entityPicker(titleText){
@@ -439,7 +476,7 @@ export function mountUI(api){
           if(!window.confirm('确认「'+source.name+'」与「'+target.name+'」指同一实体？合并后以「'+target.name+'」显示，可随时撤销。'))return;
           try{api.mergeEntity(kind,source.entity_id,target.entity_id);showNotice('已合并重复记录');}
           catch(e){showNotice(e.message||'合并失败');}
-        },'sm-btn sm-btn-primary'));
+        },'sm-btn sm-btn-primary sm-entity-merge-confirm'));
       }
       if(aliases.length){
         const ruleList=el('div','sm-entity-alias-list');
@@ -456,8 +493,10 @@ export function mountUI(api){
       }
       panel.append(heading,inside);body.append(panel);
     }
-    manualList(kind,mem.manual[kind]);
-    if(!entries.length&&!mem.manual[kind].length)emptyState('package','暂无'+heading+'记录','从剧情提取后会显示在这里，也可以手动添加。');
+    const manual=mem.manual?.[kind]||[];
+    manualList(kind,manual);
+    if(!entries.length&&!manual.length)emptyState(kind==='plans'?'target':'package',
+      '暂无'+heading+'记录','从剧情提取后会显示在这里，也可以手动添加。');
     manualInput(kind);
   }
   function accordion(id,label,description,children){
@@ -521,8 +560,9 @@ export function mountUI(api){
     });
     modelLine.append(modelInput,modelPicker,refreshModels);modelWrap.append(modelLabel,modelLine);
     const temp=field('温度',cfg.api.temperature,'number');
-    const max=field('最大输出 Tokens',cfg.api.maxTokens,'number','上限 65536；具体可用上限以所选模型为准。');
-    max.input.max='65536';max.input.min='256';
+    const max=field('输出上限（可选）',cfg.api.maxTokens??'','number',
+      '留空沿用模型或酒馆的默认输出长度；输出不完整时再填写。');
+    max.input.placeholder='自动';max.input.max='65536';max.input.min='256';
     const customFields=el('div','sm-form-stack');
     customFields.append(apiUrl.wrapper,apiKey.wrapper,modelWrap,grid(temp.wrapper,max.wrapper));
     const updateMode=()=>{const custom=mode.value==='custom';customFields.hidden=!custom;modeTip.hidden=custom;};
@@ -552,8 +592,7 @@ export function mountUI(api){
       modeWrap,modeTip,customFields
     ]));
 
-    // Keep settings compact: one auto-summary panel and one three-column compression strip.
-    const auto=switchRow('自动摘要',cfg.autoSummary,'只处理已离开延迟窗口的楼层');
+    const auto=switchRow('自动摘要',cfg.autoSummary,'按延迟楼层自动整理剧情');
     const hide=switchRow('摘要完成后自动隐藏',cfg.summary.autoHide??true,
       '仅隐藏确认已摘要的旧楼层，原文仍可恢复');
     const recent=field('保留正文',cfg.summary.keepRecent,'number');
@@ -562,8 +601,6 @@ export function mountUI(api){
     recent.input.setAttribute('aria-label','保留正文（AI 楼层）');
     delay.input.setAttribute('aria-label','延迟摘要（AI 楼层）');
     const autoPanel=el('section','sm-summary-panel');
-    const autoHead=el('div','sm-summary-head');
-    autoHead.append(el('strong','','自动整理'),el('small','','控制整理时机与正文保留'));
     const autoGrid=el('div','sm-summary-control-grid');
     for(const [entry,description] of [
       [delay,'最近 AI 楼层暂不摘要'],[recent,'始终保留在上下文']
@@ -575,8 +612,14 @@ export function mountUI(api){
       inputWrap.append(entry.input,unit);card.append(label,inputWrap);
       autoGrid.append(card);
     }
-    const hideNote=el('p','sm-summary-note','仅排除已成功摘要、离开保护窗口的旧楼层。');
-    autoPanel.append(autoHead,auto.wrapper,autoGrid,hide.wrapper,hideNote);
+    const updateAuto=()=>{
+      delay.input.disabled=!auto.input.checked;
+      autoGrid.children[0]?.classList?.toggle('is-disabled',!auto.input.checked);
+    };
+    auto.input.addEventListener('change',updateAuto);
+    updateAuto();
+    const hideNote=el('p','sm-summary-note','仅隐藏已摘要且离开保留窗口的旧楼层。');
+    autoPanel.append(auto.wrapper,autoGrid,hide.wrapper,hideNote);
 
     function levelSetting(level,name,description,value){
       const panel=el('div','sm-level-cell');
@@ -615,29 +658,37 @@ export function mountUI(api){
     keepRow.append(keepControl);
     compression.append(compHead,pipeline,levelStrip,keepRow);
 
-    const sourceLimit=field('单次正文上限（字符）',cfg.summary.maxInputChars,'number');
     const retries=field('网络失败重试次数',cfg.summary.retry,'number');
     const advanced=el('details','sm-summary-advanced'),advancedHead=el('summary','sm-summary-advanced-head');
     const advancedCopy=el('span','sm-summary-advanced-copy');
-    advancedCopy.append(el('strong','','高级选项'),el('small','','正文限制、网络重试'));
+    advancedCopy.append(el('strong','','高级选项'));
     advancedHead.append(advancedCopy,svg('chevron'));
     const advancedBody=el('div','sm-summary-advanced-body');
-    advancedBody.append(grid(sourceLimit.wrapper,retries.wrapper));
+    advancedBody.append(retries.wrapper);
     advanced.append(advancedHead,advancedBody);
-    box.append(accordion('summary','摘要设置','自动整理、延迟摘要、楼层隐藏与分层压缩',[
+    box.append(accordion('summary','摘要设置','自动摘要、楼层隐藏与分层压缩',[
       autoPanel,compression,advanced
     ]));
 
-    const flags=[['summary','剧情摘要'],['inventory','物品状态'],
-      ['scenes','场景地点'],['characters','人物档案'],
+    const flags=[['inventory','物品状态'],['scenes','场景地点'],
+      ['characters','人物档案'],['plans','计划与伏笔'],
       ['retrieval','相关历史'],['vector','向量召回']]
-      .map(([key,label])=>[key,switchRow(label,cfg.injection[key])]);
+      .map(([key,label])=>[key,switchRow(label,cfg.injection[key]??(key==='plans'))]);
     const flagGroup=el('div','sm-switch-grid');
     flagGroup.append(...flags.map(([,x])=>x.wrapper));
-    const budget=field('注入预算（估算 Tokens）',cfg.injection.budget,'number');
+    const budget=field('RP 记忆预算（近似 Tokens）',cfg.injection.budget,'number',
+      '控制每轮交给主模型的记忆长度，和摘要 API 输出无关。');
+    const previewButton=button('查看注入预览',()=>{
+      const previewCfg=structuredClone(cfg);
+      for(const [key,value] of flags)previewCfg.injection[key]=value.input.checked;
+      previewCfg.injection.budget=Number(budget.input.value)||4500;
+      previewCfg.retrieval={...previewCfg.retrieval,enabled:retrievalEnabled.input.checked,
+        maxHits:Math.max(1,Math.min(10,Number(recallCount.input.value)||5)),
+        maxSources:Math.max(0,Math.min(5,Number(sourceCount.input.value)||0))};
+      openInjectionPreview(previewButton,previewCfg);
+    },'sm-btn');
     const injectionPanel=accordion('inject','注入设置','选择发送给主模型的记忆',[
-      flagGroup,budget.wrapper,
-      button('查看注入预览',()=>{page='preview';render();},'sm-btn')
+      flagGroup,budget.wrapper,previewButton
     ]);
 
     const retrievalEnabled=switchRow('自动查找历史',cfg.retrieval?.enabled!==false);
@@ -661,7 +712,7 @@ export function mountUI(api){
     const rerankModel=field('重排模型',cfg.vector.rerankModel||'BAAI/bge-reranker-v2-m3');
     const rerankCount=field('重排候选数',cfg.vector.rerankCandidates??15,'number');
     rerankCount.input.min='2';rerankCount.input.max='30';
-    const vectorHelp=el('p','sm-help','向量和重排共用 API 地址与密钥。重排会产生额外请求，使用前请确认服务商支持。');
+    const vectorHelp=el('p','sm-help','向量和重排共用 API 地址与密钥。');
     const vectorActions=el('div','sm-row-actions');
     vectorActions.append(button('更新当前聊天索引',async()=>{
       showNotice('正在更新向量索引…');
@@ -710,7 +761,10 @@ export function mountUI(api){
         next.api.url=apiUrl.input.value.trim();next.api.key=apiKey.input.value.trim();
         next.api.model=modelInput.value.trim();
         next.api.temperature=Math.max(0,Math.min(2,Number(temp.input.value)||0));
-        next.api.maxTokens=Math.max(256,Math.min(65536,Number(max.input.value)||8192));
+        const outputRaw=max.input.value.trim();
+        if(outputRaw&&(!Number.isInteger(Number(outputRaw))||Number(outputRaw)<256||Number(outputRaw)>65536))
+          throw Error('输出上限须为 256 到 65536 的整数，或留空自动');
+        next.api.maxTokens=outputRaw?Number(outputRaw):null;
         next.api.include=parseExtraBody(included.value);
         next.api.exclude=parseExcluded(excluded.value);
         next.api.headers=parseHeaderLines(headers.value);
@@ -722,10 +776,11 @@ export function mountUI(api){
         next.summary.resummaryThreshold=Math.max(0,Math.min(100,Number(second.input.value)||0));
         next.summary.higherResummaryThreshold=Math.max(0,Math.min(100,Number(higher.input.value)||0));
         delete next.summary.chapterEvery;
-        next.summary.maxInputChars=Math.max(2000,Math.min(30000,Number(sourceLimit.input.value)||16000));
+        delete next.summary.maxInputChars;
         next.summary.retry=Math.max(0,Math.min(2,Number(retries.input.value)||0));
         next.injection.budget=Number(budget.input.value)||4500;
         for(const [key,value] of flags)next.injection[key]=value.input.checked;
+        delete next.injection.summary;
         next.retrieval={enabled:retrievalEnabled.input.checked,
           maxHits:Math.max(1,Math.min(10,Number(recallCount.input.value)||5)),
           maxSources:Math.max(0,Math.min(5,Number(sourceCount.input.value)||0))};
@@ -749,7 +804,7 @@ export function mountUI(api){
           if(next.prompts[key]===defaultText)next.prompts[key]='';
         }
         delete next.api.secretId;delete next.vector.source;
-        api.saveSettings(next);showNotice('设置已保存');
+        api.saveSettings(next);showSaveSuccess();
       }catch(e){showNotice('保存失败：'+e.message);}
     },'sm-btn sm-btn-primary');
     const reset=button('恢复默认',()=>{
@@ -775,23 +830,51 @@ export function mountUI(api){
         };
         api.saveSettings(defaults);
         render();
-        showNotice('已恢复默认设置（保留 API 连接信息）');
+        showSaveSuccess('默认设置已恢复');
       }catch(e){showNotice('恢复失败：'+e.message);}
     },'sm-btn');
     reset.setAttribute('data-testid','reset-settings');
     saveBar.append(reset,save);box.append(saveBar);body.append(box);
   }
-  function renderPreview(){
-    const ctx=api.context(),memory=api.memory(),cfg=api.settings();
-    const recalled=cfg.retrieval?.enabled!==false?api.previewHistory?.(ctx,memory)||[]:[];
+  function openInjectionPreview(trigger,previewSettings=null){
+    clearSaveToast();closeRecordModal(false);
+    recordReturnFocus=trigger||null;
+    const ctx=api.context(),memory=api.memory(),cfg=previewSettings||api.settings();
+    const recalled=cfg.retrieval?.enabled!==false?api.previewHistory?.(ctx,memory,cfg)||[]:[];
     const result=injectionText(memory,ctx?.chat||[],cfg,[],recalled);
-    title('注入预览','查看下一轮对话将使用的记忆内容');
-    const textarea=textArea(result||'当前没有需要注入的记忆。',13);textarea.readOnly=true;
-    body.append(textarea,el('p','sm-help','内容会随剧情变化。'));
+    const overlay=el('div','sm-record-modal-overlay');
+    const panel=el('section','sm-record-modal sm-preview-modal');
+    recordOverlay=overlay;
+    panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');
+    const heading=el('h3','sm-record-modal-title','注入预览');
+    heading.id='sm-injection-preview-heading';
+    panel.setAttribute('aria-labelledby',heading.id);
+    const header=el('div','sm-record-modal-head');
+    const close=button('',()=>closeRecordModal(),'sm-record-modal-close');
+    close.append(svg('x'));close.setAttribute('aria-label','关闭弹窗');
+    header.append(heading,close);
+    const content=el('div','sm-record-modal-body');
+    const textarea=textArea(result||'当前没有需要注入的记忆。',15);
+    textarea.readOnly=true;textarea.setAttribute('aria-label','注入预览内容');
+    content.append(textarea);
+    const footer=el('div','sm-record-modal-footer');
+    const done=button('关闭',()=>closeRecordModal(),'sm-btn sm-btn-primary');
+    footer.append(done);
+    panel.append(header,content,footer);overlay.append(panel);dialog.append(overlay);
+    layout.inert=true;top.inert=true;
+    overlay.addEventListener('click',e=>{if(e.target===overlay)closeRecordModal();});
+    overlay.addEventListener('keydown',e=>{
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation?.();closeRecordModal();return;}
+      if(e.key!=='Tab')return;
+      const focusables=[close,textarea,done],first=focusables[0],last=focusables[focusables.length-1];
+      if(e.shiftKey&&e.target===first){e.preventDefault();last.focus();}
+      else if(!e.shiftKey&&e.target===last){e.preventDefault();first.focus();}
+    });
+    close.focus?.();
   }
   function render(){
     if(!active)return;
-    closeRecordModal(false);
+    clearSaveToast();closeRecordModal(false);
     body.replaceChildren();nav.replaceChildren();
     for(const [name,label,icon] of NAV){
       const item=button('',()=>{if(page===name)return;page=name;notice='';render();body.scrollTop=0;},'sm-nav-item'+(page===name?' is-current':''));
@@ -801,8 +884,8 @@ export function mountUI(api){
     else if(page==='items')renderCollection('items','物品','重要物件和持有状态');
     else if(page==='scenes')renderCollection('scenes','场景','地点与环境记录');
     else if(page==='characters')renderCollection('characters','角色','人物档案及关系变化');
+    else if(page==='plans')renderCollection('plans','计划','未完成任务、约定与剧情伏笔');
     else if(page==='settings')renderSettings();
-    else renderPreview();
     if(notice)showNotice(notice);
   }
   return {open,refresh(){

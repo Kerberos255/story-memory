@@ -69,9 +69,14 @@ export function makeBody(channel,messages) {
       .filter(name=>typeof name==='string'&&/^[a-zA-Z_][\w.-]{0,99}$/.test(name))
       .map(name=>'- '+name).join('\n'),
     model:channel.model.trim(),messages,stream:false,tool_choice:'none',
-    temperature:Number.isFinite(Number(channel.temperature))?Number(channel.temperature):0,
-    max_tokens:Math.max(256,Math.min(65536,Math.trunc(Number(channel.maxTokens)??8192)||8192))
+    temperature:Number.isFinite(Number(channel.temperature))?Number(channel.temperature):0
   };
+  // A blank limit defers to the provider's or SillyTavern's response setting.
+  if(channel.maxTokens!==null&&channel.maxTokens!==undefined&&String(channel.maxTokens).trim()!==''){
+    const cap=Number(channel.maxTokens);
+    if(!Number.isInteger(cap)||cap<256||cap>65536)throw new ApiFault('输出上限应为 256 到 65536 的整数');
+    body.max_tokens=cap;
+  }
   // ST applies custom_exclude_body against the final upstream request; do not remove
   // local body fields, which would bypass ST's actual parameter exclusion logic.
   return body;
@@ -87,7 +92,13 @@ export async function requestChat(channel,messages,ctx,externalSignal) {
     if(externalSignal?.aborted)throw new ApiFault('请求已取消',0,'cancelled');
     if(typeof ctx?.generateRaw!=='function')throw new ApiFault('当前酒馆不支持跟随主 API');
     try{
-      const text=await ctx.generateRaw({prompt:messages,responseLength:Math.max(256,Math.min(65536,Number(channel.maxTokens)||8192))});
+      const options={prompt:messages};
+      if(channel.maxTokens!==null&&channel.maxTokens!==undefined&&String(channel.maxTokens).trim()!==''){
+        const cap=Number(channel.maxTokens);
+        if(!Number.isInteger(cap)||cap<256||cap>65536)throw new ApiFault('输出上限应为 256 到 65536 的整数');
+        options.responseLength=cap;
+      }
+      const text=await ctx.generateRaw(options);
       if(externalSignal?.aborted)throw new ApiFault('请求已取消',0,'cancelled');
       if(typeof text!=='string'||!text.trim())throw new ApiFault('主 API 返回空内容',502,'empty_response');
       return text.trim();
@@ -106,10 +117,16 @@ export async function requestChat(channel,messages,ctx,externalSignal) {
     const response=await fetch('/api/backends/chat-completions/generate',{
       method:'POST',headers:ctx.getRequestHeaders(),body:JSON.stringify(body),signal:controller.signal
     });
-    if(!response.ok)throw new ApiFault('副 API 返回 HTTP '+response.status,response.status,'upstream_http_'+response.status);
+    if(!response.ok)throw new ApiFault('副 API 返回 HTTP '+response.status,response.status,
+      response.status===413?'request_too_large':'upstream_http_'+response.status);
     const json=await response.json().catch(()=>{throw new ApiFault('副 API 返回无效 JSON',502,'invalid_api_response');});
     // Some ST proxy paths wrap upstream 4xx in a 200 JSON error. Never retry unknown policy errors.
-    if(json?.error)throw new ApiFault('副 API 返回错误',422,'upstream_rejected');
+    if(json?.error){
+      const code=String(json.error.code||'');
+      if(['context_length_exceeded','context_window_exceeded'].includes(code))
+        throw new ApiFault('请求超出模型上下文',422,'context_length_exceeded');
+      throw new ApiFault('副 API 返回错误',422,'upstream_rejected');
+    }
     const content=pullText(json).trim();
     if(!content)throw new ApiFault('副 API 返回空内容',502,'empty_response');
     return content;
@@ -139,17 +156,17 @@ export const DEFAULT_SUMMARY_PROMPT=[
   '【来源边界】区分「本轮新剧情」和「以前的摘要」。已有摘要只用于去重与理解因果，不得当作本轮新事件重复登记。',
   '【剧情摘要】按「用户的行动或话语 → 其他人物/AI 的反应 → 确认结果或仍未解决的问题」整理本轮事件。记录对话双方的实际行为，不把用户指令或传闻写成已完成剧情。',
   '【事实边界】区分叙事已经确认、人物声称/误信/怀疑、将来计划、条件性承诺、已发生结果。「打算做」不等于「已经做」，「停止瞄准」不等于「解除武装」。原文无依据就保留未知，禁止补造时间、数字、人物知识或好感。',
-  '【持续事实】一次性动作只进 summary；状态表只更新结束后仍有效的身份、归属、关系、任务、人物知情等。场景结束、角色离场或许久没提，不等于持续事实自动终止；同一事项更新旧实体，不新增同义记录。无变化就输出空数组。',
+  '【持续事实】一次性动作只进 summary；状态表记录结束后仍有效的身份、归属、关系、任务、人物知情等。首次明确出现且对后续剧情有意义的人物、重要物品、重要场景，即使暂无后续变化，也要用 add 登记；原文未证实身份或重要性的路人布景不登记。同一事项更新旧实体，不新增同义记录。已有实体无变化输出空数组。',
   '【原文证据】结构化条目的新事实或状态变更尽量附 evidence：从本轮用户或 AI 正文逐字摘取连续原句，不可改写、跨句拼接或引用已有记忆作为证据。确实没有依据就不输出该变更；矛盾未确认时留在摘要中作为争议信息，不覆盖旧状态。',
   '【时间 time】只记录原文明确提供的剧情时间；完整日期与时刻统一 YYYY/MM/DD HH:mm，范围统一 YYYY/MM/DD HH:mm–HH:mm。不要添加星期、地点、装饰符号。只有时刻则用 HH:mm 或 HH:mm–HH:mm，时间不明确则留空。地点单独填写 location。',
-  '【物品 items】只记录本轮确实发生的取得、交付、消耗、遗失或状态变化；写明归属 owner、存放地点 location、证据确凿的数量 quantity。已有物品没有变化就不更新。',
+  '【物品 items】首次出现且对后续剧情重要的物品用 add 登记；取得、交付、消耗、遗失或状态变化则新增或更新对应实体。写明确定的归属 owner、存放地点 location、数量 quantity。已有物品没有变化就不更新。',
   '【实体身份】物品、场景、人物各自都有稳定身份，不能因为称呼、归属、位置或状态变化就新建实体。先查下方现有实体表：如果是同一个对象，使用已有的 entity_id，并尽量沿用其 name；仅有证据证明是不同对象时才新增。不能只凭类似名称、同类别或同一主人认定为同一个实体。每类同一实体在同一轮最多输出一次变化，记录最终状态。',
   '【场景 scenes】只记录重要的新地点、环境变化和地点间关系；角色的短暂位移可以写进剧情摘要，必要时在 characters.location 更新。',
-  '【人物 characters】记录人物可核实的身份、当前状态、位置与关系变化。知识边界直接挂在已有 characters 的 knowledge 数组：每项 {fact,stance,evidence,op?}，stance 只能为 knows（确知）、suspects（怀疑）、believes（误信）、hides（明确隐瞒）；每条事实须有本轮原文连续引文 evidence。人物未听见、未在场或全知叙述揭露的信息，不能自动算作该人物知道。知识无变化时不发送 knowledge；获悉新事实用 upsert，明确得知旧认知不再成立时才用 op=remove。不要为同一 NPC 的知情信息另建角色。',
+  '【人物 characters】首次明确出现、对后续剧情有意义的人物用 add 登记；已有角色的可核实身份、当前状态、位置或关系发生变化时用 update。知识边界直接挂在已有 characters 的 knowledge 数组：每项 {fact,stance,evidence,op?}，stance 只能为 knows（确知）、suspects（怀疑）、believes（误信）、hides（明确隐瞒）；每条事实须有本轮原文连续引文 evidence。人物未听见、未在场或全知叙述揭露的信息，不能自动算作该人物知道。知识无变化时不发送 knowledge；获悉新事实用 upsert，明确得知旧认知不再成立时才用 op=remove。不要为同一 NPC 的知情信息另建角色。',
   '【计划 plans】保留承诺、约定、正在执行的计划、已结束的任务与长期伏笔；status 表示当前进度，kind 为 plan 或 suspense。',
   '【变更操作】op=add 表示新出现，update 表示原记录被改变，remove 仅在原文明确删除、失去或终止时使用。不得重复结算同一事件。',
   '【内容处理】忽略对话外的控制标签、思考过程和格式噪声。只概括符合服务规则、对剧情连续性必要的非露骨事实。',
-  '【输出】严格输出一个合法 JSON 对象，不包含 Markdown 围栏、解释、思考标签或任何工具调用。必填 summary。',
+  '【输出】严格输出一个合法 JSON 对象，不包含 Markdown 围栏、解释、思考标签或任何工具调用。必填 summary；items、scenes、characters、plans 为顶层数组，有相应实体新出现或发生变化时必须输出对应条目，不能只写在 summary 里。',
   'JSON 字段示例（不是必须填满所有字段）：',
   '{"summary":"按时间顺序整理本轮剧情","time":"有依据时填写故事时间","location":"有依据时填写当前地点",',
   '"items":[{"op":"update","entity_id":"已存在实体的完整 ID（新物品省略）","name":"沿用旧名称","quantity":1,"owner":"持有者","location":"存放地点","description":"物品变化"}],',
@@ -178,19 +195,19 @@ export const DEFAULT_OVERVIEW_PROMPT=[
 export function effectiveSummaryPrompt(settings) {
   const full=settings.prompts?.summaryFull?.trim();
   if(full)return full;
-  const extras=settings.prompts?.summary?.trim()?.slice(0,6000);
+  const extras=settings.prompts?.summary?.trim();
   return DEFAULT_SUMMARY_PROMPT+(extras?'\n\n【补充要求】\n'+extras:'');
 }
 export function effectiveChapterPrompt(settings,kind='chapter') {
   return settings.prompts?.[kind]?.trim()||(kind==='overview'?DEFAULT_OVERVIEW_PROMPT:kind==='resummary2'?DEFAULT_RESUMMARY2_PROMPT:DEFAULT_CHAPTER_PROMPT);
 }
-export function buildSummaryMessages(index,chat,memory,settings){
+export function buildSummaryMessages(index,chat,memory,settings,sourceOverride=null){
   const msg=chat[index];
   if(!msg||msg.is_user||(msg.is_system&&!msg.extra?.story_memory_hidden)||!msg.mes?.trim())throw new ApiFault('楼层不是有效 AI 剧情');
-  const preceding=floorUserMessages(chat,index).map(u=>String(u.mes||'')).join('\n\n').slice(-6000);
+  const preceding=floorUserMessages(chat,index).map(u=>String(u.mes||'')).join('\n\n');
   const prior=Object.keys(memory.leaves||{}).map(Number).filter(i=>i<index&&leafValid(memory,chat,i)).sort((a,b)=>a-b).slice(-3).map(i=>memory.leaves[i]?.summary||'').join('\n').slice(-3500);
-  const maxChars=Math.max(2000,Math.min(30000,Number(settings.summary?.maxInputChars)||16000));
-  const source='【本轮用户输入】\n'+preceding+'\n\n【本轮 AI 剧情】\n'+String(msg.mes).slice(-maxChars);
+  // Automatic multi-request processing passes a complete, ordered source segment.
+  const source=sourceOverride??('【本轮用户输入】\n'+preceding+'\n\n【本轮 AI 剧情】\n'+String(msg.mes));
   // A manual backfill must not expose future story events to earlier floors.
   const history={...memory,leaves:Object.fromEntries(Object.entries(memory.leaves||{}).filter(([floor])=>Number(floor)<index))};
   const state=deriveState(history,chat);
@@ -218,7 +235,7 @@ export function buildSummaryMessages(index,chat,memory,settings){
     }
   }
   const catalog=catalogSections.join('\n\n');
-  const instruction=effectiveSummaryPrompt(settings).slice(0,14000);
+  const instruction=effectiveSummaryPrompt(settings);
   return [{role:'system',content:instruction},{role:'user',content:'【已有摘要，仅供去重】\n'+prior+'\n\n'+(catalog?catalog+'\n\n【实体引用要求】如为上述已有实体，请引用完全一致的 entity_id，保留统一名称；如无法确定则不要猜测 ID。\n\n':'')+source}];
 }
 export function buildChapterMessages(entries,settings,kind='chapter'){

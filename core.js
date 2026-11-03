@@ -4,16 +4,16 @@ export const SETTINGS_KEY = 'story_memory_settings_v1';
 
 export function defaultSettings() {
   return {
-    enabled: true, autoSummary: true, api: {name:'摘要 API',mode:'main',url:'',key:'',model:'',headers:{},exclude:[],include:{},maxTokens:8192,timeout:90,temperature:0},
-    summary: {keepRecent:3,autoHide:true,delayFloors:3,leafBatchThreshold:12,leafKeepRecent:3,resummaryThreshold:6,higherResummaryThreshold:3,retry:1,maxInputChars:16000},
-    injection: {summary:true,inventory:true,scenes:true,characters:true,vector:false,retrieval:true,budget:4500},
+    enabled: true, autoSummary: true, api: {name:'摘要 API',mode:'main',url:'',key:'',model:'',headers:{},exclude:[],include:{},maxTokens:null,timeout:90,temperature:0},
+    summary: {keepRecent:3,autoHide:true,delayFloors:3,leafBatchThreshold:12,leafKeepRecent:3,resummaryThreshold:6,higherResummaryThreshold:3,retry:1},
+    injection: {inventory:true,scenes:true,characters:true,plans:true,vector:false,retrieval:true,budget:4500},
     retrieval: {enabled:true,maxHits:5,maxSources:3},
     prompts: {summary:'',summaryFull:'',chapter:'',resummary2:'',overview:''},
     vector: {enabled:false,url:'https://api.siliconflow.cn/v1',key:'',model:'BAAI/bge-m3',topK:5,threshold:0.35,rerankEnabled:false,rerankModel:'BAAI/bge-reranker-v2-m3',rerankCandidates:15}
   };
 }
 export function freshMemory() {
-  return {version:1,leaves:{},chapters:[],skippedFloors:{},skippedPlans:[],entityAliases:{},manual:{summaries:[],items:[],scenes:[],characters:[]},tasks:{},revision:0};
+  return {version:1,leaves:{},chapters:[],skippedFloors:{},skippedPlans:[],entityAliases:{},manual:{summaries:[],items:[],scenes:[],characters:[],plans:[]},tasks:{},revision:0};
 }
 /** Read-only access to canonical data. Never mutate the returned object. */
 export function peekMemory(ctx) {
@@ -99,12 +99,17 @@ export function formatStoryTime(value) {
 }
 export function normalizeDelta(raw,sourceText='') {
   if(!raw||typeof raw!=='object'||Array.isArray(raw))throw Error('摘要 JSON 必须是对象');
-  const summary=cleanString(raw.summary,8000);
-  if(!summary) throw Error('缺少 summary');
+  const summary=typeof raw.summary==='string'?raw.summary.trim():'';
+  if(!summary)throw Error('缺少 summary');
+  if(summary.length>100000)throw Error('模型输出摘要异常冗长');
   const delta={items:[],scenes:[],characters:[],plans:[]};
+  // Some models return state changes under delta/entities even when the prompt requests top-level arrays.
+  // Prefer the explicit top-level field and normalize both formats through the same validation.
+  const candidates=[raw,raw.delta,raw.entities,raw.state].filter(x=>x&&typeof x==='object'&&!Array.isArray(x));
   for(const kind of Object.keys(delta)){
-    if(raw[kind]!==undefined && !Array.isArray(raw[kind]))throw Error(kind+' 必须为数组');
-    for(const item of (raw[kind]||[]).slice(0,35)){
+    const values=candidates.find(x=>x[kind]!==undefined)?.[kind];
+    if(values!==undefined&&!Array.isArray(values))throw Error(kind+' 必须为数组');
+    for(const item of (values||[]).slice(0,35)){
       if(!item||typeof item!=='object'||Array.isArray(item))continue;
       const op=['add','update','remove'].includes(item.op)?item.op:'update';
       const name=cleanString(item.name,120);
@@ -137,10 +142,12 @@ export function normalizeDelta(raw,sourceText='') {
   }
   return {summary,time:formatStoryTime(raw.time),location:cleanString(raw.location,180),delta};
 }
-export function commitLeaf(memory,index,fingerprint,data,userFp='') {
+export function commitLeaf(memory,index,fingerprint,data,userFp='',complete=false) {
   if(!Number.isInteger(index)||index<0||!fingerprint)throw Error('楼层标识无效');
   const next=structuredClone(memory);
-  next.leaves[index]={id:'floor:'+index,sourceIndex:index,fingerprint,userFingerprint:userFp,summary:data.summary,time:data.time,location:data.location,delta:data.delta,updatedAt:Date.now()};
+  next.leaves[index]={id:'floor:'+index,sourceIndex:index,fingerprint,userFingerprint:userFp,summary:data.summary,
+    time:data.time,location:data.location,delta:data.delta,sourceComplete:complete,
+    ...(Array.isArray(data.sourceParts)&&data.sourceParts.length>1?{sourceParts:data.sourceParts}:{}),updatedAt:Date.now()};
   delete next.tasks[index];
   if(next.skippedFloors)delete next.skippedFloors[index];
   // Any changed leaf invalidates its ancestor compression chain, not other chapters.
@@ -217,10 +224,11 @@ export function deleteGeneratedChapter(memory,chat,id){
   next.revision++;return next;
 }
 export function addManual(memory,kind,entry) {
-  if(!['summaries','items','scenes','characters'].includes(kind))throw Error('未知记录类型');
+  if(!['summaries','items','scenes','characters','plans'].includes(kind))throw Error('未知记录类型');
   const text=cleanString(entry,12000);
   if(!text)throw Error('不能保存空白记录');
   const next=structuredClone(memory);
+  next.manual[kind]??=[];
   next.manual[kind].push({id:'manual:'+Date.now()+':'+Math.random().toString(36).slice(2,8),text,updatedAt:Date.now()});
   next.revision++;
   return next;
@@ -339,7 +347,7 @@ export function deriveState(memory,chat) {
       }
     }
   }
-  for(const kind of ['items','scenes','characters']){
+  for(const kind of ['items','scenes','characters','plans']){
     for(const m of memory.manual?.[kind]||[]){
       // Manual notes do not silently overwrite AI-generated structured facts.
       sections[kind].set(m.id,{name:m.text,manual:true});
@@ -361,23 +369,22 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[])
     return note(JSON.stringify(publicState));
   };
   // High priority: user-authored memories and currently effective facts.
-  if(cfg.summary)add('【人工补充记忆】',(memory.manual?.summaries||[]).slice(-12).map(x=>note(x.text)));
+  add('【人工补充记忆】',(memory.manual?.summaries||[]).slice(-12).map(x=>note(x.text)));
   if(cfg.characters)add('【人物】',(state.characters||[]).slice(-45).map(entityLine));
-  if(cfg.summary)add('【计划与伏笔】',(state.plans||[]).filter(x=>x.status!=='已完成').slice(-25).map(entityLine));
+  if(cfg.plans!==false)add('【计划与伏笔】',(state.plans||[])
+    .filter(x=>x.manual||x.status!=='已完成').slice(-25).map(entityLine));
   if(cfg.retrieval!==false&&settings.retrieval?.enabled!==false)
     add('【相关历史】',historyHits.map(x=>note(x.text)));
   if(cfg.inventory)add('【物品】',(state.items||[]).slice(-45).map(entityLine));
   if(cfg.scenes)add('【场景】',(state.scenes||[]).slice(-45).map(entityLine));
-  if(cfg.summary){
-    const chapters=validChapters(memory,chat);
-    const nested=new Set(chapters.filter(c=>c.level>1).flatMap(c=>c.children||[]));
-    const covered=new Set(chapters.flatMap(c=>c.children||[]));
-    const keepStart=recentAiStart(chat,Math.max(0,Number(settings.summary?.keepRecent??6)));
-    const visible=state.timeline.filter(leaf=>leaf.sourceIndex<keepStart&&!covered.has(leaf.id)).slice(-22);
-    add('【剧情摘要】',visible.map(x=>({text:(x.time?'['+x.time+'] ':'')+x.summary,identity:x.summary})));
-    const roots=chapters.filter(c=>!nested.has(c.id)).slice(-12);
-    add('【分层剧情记忆】',roots.map(x=>({text:'[L'+x.level+'] '+x.summary,identity:x.summary})));
-  }
+  const chapters=validChapters(memory,chat);
+  const nested=new Set(chapters.filter(c=>c.level>1).flatMap(c=>c.children||[]));
+  const covered=new Set(chapters.flatMap(c=>c.children||[]));
+  const keepStart=recentAiStart(chat,Math.max(0,Number(settings.summary?.keepRecent??6)));
+  const visible=state.timeline.filter(leaf=>leaf.sourceIndex<keepStart&&!covered.has(leaf.id)).slice(-22);
+  add('【剧情摘要】',visible.map(x=>({text:(x.time?'['+x.time+'] ':'')+x.summary,identity:x.summary})));
+  const roots=chapters.filter(c=>!nested.has(c.id)).slice(-12);
+  add('【分层剧情记忆】',roots.map(x=>({text:'[L'+x.level+'] '+x.summary,identity:x.summary})));
   if(cfg.vector)add('【相关旧记忆】',vectorHits.map(x=>note(x.text)));
   const budget=Math.max(400,Math.min(18000,Number(cfg.budget)||4500))*3;
   let remaining=budget;
@@ -496,10 +503,10 @@ export function hideReadyIndices(memory,chat,settings){
     const m=chat[index],fp=messageFingerprint(m);
     if(!fp || !leafValid(memory,chat,index) || !memory.leaves[index].userFingerprint)continue;
     const fullText=String(m.mes||'');
-    const maxChars=Math.max(2000,Math.min(30000,Number(cfg.maxInputChars)||16000));
     const inputs=floorUserMessages(chat,index);
-    // Never exclude material the summary request truncated.
-    if(fullText.length>maxChars||inputs.map(u=>String(u.mes||'')).join('\n\n').length>6000)continue;
+    // Legacy summaries lack a coverage marker, so keep possible old truncations visible.
+    if(memory.leaves[index].sourceComplete!==true &&
+      (fullText.length>16000||inputs.map(u=>String(u.mes||'')).join('\n\n').length>6000))continue;
     if(!m.is_system && !m.extra?.story_memory_hidden)result.add(index);
     // The summary request includes user messages belonging to this floor.
     for(let i=index-1;i>=0;i--){
