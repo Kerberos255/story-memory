@@ -212,6 +212,38 @@ export function mountUI(api){
     });
     (isDelete?cancel:editor)?.focus?.();
   }
+  function openSourceModal(entry,type,trigger){
+    closeRecordModal(false);
+    recordReturnFocus=trigger||null;
+    const overlay=el('div','sm-record-modal-overlay'),panel=el('section','sm-record-modal');
+    recordOverlay=overlay;
+    panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');
+    const header=el('div','sm-record-modal-head');
+    const title=el('h3','sm-record-modal-title','剧情原文');
+    title.id='sm-story-source-heading';panel.setAttribute('aria-labelledby',title.id);
+    const close=button('',()=>closeRecordModal(),'sm-record-modal-close');
+    close.append(svg('x'));close.setAttribute('aria-label','关闭');header.append(title,close);
+    const content=el('div','sm-record-modal-body');
+    const ctx=api.context(),key=type==='floor'?'floor:'+entry.sourceIndex:entry.id;
+    const records=api.sourcePreview?.(ctx,api.memory(),key)||[];
+    if(!records.length)content.append(el('p','sm-help','没有找到可查看的原文。'));
+    for(const item of records){
+      const label=el('p','sm-field-label','#'+item.index);
+      const text=textArea(item.text,7);text.readOnly=true;
+      content.append(label,text);
+    }
+    const footer=el('div','sm-record-modal-footer');
+    footer.append(button('关闭',()=>closeRecordModal(),'sm-btn sm-btn-primary'));
+    panel.append(header,content,footer);overlay.append(panel);dialog.append(overlay);
+    layout.inert=true;top.inert=true;
+    overlay.addEventListener('click',e=>{if(e.target===overlay)closeRecordModal();});
+    overlay.addEventListener('keydown',e=>{
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation?.();closeRecordModal();return;}
+      if(e.key==='Tab'&&e.target===close&&e.shiftKey){e.preventDefault();footer.children[0].focus?.();}
+      else if(e.key==='Tab'&&e.target===footer.children[0]&&!e.shiftKey){e.preventDefault();close.focus?.();}
+    });
+    close.focus?.();
+  }
   function recordCards(heading,entries,extract,type=null,detailFactory=null){
     if(!entries.length)return;
     body.append(sectionTitle(heading));
@@ -231,7 +263,8 @@ export function mountUI(api){
         const remove=button('删除',()=>openRecordModal(entry,type,'delete',remove),'sm-btn sm-record-delete-button');
         edit.setAttribute('aria-label','编辑摘要');
         remove.setAttribute('aria-label','删除摘要');
-        actions.append(edit,remove);details.append(actions);
+        const source=button('查看原文',()=>openSourceModal(entry,type,source),'sm-btn');
+        actions.append(source,edit,remove);details.append(actions);
       }
       list.append(details);
     }
@@ -567,7 +600,7 @@ export function mountUI(api){
     leafKeep.input.min='0';leafKeep.input.max='50';
     const compression=el('section','sm-summary-panel');
     const compHead=el('div','sm-summary-head');
-    compHead.append(el('strong','','分层压缩'),el('small','','逐级融合旧摘要，保留原始记忆'));
+    compHead.append(el('strong','','分层压缩'));
     const pipeline=el('div','sm-level-path');
     for(const token of ['L0 楼层摘要','→','L1 阶段总结','→','L2 二次总结','→','L3+ 长期记忆']){
       pipeline.append(el('span',token==='→'?'sm-level-arrow':'',token));
@@ -596,20 +629,29 @@ export function mountUI(api){
     ]));
 
     const flags=[['summary','剧情摘要'],['inventory','物品状态'],
-      ['scenes','场景地点'],['characters','人物档案'],['vector','向量召回']]
+      ['scenes','场景地点'],['characters','人物档案'],
+      ['retrieval','相关历史'],['vector','向量召回']]
       .map(([key,label])=>[key,switchRow(label,cfg.injection[key])]);
     const flagGroup=el('div','sm-switch-grid');
     flagGroup.append(...flags.map(([,x])=>x.wrapper));
     const budget=field('注入预算（估算 Tokens）',cfg.injection.budget,'number');
-    box.append(accordion('inject','注入设置','控制发送给主模型的记忆类型',[
+    const injectionPanel=accordion('inject','注入设置','选择发送给主模型的记忆',[
       flagGroup,budget.wrapper,
       button('查看注入预览',()=>{page='preview';render();},'sm-btn')
+    ]);
+
+    const retrievalEnabled=switchRow('自动查找历史',cfg.retrieval?.enabled!==false);
+    const recallCount=field('最多参考记忆',cfg.retrieval?.maxHits??5,'number');
+    recallCount.input.min='1';recallCount.input.max='10';
+    const sourceCount=field('最多补充原文',cfg.retrieval?.maxSources??3,'number');
+    sourceCount.input.min='0';sourceCount.input.max='5';
+    box.append(accordion('retrieval','历史检索','找回相关剧情和原文细节',[
+      retrievalEnabled.wrapper,grid(recallCount.wrapper,sourceCount.wrapper)
     ]));
 
     const vector=switchRow('启用向量检索',cfg.vector.enabled);
     const vectorUrl=field('Embedding API 地址',cfg.vector.url||'https://api.siliconflow.cn/v1','url');
-    const vectorKey=field('Embedding API 密钥',cfg.vector.key||'','password',
-      '独立于酒馆主 API 和酒馆的 SiliconFlow 密钥；保存在本插件设置，请保护配置备份。');
+    const vectorKey=field('Embedding API 密钥',cfg.vector.key||'','password');
     vectorKey.input.autocomplete='new-password';
     const vectorModel=field('Embedding 模型',cfg.vector.model);
     const topK=field('召回数量 Top-K',cfg.vector.topK,'number');
@@ -619,19 +661,23 @@ export function mountUI(api){
     const rerankModel=field('重排模型',cfg.vector.rerankModel||'BAAI/bge-reranker-v2-m3');
     const rerankCount=field('重排候选数',cfg.vector.rerankCandidates??15,'number');
     rerankCount.input.min='2';rerankCount.input.max='30';
-    const vectorHelp=el('p','sm-help','Embedding 和重排共用此 API 地址、密钥，但模型不同。默认重排模型 BAAI/bge-reranker-v2-m3；服务商需支持 /rerank 及浏览器 CORS。重排会增加请求和费用，默认关闭。需同时开启向量检索与「注入设置 → 向量召回」才会发送旧记忆。索引在浏览器本地，可重新建立。');
+    const vectorHelp=el('p','sm-help','向量和重排共用 API 地址与密钥。重排会产生额外请求，使用前请确认服务商支持。');
     const vectorActions=el('div','sm-row-actions');
     vectorActions.append(button('更新当前聊天索引',async()=>{
       showNotice('正在更新向量索引…');
       try{const count=await api.indexNow();showNotice('已更新 '+count+' 条记忆');}
       catch(e){showNotice(e?.message||'索引失败，请检查 API 与跨域设置');}
     },'sm-btn'));
-    box.append(accordion('vector','向量记忆','独立 Embedding API 与相关剧情召回',[
+    const rerankFields=grid(rerankModel.wrapper,rerankCount.wrapper);
+    rerankFields.hidden=!rerank.input.checked;
+    rerank.input.addEventListener('change',()=>{rerankFields.hidden=!rerank.input.checked;});
+    const rerankSection=el('div','sm-vector-rerank');
+    rerankSection.append(rerank.wrapper,rerankFields);
+    box.append(accordion('vector','向量记忆','语义检索与重排',[
       vector.wrapper,vectorUrl.wrapper,vectorKey.wrapper,vectorModel.wrapper,
-      grid(topK.wrapper,threshold.wrapper),rerank.wrapper,
-      grid(rerankModel.wrapper,rerankCount.wrapper),vectorHelp,vectorActions
+      grid(topK.wrapper,threshold.wrapper),rerankSection,vectorHelp,vectorActions
     ]));
-
+    box.append(injectionPanel);
 
     const promptConfigs=[
       {key:'summaryFull',name:'楼层摘要与状态提取',desc:'同时整理摘要、物品、场景、角色与计划',def:DEFAULT_SUMMARY_PROMPT,initial:effectiveSummaryPrompt(cfg)},
@@ -680,6 +726,9 @@ export function mountUI(api){
         next.summary.retry=Math.max(0,Math.min(2,Number(retries.input.value)||0));
         next.injection.budget=Number(budget.input.value)||4500;
         for(const [key,value] of flags)next.injection[key]=value.input.checked;
+        next.retrieval={enabled:retrievalEnabled.input.checked,
+          maxHits:Math.max(1,Math.min(10,Number(recallCount.input.value)||5)),
+          maxSources:Math.max(0,Math.min(5,Number(sourceCount.input.value)||0))};
         next.vector.enabled=vector.input.checked;
         next.vector.url=vectorUrl.input.value.trim();
         next.vector.key=vectorKey.input.value.trim();
@@ -705,7 +754,7 @@ export function mountUI(api){
     },'sm-btn sm-btn-primary');
     const reset=button('恢复默认',()=>{
       const ask=window.confirm(
-        '要恢复默认设置吗？\n\n会重置摘要、注入、向量检索参数和自定义提示词。\n保留 API 地址与密钥、摘要 API 模型及附加参数。Embedding 模型将恢复 BAAI/bge-m3，重排模型恢复 BAAI/bge-reranker-v2-m3（默认关闭）。\n已生成的剧情记忆不会删除。'
+        '要恢复默认设置吗？\n\n会重置摘要、检索和提示词设置。API 连接信息与已保存的剧情记忆不会删除。'
       );
       if(!ask)return;
       try{
@@ -733,10 +782,12 @@ export function mountUI(api){
     saveBar.append(reset,save);box.append(saveBar);body.append(box);
   }
   function renderPreview(){
-    const ctx=api.context(),result=injectionText(api.memory(),ctx?.chat||[],api.settings());
+    const ctx=api.context(),memory=api.memory(),cfg=api.settings();
+    const recalled=cfg.retrieval?.enabled!==false?api.previewHistory?.(ctx,memory)||[]:[];
+    const result=injectionText(memory,ctx?.chat||[],cfg,[],recalled);
     title('注入预览','查看下一轮对话将使用的记忆内容');
     const textarea=textArea(result||'当前没有需要注入的记忆。',13);textarea.readOnly=true;
-    body.append(textarea,el('p','sm-help','约 '+Math.ceil(result.length/3)+' Tokens；向量记忆在生成时单独检索。'));
+    body.append(textarea,el('p','sm-help','内容会随剧情变化。'));
   }
   function render(){
     if(!active)return;

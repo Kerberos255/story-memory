@@ -18,7 +18,9 @@ function db(){
 async function rows(prefix){
   const database=await db();
   return new Promise((resolve,reject)=>{
-    const req=database.transaction(TABLE,'readonly').objectStore(TABLE).getAll();
+    const store=database.transaction(TABLE,'readonly').objectStore(TABLE);
+    const range=typeof IDBKeyRange!=='undefined'?IDBKeyRange.bound(prefix,prefix+'\uffff'):undefined;
+    const req=store.getAll(range);
     req.onsuccess=()=>resolve(req.result.filter(x=>x.id.startsWith(prefix)));
     req.onerror=()=>reject(Error('向量索引读取失败'));
   });

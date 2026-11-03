@@ -46,7 +46,7 @@ test('dark mode is default; sun and moon toggle persist without rebuilding form'
   const settings=find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置'));
   assert.ok(settings);settings.fire('click');
   const groups=walk(dialog).filter(x=>x.className==='sm-accordion');
-  assert.equal(groups.length,5,'settings must have 5 collapsible groups');
+  assert.equal(groups.length,6,'settings must have 6 collapsible groups');
   const formInput=find(dialog,x=>x.tag==='input'&&x.value==='');
   assert.ok(formInput);
   formInput.value='custom-draft';
@@ -501,4 +501,85 @@ test('entity cards offer explicit merge and undo instead of fuzzy automatic grou
    undo.fire('click');
    assert.equal(deriveState(memory,ctx.chat).items.length,2);
  }finally{globalThis.window=oldWindow;}
+}));
+
+
+test('history search settings are simple, editable and retain defaults',()=>withUI(body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=> 'history-form-test'};
+  let saved;
+  const ui=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},saveSettings:next=>{saved=next;}});
+  ui.open();
+  const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  const heading=walk(dialog).find(x=>x.textContent==='历史检索');
+  assert.ok(heading);
+  const toggle=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='自动查找历史'));
+  assert.ok(toggle);
+  const check=walk(toggle).find(x=>x.tag==='input');
+  assert.equal(check.checked,true);
+  const hits=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='最多参考记忆'));
+  const sources=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='最多补充原文'));
+  assert.equal(walk(hits).find(x=>x.tag==='input').value,'5');
+  assert.equal(walk(sources).find(x=>x.tag==='input').value,'3');
+  check.checked=false;
+  walk(hits).find(x=>x.tag==='input').value='7';
+  walk(sources).find(x=>x.tag==='input').value='0';
+  find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+  assert.deepEqual(saved.retrieval,{enabled:false,maxHits:7,maxSources:0});
+  const visible=walk(dialog).map(x=>String(x.textContent||'')).join('\n');
+  assert.doesNotMatch(visible,/保留现有.*分层规则|内部实现|内部说明|代码实现|本地开发版|使用同一次检查结果|逐级融合旧摘要，保留原始记忆/);
+}));
+
+test('source button opens original message details without mutating archived memory',()=>withUI(body=>{
+  const ctx={chat:[{is_user:false,mes:'剧情正文'}],getCurrentChatId:()=> 'source-modal-test'};
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(ctx.chat[0]),normalizeDelta({summary:'剧情摘要'}));
+  let called=null;
+  const ui=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},
+    sourcePreview:(context,memo,key)=>{called=key;return [{index:0,text:'剧情：剧情正文'}];}});
+  ui.open();
+  const dialog=body.children[0].shadow.children[1];
+  const card=find(dialog,x=>x.className==='sm-record');
+  assert.ok(card);
+  const source=find(card,x=>x.tag==='button'&&x.textContent==='查看原文');
+  assert.ok(source);source.fire('click');
+  assert.equal(called,'floor:0');
+  const overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+  assert.ok(overlay);
+  const area=find(overlay,x=>x.tag==='textarea');
+  assert.equal(area.value,'剧情：剧情正文');
+  assert.equal(area.readOnly,true);
+  find(overlay,x=>x.tag==='button'&&x.textContent==='关闭').fire('click');
+  assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
+  assert.equal(memory.leaves[0].summary,'剧情摘要');
+}));
+
+test('settings cards stay in one consistent workflow and rerank options reveal only when enabled',()=>withUI(body=>{
+ const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};let saved;
+ const view=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+   queue:{busy:false,enqueueMissing(){}},saveSettings:s=>{saved=s;}});
+ view.open();const dialog=body.children[0].shadow.children[1];
+ find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+ const groups=walk(dialog).filter(x=>x.className==='sm-accordion');
+ assert.deepEqual(groups.map(g=>walk(g).find(x=>x.tag==='strong')?.textContent),[
+   '摘要 API','摘要设置','历史检索','向量记忆','注入设置','自定义提示词'
+ ]);
+ const inject=groups[4],switches=walk(inject).filter(x=>x.className==='sm-switch-row');
+ assert.equal(switches.length,6,'injection toggles form three balanced pairs');
+ assert.ok(walk(inject).some(x=>x.textContent==='相关历史'));
+ const rerank=walk(groups[3]).find(x=>x.className==='sm-vector-rerank');
+ assert.ok(rerank,'reranking is visually separated from embeddings');
+ const fields=walk(rerank).find(x=>x.className==='sm-fields-grid');
+ assert.equal(fields.hidden,true,'default-off reranker does not clutter the form');
+ const toggle=walk(rerank).find(x=>x.tag==='input'&&x.type==='checkbox');
+ toggle.checked=true;toggle.fire('change');
+ assert.equal(fields.hidden,false,'enabling reranking reveals its inputs');
+ find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+ assert.equal(saved.vector.rerankEnabled,true);
+ assert.equal(saved.injection.retrieval,true);
+ const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+ assert.match(css,/sm-vector-rerank\{border-top/);
+ assert.match(css,/@media\(max-width:700px\)/);
+ assert.match(css,/\.sm-fields-grid,\.sm-switch-grid\{grid-template-columns:1fr\}/);
 }));

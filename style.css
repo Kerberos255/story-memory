@@ -118,8 +118,8 @@
   padding:15px 19px;cursor:pointer;min-height:62px}
 .sm-accordion-head:hover{background:var(--hover)}
 .sm-accordion-copy{display:flex;flex-direction:column;gap:2px}
-.sm-accordion-copy strong{font-weight:660;font-size:13px}
-.sm-accordion-copy small{color:var(--muted);font-size:11px}
+.sm-accordion-copy strong{font-weight:660;font-size:14px}
+.sm-accordion-copy small{color:var(--muted);font-size:12px}
 .sm-accordion-head svg{width:16px;color:var(--muted);transition:transform .2s}
 .sm-accordion[open] .sm-accordion-head svg{transform:rotate(180deg)}
 .sm-accordion-body{border-top:1px solid var(--edge);padding:19px;display:grid;gap:16px}
@@ -135,14 +135,16 @@
 .sm-switch input:checked+.sm-switch-track{background:var(--accent);border-color:var(--accent)}
 .sm-switch input:checked+.sm-switch-track::before{transform:translateX(16px);background:var(--accent-fg)}
 .sm-switch input:focus-visible+.sm-switch-track{outline:2px solid var(--accent);outline-offset:2px}
-.sm-fields-grid{display:grid;grid-template-columns:1fr 1fr;gap:13px}
-.sm-switch-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.sm-fields-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px}
+.sm-switch-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .sm-switch-grid .sm-switch-row{background:var(--surface-alt);padding:9px 12px;border:1px solid var(--edge);border-radius:8px}
+.sm-vector-rerank{border-top:1px solid var(--edge);padding-top:15px;display:grid;gap:12px}
+.sm-vector-rerank>.sm-fields-grid{margin-top:0}
 .sm-field{display:flex;flex-direction:column;gap:6px;min-width:0}
-.sm-field-label{font-size:11px;color:var(--fg-weak);font-weight:620}
+.sm-field-label{font-size:12px;color:var(--fg-weak);font-weight:620}
 .sm-help{font-size:11px;line-height:1.55;color:var(--muted)}
 .sm-input,.sm-textarea{background:var(--input);color:var(--fg);border:1px solid var(--edge-strong);border-radius:8px;
-  outline:none;min-width:0;width:100%;padding:9px 11px;font-size:12px}
+  outline:none;min-width:0;width:100%;padding:9px 11px;font-size:13px}
 .sm-input{min-height:37px;height:37px}
 .sm-textarea{resize:vertical;min-height:85px;line-height:1.62}
 .sm-input:hover,.sm-textarea:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--edge-strong))}

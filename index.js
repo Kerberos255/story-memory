@@ -1,7 +1,8 @@
-import {defaultSettings,SETTINGS_KEY,readMemory,writeMemory,addManual,editManual,removeManual,editGeneratedLeaf,deleteGeneratedLeaf,resumeGeneratedFloor,editGeneratedChapter,deleteGeneratedChapter,mergeEntities,unmergeEntity,injectionText} from './core.js';
+import {defaultSettings,SETTINGS_KEY,META_KEY,peekMemory,readMemory,writeMemory,addManual,editManual,removeManual,editGeneratedLeaf,deleteGeneratedLeaf,resumeGeneratedFloor,editGeneratedChapter,deleteGeneratedChapter,mergeEntities,unmergeEntity,injectionText} from './core.js';
 import {SummaryQueue} from './queue.js';
 import {listSummaryModels} from './api.js';
 import {indexSummaries,recall} from './vector-local.js';
+import {selectHistory,historyEvidence,sourcePreview} from './retrieval-local.js';
 import {mountUI} from './ui.js';
 // Pure private ST extension. No external scripts, analytics or dependencies.
 let ui,queue,lastChat='',settings;
@@ -13,7 +14,8 @@ function getSettings(){
   if(raw&&typeof raw==='object'){
     settings={...base,...raw,api:{...base.api,...raw.api},
       summary:{...base.summary,...raw.summary},injection:{...base.injection,...raw.injection},
-      vector:{...base.vector,...raw.vector},prompts:{...base.prompts,...raw.prompts}};
+      vector:{...base.vector,...raw.vector},retrieval:{...base.retrieval,...raw.retrieval},
+      prompts:{...base.prompts,...raw.prompts}};
   }else settings=base;
   return settings;
 }
@@ -23,10 +25,10 @@ function saveSettings(next){
   ctx.extensionSettings[SETTINGS_KEY]=settings;ctx.saveSettingsDebounced?.();
   inject();
 }
-function inject(hits=[]){
+function inject(hits=[],historyHits=[],memory=null){
   const ctx=getContext();if(!ctx?.setExtensionPrompt)return;
   const cfg=getSettings();
-  const text=cfg.enabled?injectionText(readMemory(ctx),ctx.chat,cfg,hits):'';
+  const text=cfg.enabled?injectionText(memory||peekMemory(ctx),ctx.chat,cfg,hits,historyHits):'';
   // IN_CHAT = 1, SYSTEM = 0 in SillyTavern script.js.
   ctx.setExtensionPrompt('story_memory_injection_v1',text,1,2,false,0,null);
 }
@@ -85,7 +87,7 @@ async function fetchSummaryModels(config){
 }
 async function indexNow(){
   const ctx=getContext();if(!ctx)throw Error('聊天未就绪');
-  return indexSummaries(ctx,readMemory(ctx),getSettings());
+  return indexSummaries(ctx,peekMemory(ctx),getSettings());
 }
 async function onGeneration(){
   const ctx=getContext(),cfg=getSettings();
@@ -100,16 +102,31 @@ async function generateInterceptor(_chat,_contextSize,_abort,type){
   if(['quiet','impersonate','continue'].includes(String(type||'').toLowerCase()))return;
   const ctx=getContext(),cfg=getSettings();
   if(!cfg.enabled||!ctx)return;
-  if(!cfg.vector.enabled||!cfg.injection.vector){inject();return;}
-  const key=ctx.getCurrentChatId?.();
+  const key=ctx.getCurrentChatId?.(),memory=peekMemory(ctx);
   const latestUser=[...(ctx.chat||[])].reverse().find(x=>x?.is_user&&!x?.is_system);
-  try{
+  const query=String(latestUser?.mes||'');
+  let vectors=[];
+  if(cfg.vector.enabled&&cfg.injection.vector&&query.trim()){
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),11500);
-    let hits=[];
-    try{hits=await recall(ctx,readMemory(ctx),cfg,latestUser?.mes||'',controller.signal);}
+    try{vectors=await recall(ctx,memory,cfg,query,controller.signal);}
+    catch{/* Embedding outages must not prevent local historical search. */}
     finally{clearTimeout(timer);}
-    if(key===getContext()?.getCurrentChatId?.())inject(hits);
-  }catch{inject();/* Recall failure must never block RP. */}
+  }
+  if(key!==getContext()?.getCurrentChatId?.())return;
+  const current=getContext();
+  if(latestUser&&!current?.chat?.includes(latestUser))return;
+  const activeMemory=current?.chatMetadata?.[META_KEY]===memory?memory:peekMemory(current);
+  let history=[];
+  if(cfg.retrieval?.enabled!==false&&cfg.injection.retrieval!==false){
+    try{
+      const found=selectHistory(current,activeMemory,query,vectors,cfg.retrieval.maxHits);
+      const limit=Math.max(0,Math.min(5,Number(cfg.retrieval?.maxSources??3)));
+      const sources=limit?historyEvidence(current,activeMemory,found,query,limit):[];
+      history=[...sources,...found.filter(row=>!sources.some(s=>s.key==='source:'+row.sourceIndex))
+        .map(row=>({key:row.key,text:'['+(row.kind==='floor'?'#'+row.sourceIndex:'历史摘要')+'] '+row.summary}))];
+    }catch{/* Damaged indexes must not affect roleplay. */}
+  }
+  inject(cfg.retrieval?.enabled!==false&&cfg.injection.retrieval!==false?[]:vectors,history,activeMemory);
 }
 // SillyTavern calls this by manifest name during user generation.
 globalThis.storyMemoryGenerationInterceptor=generateInterceptor;
@@ -130,9 +147,17 @@ function init(){
   if(!ctx?.eventSource||!ctx?.chatMetadata||!ctx?.extensionSettings)return false;
   getSettings();
   queue=new SummaryQueue(getContext,getSettings,afterMemoryChanged);
-  ui=mountUI({context:getContext,memory:()=>readMemory(getContext()),settings:getSettings,saveSettings,
+  ui=mountUI({context:getContext,memory:()=>peekMemory(getContext()),settings:getSettings,saveSettings,
     addManual:add,editManual:edit,removeManual:remove,
-    editLeaf,deleteLeaf,resumeLeaf,editChapter,deleteChapter,mergeEntity,unmergeAlias,queue,indexNow,fetchSummaryModels});
+    editLeaf,deleteLeaf,resumeLeaf,editChapter,deleteChapter,mergeEntity,unmergeAlias,queue,indexNow,fetchSummaryModels,
+    previewHistory:(ctx,memory)=>{
+      const query=[...(ctx.chat||[])].reverse().find(x=>x?.is_user&&!x?.is_system)?.mes||'';
+      const hits=selectHistory(ctx,memory,query,[],getSettings().retrieval?.maxHits||5);
+      const sourceLimit=Math.max(0,Math.min(5,Number(getSettings().retrieval?.maxSources??3)));
+      return [...(sourceLimit?historyEvidence(ctx,memory,hits,query,sourceLimit):[]),
+        ...hits.map(x=>({key:x.key,text:'[历史] '+x.summary}))];
+    },
+    sourcePreview:(ctx,memory,key)=>sourcePreview(ctx,memory,key,3)});
   lastChat=ctx.getCurrentChatId?.()||'';
   const onChatChanged=()=>{const now=getContext()?.getCurrentChatId?.()||'';if(now!==lastChat){lastChat=now;queue.cancel();}inject();ui?.refresh();};
   ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED,onChatChanged);

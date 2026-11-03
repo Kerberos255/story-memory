@@ -6,7 +6,8 @@ export function defaultSettings() {
   return {
     enabled: true, autoSummary: true, api: {name:'摘要 API',mode:'main',url:'',key:'',model:'',headers:{},exclude:[],include:{},maxTokens:8192,timeout:90,temperature:0},
     summary: {keepRecent:3,autoHide:true,delayFloors:3,leafBatchThreshold:12,leafKeepRecent:3,resummaryThreshold:6,higherResummaryThreshold:3,retry:1,maxInputChars:16000},
-    injection: {summary:true,inventory:true,scenes:true,characters:true,vector:false,budget:4500},
+    injection: {summary:true,inventory:true,scenes:true,characters:true,vector:false,retrieval:true,budget:4500},
+    retrieval: {enabled:true,maxHits:5,maxSources:3},
     prompts: {summary:'',summaryFull:'',chapter:'',resummary2:'',overview:''},
     vector: {enabled:false,url:'https://api.siliconflow.cn/v1',key:'',model:'BAAI/bge-m3',topK:5,threshold:0.35,rerankEnabled:false,rerankModel:'BAAI/bge-reranker-v2-m3',rerankCandidates:15}
   };
@@ -14,11 +15,16 @@ export function defaultSettings() {
 export function freshMemory() {
   return {version:1,leaves:{},chapters:[],skippedFloors:{},skippedPlans:[],entityAliases:{},manual:{summaries:[],items:[],scenes:[],characters:[]},tasks:{},revision:0};
 }
-export function readMemory(ctx) {
+/** Read-only access to canonical data. Never mutate the returned object. */
+export function peekMemory(ctx) {
   if (!ctx?.chatMetadata) return freshMemory();
   const existing=ctx.chatMetadata[META_KEY];
   if (!existing || existing.version!==1 || typeof existing.leaves!=='object') return freshMemory();
-  return structuredClone(existing);
+  return existing;
+}
+/** Editable snapshot. Writers operate on a clone before committing metadata. */
+export function readMemory(ctx) {
+  return structuredClone(peekMemory(ctx));
 }
 export function writeMemory(ctx,memory) {
   if(!ctx?.chatMetadata) throw Error('聊天尚未就绪');
@@ -342,7 +348,7 @@ export function deriveState(memory,chat) {
   const state=Object.fromEntries(Object.entries(sections).map(([k,v])=>[k,[...v.values()]]));
   return {timeline,...state};
 }
-export function injectionText(memory,chat,settings,vectorHits=[]) {
+export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[]) {
   const state=deriveState(memory,chat),cfg=settings.injection||{},sections=[];
   const add=(title,entries)=>{if(entries.length)sections.push({title,entries});};
   const note=text=>({text:String(text||'').trim(),identity:String(text||'').trim()});
@@ -358,6 +364,8 @@ export function injectionText(memory,chat,settings,vectorHits=[]) {
   if(cfg.summary)add('【人工补充记忆】',(memory.manual?.summaries||[]).slice(-12).map(x=>note(x.text)));
   if(cfg.characters)add('【人物】',(state.characters||[]).slice(-45).map(entityLine));
   if(cfg.summary)add('【计划与伏笔】',(state.plans||[]).filter(x=>x.status!=='已完成').slice(-25).map(entityLine));
+  if(cfg.retrieval!==false&&settings.retrieval?.enabled!==false)
+    add('【相关历史】',historyHits.map(x=>note(x.text)));
   if(cfg.inventory)add('【物品】',(state.items||[]).slice(-45).map(entityLine));
   if(cfg.scenes)add('【场景】',(state.scenes||[]).slice(-45).map(entityLine));
   if(cfg.summary){

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {defaultSettings,freshMemory,readMemory,writeMemory,normalizeDelta,commitLeaf,deriveState,pendingFloors,injectionText,messageFingerprint,addManual,editManual} from '../core.js';
+import {defaultSettings,freshMemory,peekMemory,readMemory,writeMemory,normalizeDelta,commitLeaf,deriveState,pendingFloors,injectionText,messageFingerprint,addManual,editManual} from '../core.js';
 const makeChat=()=>[
  {is_user:true,is_system:false,mes:'我找到一只旧怀表。'},
  {is_user:false,is_system:false,mes:'角色拾起怀表并走进图书馆。',swipe_id:0},
@@ -8,6 +8,16 @@ const makeChat=()=>[
  {is_user:false,is_system:false,mes:'同伴收下怀表，答应明日归还。',swipe_id:0}
 ];
 const event=(summary,items=[])=>normalizeDelta({summary,items});
+test('read-only metadata access avoids full clones while editable snapshots stay isolated',()=>{
+ const ctx={chatMetadata:{}};
+ const memory=freshMemory();memory.leaves[2]={summary:'原来的剧情'};
+ ctx.chatMetadata.story_memory_v1=memory;
+ assert.equal(peekMemory(ctx),memory);
+ const editable=readMemory(ctx);
+ assert.notEqual(editable,memory);
+ editable.leaves[2].summary='测试修改';
+ assert.equal(memory.leaves[2].summary,'原来的剧情');
+});
 test('auto-summary and auto-hide default on with a three-floor protection window',()=>{
  const cfg=defaultSettings();
  assert.equal(cfg.summary.autoHide,true);
