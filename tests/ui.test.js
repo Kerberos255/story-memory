@@ -333,7 +333,7 @@ test('generated timeline reads once; edit and delete use separate modal dialogs'
  assert.ok(card);
  assert.equal(walk(card).filter(x=>x.tag==='textarea').length,0);
  assert.equal(find(card,x=>x.className==='sm-record-text').textContent,'旧摘要');
- assert.ok(walk(card).some(x=>x.className==='sm-record-subtitle'&&x.textContent==='巷口'));
+ assert.ok(walk(card).some(x=>x.className==='sm-record-subtitle'&&x.textContent.includes('地点：巷口')));
  card.open=true;
  find(card,x=>x.attrs['aria-label']==='编辑摘要').fire('click');
  let overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
@@ -888,4 +888,53 @@ test('preview honors unsaved history retrieval changes without saving unrelated 
   assert.doesNotMatch(contents,/遥远的记忆片段/);
   assert.equal(lookups,1,'disabled draft does not trigger history preview search');
   assert.equal(saves,0,'preview does not save drafts');
+}));
+
+test('old summaries with explicit opening time show labeled time and place without re-summarizing',()=>withUI(body=>{
+  const chat=[{is_user:false,mes:'三月十二日清晨八点十五分，星来到家门前庭院。',swipe_id:0}];
+  const ctx={chat,getCurrentChatId:()=> 'legacy-time-field'};
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'三月十二日清晨八点十五分，星在庭院开始新的旅程。',
+    location:'帕底亚地区-平碟镇家门前庭院'
+  }));
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}}});
+  view.open();
+  const dialog=body.children[0].shadow.children[1];
+  const card=find(dialog,x=>x.className==='sm-record');
+  const info=find(card,x=>x.className==='sm-record-subtitle');
+  assert.ok(info?.textContent.includes('时间：三月十二日清晨八点十五分'));
+  assert.ok(info?.textContent.includes('地点：帕底亚地区-平碟镇家门前庭院'));
+  find(card,x=>x.attrs['aria-label']==='编辑摘要').fire('click');
+  const overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+  assert.ok(walk(overlay).some(x=>x.tag==='input'&&x.value==='三月十二日清晨八点十五分'));
+  assert.equal(memory.leaves[0].time,'','fallback display must not silently rewrite old saved memory');
+  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+  assert.match(css,/\.sm-record-subtitle\{[^}]*white-space:normal;overflow-wrap:anywhere/);
+}));
+
+test('Think dropdown sits with temperature and output limit and persists Auto to Max',()=>withUI(body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=> 'think-setting'};
+  let cfg=defaultSettings(),saved;
+  cfg.api.mode='custom';cfg.api.model='synthetic-model';cfg.api.url='https://example.invalid/v1';
+  cfg.api.key='synthetic-test-only';
+  const view=mountUI({context:()=>ctx,memory:freshMemory,settings:()=>cfg,
+    queue:{busy:false,enqueueMissing(){}},saveSettings:s=>{saved=s;cfg=s;}});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  const tuning=find(dialog,x=>x.className?.includes('sm-api-tuning-grid'));
+  assert.ok(tuning);
+  assert.equal(tuning.children.length,3,'three aligned controls under the selected model');
+  const think=walk(tuning).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='Think 等级'));
+  assert.ok(think);
+  const select=find(think,x=>x.tag==='select');
+  assert.ok(select);
+  assert.deepEqual(select.children.map(x=>x.value),['auto','low','medium','high','max']);
+  assert.equal(select.value,'auto');
+  select.value='max';
+  find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+  assert.equal(saved.api.thinkLevel,'max');
+  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+  assert.match(css,/\.sm-api-tuning-grid\{grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+  assert.match(css,/@media\(max-width:700px\)[\s\S]*\.sm-api-tuning-grid\{grid-template-columns:1fr\}/);
 }));

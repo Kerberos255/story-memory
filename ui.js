@@ -1,4 +1,4 @@
-import {defaultSettings,entityNameKey,formatStoryTime,messageFingerprint,userFingerprint,pendingFloors,automaticFloorIndices,deriveState,injectionText,validChapters} from './core.js';
+import {defaultSettings,entityNameKey,formatStoryTime,leadingStoryTime,messageFingerprint,userFingerprint,pendingFloors,automaticFloorIndices,deriveState,injectionText,validChapters} from './core.js';
 import {DEFAULT_SUMMARY_PROMPT,DEFAULT_CHAPTER_PROMPT,DEFAULT_RESUMMARY2_PROMPT,DEFAULT_OVERVIEW_PROMPT,effectiveSummaryPrompt,parseExtraBody,parseExcluded,parseHeaderLines} from './api.js';
 
 const NAV=[['summaries','摘要','book'],['items','物品','package'],['scenes','场景','pin'],
@@ -210,7 +210,7 @@ export function mountUI(api){
       summaryField.append(editor);content.append(summaryField);
       if(isFloor){
         const fields=el('div','sm-grid sm-record-modal-fields');
-        time=field('故事时间',formatStoryTime(entry.time||''),'text');
+        time=field('故事时间',formatStoryTime(entry.time||'')||leadingStoryTime(entry.summary),'text');
         place=field('地点',entry.location||'');
         fields.append(time.wrapper,place.wrapper);
         content.append(fields);
@@ -368,8 +368,12 @@ export function mountUI(api){
     recordCards('分层剧情回顾',valid.slice().reverse(),c=>({title:'L'+c.level+' · '+(c.level===1?'阶段总结':c.level===2?'二次总结':'高层总结'),subtitle:c.children.length+' 段剧情',description:c.summary}),'chapter');
     const state=deriveState(mem,ctx?.chat||[]);
     recordCards('剧情时间线',state.timeline.slice(-50).reverse(),e=>({
-      title:'#'+e.sourceIndex+(e.time?' · '+formatStoryTime(e.time):''),
-      subtitle:e.location||'',description:e.summary,
+      title:'#'+e.sourceIndex,
+      subtitle:[
+        ['时间',formatStoryTime(e.time)||leadingStoryTime(e.summary)],
+        ['地点',e.location]
+      ].filter(([,value])=>Boolean(value)).map(([label,value])=>label+'：'+value).join('  ·  '),
+      description:e.summary,
       meta:'本楼层更新：物品 '+(e.delta?.items?.length||0)+' · 场景 '+(e.delta?.scenes?.length||0)+
         ' · 角色 '+(e.delta?.characters?.length||0)+' · 计划 '+(e.delta?.plans?.length||0)
     }),'floor');
@@ -526,7 +530,7 @@ export function mountUI(api){
     }
     mode.value=cfg.api.mode==='custom'?'custom':'main';
     modeWrap.append(modeLabel,mode);
-    const modeTip=el('p','sm-help','使用酒馆当前连接和模型生成摘要。');
+    const modeTip=el('p','sm-help','使用酒馆当前连接、模型及思考设置生成摘要。');
     const apiUrl=field('API 地址',cfg.api.url,'url');
     const apiKey=field('API 密钥',cfg.api.key||'','password');
     apiKey.input.autocomplete='new-password';
@@ -560,11 +564,21 @@ export function mountUI(api){
     });
     modelLine.append(modelInput,modelPicker,refreshModels);modelWrap.append(modelLabel,modelLine);
     const temp=field('温度',cfg.api.temperature,'number');
+    const thinkingWrap=el('label','sm-field');
+    thinkingWrap.append(el('span','sm-field-label','Think 等级'));
+    const thinking=el('select','sm-input sm-select');
+    for(const [value,label] of [['auto','Auto'],['low','Low'],['medium','Medium'],['high','High'],['max','Max']]){
+      const option=el('option','',label);option.value=value;thinking.append(option);
+    }
+    thinking.value=['auto','low','medium','high','max'].includes(cfg.api.thinkLevel)?cfg.api.thinkLevel:'auto';
+    thinkingWrap.append(thinking,el('small','sm-help','Auto 使用默认等级；手动选择须模型支持。'));
     const max=field('输出上限（可选）',cfg.api.maxTokens??'','number',
-      '留空沿用模型或酒馆的默认输出长度；输出不完整时再填写。');
+      '留空沿用模型默认长度；输出不完整时再填写。');
     max.input.placeholder='自动';max.input.max='65536';max.input.min='256';
+    const tuning=grid(temp.wrapper,thinkingWrap,max.wrapper);
+    tuning.className+=' sm-api-tuning-grid';
     const customFields=el('div','sm-form-stack');
-    customFields.append(apiUrl.wrapper,apiKey.wrapper,modelWrap,grid(temp.wrapper,max.wrapper));
+    customFields.append(apiUrl.wrapper,apiKey.wrapper,modelWrap,tuning);
     const updateMode=()=>{const custom=mode.value==='custom';customFields.hidden=!custom;modeTip.hidden=custom;};
     mode.addEventListener('change',updateMode);updateMode();
 
@@ -761,6 +775,7 @@ export function mountUI(api){
         next.api.url=apiUrl.input.value.trim();next.api.key=apiKey.input.value.trim();
         next.api.model=modelInput.value.trim();
         next.api.temperature=Math.max(0,Math.min(2,Number(temp.input.value)||0));
+        next.api.thinkLevel=thinking.value;
         const outputRaw=max.input.value.trim();
         if(outputRaw&&(!Number.isInteger(Number(outputRaw))||Number(outputRaw)<256||Number(outputRaw)>65536))
           throw Error('输出上限须为 256 到 65536 的整数，或留空自动');

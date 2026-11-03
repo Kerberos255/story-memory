@@ -62,6 +62,11 @@ export function makeBody(channel,messages) {
   if(!channel.key?.trim())throw new ApiFault('请先配置摘要 API 密钥');
   const headers={...normalizeHeaders(channel.headers),Authorization:'Bearer '+channel.key.trim()};
   const include=channel.include&&typeof channel.include==='object'&&!Array.isArray(channel.include)?structuredClone(channel.include):{};
+  const think=String(channel.thinkLevel??'auto').trim().toLowerCase();
+  if(!['auto','low','medium','high','max'].includes(think))throw new ApiFault('思考等级无效');
+  // Custom OpenAI-compatible route: pass only explicitly selected effort.
+  // Auto leaves all existing provider/advanced settings untouched.
+  if(think!=='auto')include.reasoning_effort=think;
   const body={
     chat_completion_source:'custom',custom_url:url,
     custom_include_headers:JSON.stringify(headers),custom_include_body:JSON.stringify(include),
@@ -158,7 +163,7 @@ export const DEFAULT_SUMMARY_PROMPT=[
   '【事实边界】区分叙事已经确认、人物声称/误信/怀疑、将来计划、条件性承诺、已发生结果。「打算做」不等于「已经做」，「停止瞄准」不等于「解除武装」。原文无依据就保留未知，禁止补造时间、数字、人物知识或好感。',
   '【持续事实】一次性动作只进 summary；状态表记录结束后仍有效的身份、归属、关系、任务、人物知情等。首次明确出现且对后续剧情有意义的人物、重要物品、重要场景，即使暂无后续变化，也要用 add 登记；原文未证实身份或重要性的路人布景不登记。同一事项更新旧实体，不新增同义记录。已有实体无变化输出空数组。',
   '【原文证据】结构化条目的新事实或状态变更尽量附 evidence：从本轮用户或 AI 正文逐字摘取连续原句，不可改写、跨句拼接或引用已有记忆作为证据。确实没有依据就不输出该变更；矛盾未确认时留在摘要中作为争议信息，不覆盖旧状态。',
-  '【时间 time】只记录原文明确提供的剧情时间；完整日期与时刻统一 YYYY/MM/DD HH:mm，范围统一 YYYY/MM/DD HH:mm–HH:mm。不要添加星期、地点、装饰符号。只有时刻则用 HH:mm 或 HH:mm–HH:mm，时间不明确则留空。地点单独填写 location。',
+  '【时间 time】凡原文明确提供的本轮剧情日期或时刻，都要同步输出在独立 time 字段，不要只写进 summary。完整年月日且有时刻用 YYYY/MM/DD HH:mm；只给月日而没有年份时照原文写「三月十二日」或「三月十二日清晨八点十五分」，不得补造年份；只给时刻写 HH:mm 或原文时段。时间不明确则留空，不能从其他事件推断。地点另填独立 location；两者都不得臆造。',
   '【物品 items】首次出现且对后续剧情重要的物品用 add 登记；取得、交付、消耗、遗失或状态变化则新增或更新对应实体。写明确定的归属 owner、存放地点 location、数量 quantity。已有物品没有变化就不更新。',
   '【实体身份】物品、场景、人物各自都有稳定身份，不能因为称呼、归属、位置或状态变化就新建实体。先查下方现有实体表：如果是同一个对象，使用已有的 entity_id，并尽量沿用其 name；仅有证据证明是不同对象时才新增。不能只凭类似名称、同类别或同一主人认定为同一个实体。每类同一实体在同一轮最多输出一次变化，记录最终状态。',
   '【场景 scenes】只记录重要的新地点、环境变化和地点间关系；角色的短暂位移可以写进剧情摘要，必要时在 characters.location 更新。',

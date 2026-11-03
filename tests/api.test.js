@@ -166,3 +166,38 @@ test('legacy source cap is ignored and the summary builder preserves complete in
   cfg.summary.maxInputChars=2000;
   assert.ok(buildSummaryMessages(1,chat,freshMemory(),cfg)[1].content.includes('又一个字符'));
 });
+
+test('Think dropdown effort is opt-in, supports Auto through Max without overriding other custom fields',()=>{
+  const base={...defaultSettings().api,mode:'custom',url:'https://example.invalid/v1',
+    model:'synthetic-reasoning-model',key:'synthetic-test-only',include:{prefix:true}};
+  assert.equal(base.thinkLevel,'auto');
+  const prompt=[{role:'user',content:'故事摘要'}];
+  const plain=makeBody(base,prompt);
+  assert.equal(Object.hasOwn(JSON.parse(plain.custom_include_body),'reasoning_effort'),false);
+  for(const level of ['low','medium','high','max']){
+    const custom=makeBody({...base,thinkLevel:level},prompt);
+    const included=JSON.parse(custom.custom_include_body);
+    assert.equal(included.reasoning_effort,level);
+    assert.equal(included.prefix,true);
+    assert.equal(Object.hasOwn(custom,'reasoning_effort'),false,
+      'Custom route forwards extra effort through included request body');
+  }
+  assert.deepEqual(base.include,{prefix:true},'request assembly does not mutate saved settings');
+  assert.throws(()=>makeBody({...base,thinkLevel:'xhigh'},prompt),/思考等级无效/);
+});
+
+test('Think effort follows SillyTavern main settings and explicit dropdown wins over advanced custom extras',async()=>{
+  const messages=[{role:'user',content:'整理这段剧情'}],captures=[];
+  const main={...defaultSettings().api,mode:'main',thinkLevel:'max'};
+  await requestChat(main,messages,{generateRaw:async opts=>{
+    captures.push(opts);return '{"summary":"已整理"}';
+  }});
+  assert.equal(Object.hasOwn(captures[0],'reasoning_effort'),false);
+  assert.equal(Object.hasOwn(captures[0],'thinkingLevel'),false);
+  const custom={...defaultSettings().api,mode:'custom',url:'https://example.invalid/v1',
+    model:'synthetic',key:'synthetic-test-only',
+    include:{reasoning_effort:'low',prefix:true},thinkLevel:'high'};
+  const body=makeBody(custom,messages);
+  assert.equal(JSON.parse(body.custom_include_body).reasoning_effort,'high');
+  assert.equal(custom.include.reasoning_effort,'low','advanced settings stay unchanged until saved');
+});

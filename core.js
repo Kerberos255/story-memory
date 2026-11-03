@@ -4,7 +4,7 @@ export const SETTINGS_KEY = 'story_memory_settings_v1';
 
 export function defaultSettings() {
   return {
-    enabled: true, autoSummary: true, api: {name:'摘要 API',mode:'main',url:'',key:'',model:'',headers:{},exclude:[],include:{},maxTokens:null,timeout:90,temperature:0},
+    enabled: true, autoSummary: true, api: {name:'摘要 API',mode:'main',url:'',key:'',model:'',headers:{},exclude:[],include:{},maxTokens:null,thinkLevel:'auto',timeout:90,temperature:0},
     summary: {keepRecent:3,autoHide:true,delayFloors:3,leafBatchThreshold:12,leafKeepRecent:3,resummaryThreshold:6,higherResummaryThreshold:3,retry:1},
     injection: {inventory:true,scenes:true,characters:true,plans:true,vector:false,retrieval:true,budget:4500},
     retrieval: {enabled:true,maxHits:5,maxSources:3},
@@ -96,6 +96,18 @@ export function formatStoryTime(value) {
   const pad=n=>String(n).padStart(2,'0');
   const time=pad(h)+':'+pad(min)+(h2===null?'':'–'+pad(h2)+':'+pad(min2));
   return (prefix?prefix+' · ':'')+time;
+}
+/** Show an explicitly stated date/time from a summary's opening when a model omitted time. */
+export function leadingStoryTime(summary){
+  const head=typeof summary==='string'?summary.trim().slice(0,100):'';
+  if(!head)return '';
+  // Do not infer the year, nor select later appointment times from the story body.
+  const numerals='(?:[0-9]{1,2}|[零〇一二两三四五六七八九十廿卅]{1,4})';
+  const date='(?:(?:[0-9]{4}|[零〇一二三四五六七八九]{4})年)?'+numerals+'月'+numerals+'日';
+  const period='(?:凌晨|清晨|早晨|早上|上午|中午|下午|傍晚|晚上|夜里|深夜)';
+  const clock='(?:'+period+'\\s*)?'+numerals+'[点时](?:'+numerals+'分|半)?';
+  const matched=head.match(new RegExp('^('+date+'(?:\\s*'+clock+')?|'+clock+')(?=[，,。；;、\\s]|$)'));
+  return matched?matched[1].replace(/\s+/g,' ').trim():'';
 }
 export function normalizeDelta(raw,sourceText='') {
   if(!raw||typeof raw!=='object'||Array.isArray(raw))throw Error('摘要 JSON 必须是对象');
@@ -360,19 +372,45 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[])
   const state=deriveState(memory,chat),cfg=settings.injection||{},sections=[];
   const add=(title,entries)=>{if(entries.length)sections.push({title,entries});};
   const note=text=>({text:String(text||'').trim(),identity:String(text||'').trim()});
-  const entityLine=entity=>{
+  const entityLine=(entity,historical=false)=>{
     if(entity.manual)return note(entity.name);
     // Keep each JSON record intact. Internal source/identity IDs are not RP facts.
     const {entity_id,aliases,sourceIndex,op,evidence,knowledge,...publicState}=entity;
     if(Array.isArray(knowledge)&&knowledge.length)
       publicState.knowledge=knowledge.map(x=>({stance:x.stance,fact:x.fact}));
+    if(historical){
+      if(publicState.status!==undefined){
+        publicState.记录时状态=publicState.status;
+        delete publicState.status;
+      }
+      publicState.状态待核对='后续剧情尚未摘要，可能已完成或取消；不能视为当前待办，以最新原文为准';
+    }
     return note(JSON.stringify(publicState));
   };
   // High priority: user-authored memories and currently effective facts.
   add('【人工补充记忆】',(memory.manual?.summaries||[]).slice(-12).map(x=>note(x.text)));
   if(cfg.characters)add('【人物】',(state.characters||[]).slice(-45).map(entityLine));
-  if(cfg.plans!==false)add('【计划与伏笔】',(state.plans||[])
-    .filter(x=>x.manual||x.status!=='已完成').slice(-25).map(entityLine));
+  if(cfg.plans!==false){
+    const closed=/^(?:已完成|完成|已解决|已结束|已取消|取消|已放弃|已终止|已揭晓|done|completed|resolved|cancelled|canceled|closed)$/i;
+    const pending=pendingFloors(memory,chat);
+    // Include the latest unsummarized user turn: it may resolve a plan before AI replies.
+    const lastValidAi=state.timeline.length?state.timeline[state.timeline.length-1].sourceIndex:-1;
+    const lastUser=chat.findLastIndex(m=>m?.is_user&&!m.is_system);
+    const freshUser=lastUser>lastValidAi?lastUser:-1;
+    const latestUnprocessed=Math.max(pending.at(-1)??-1,freshUser);
+    // Source order alone determines freshness: never guess plan completion by
+    // matching names in recent dialogue, and never present stale status as live.
+    const confirmed=[],unverified=[];
+    for(const plan of (state.plans||[]).filter(x=>x.manual||!closed.test(String(x.status||'').trim())).slice(-25)){
+      if(plan.manual||latestUnprocessed<=(plan.sourceIndex??-1)){
+        confirmed.push(entityLine(plan));
+      }else{
+        unverified.push(entityLine(plan,true));
+      }
+    }
+    add('【计划与伏笔】',confirmed);
+    add('【历史计划（状态待核对，不代表当前待办；请以最新剧情为准）】',unverified);
+  }
   if(cfg.retrieval!==false&&settings.retrieval?.enabled!==false)
     add('【相关历史】',historyHits.map(x=>note(x.text)));
   if(cfg.inventory)add('【物品】',(state.items||[]).slice(-45).map(entityLine));

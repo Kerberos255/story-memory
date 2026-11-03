@@ -488,3 +488,134 @@ test('manual plans survive old chat metadata without a plans array',()=>{
   cfg.injection.plans=false;
   assert.doesNotMatch(injectionText(next,[],cfg),/守住密室的秘密/);
 });
+
+test('opening story dates are recovered for display without inventing a year or reading later events',async()=>{
+  const {leadingStoryTime}=await import('../core.js');
+  assert.equal(leadingStoryTime('三月十二日清晨八点十五分，星在家门前庭院打开家门。'),
+    '三月十二日清晨八点十五分');
+  assert.equal(leadingStoryTime('三月十二日，星在庭院开始新的一天。'),'三月十二日');
+  assert.equal(leadingStoryTime('下午三点半，众人返回营地。'),'下午三点半');
+  assert.equal(leadingStoryTime('星在庭院谈到三月十二日的约定。'),'');
+  assert.equal(leadingStoryTime('她决定明早见面，下午三点出发。'),'');
+  assert.equal(leadingStoryTime(''), '');
+});
+
+test('delayed plan updates cannot be injected as newly confirmed active facts',()=>{
+  const chat=[
+    {is_user:false,mes:'主角决定寻找钥匙。',swipe_id:0},
+    {is_user:false,mes:'主角随后又约定救援同伴。',swipe_id:0},
+    {is_user:false,mes:'主角成功寻找钥匙，已经完成任务。',swipe_id:0}
+  ];
+  let mem=freshMemory();
+  mem=commitLeaf(mem,0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'主角计划寻找钥匙',plans:[{op:'add',name:'寻找钥匙',kind:'plan',status:'未完成'}]}));
+  mem=commitLeaf(mem,1,messageFingerprint(chat[1]),normalizeDelta({
+    summary:'约定救援同伴',plans:[{op:'add',name:'救援同伴',kind:'plan',status:'未完成'}]}));
+  const cfg=defaultSettings();cfg.summary.keepRecent=0;
+  const uncertain=injectionText(mem,chat,cfg);
+  assert.match(uncertain,/寻找钥匙/,
+    'stale plan stays available as history even when recent dialogue names it');
+  assert.ok(uncertain.includes('【历史计划（状态待核对'));
+  assert.doesNotMatch(uncertain,/【计划与伏笔】/,
+    'no pending plan is presented as a currently confirmed task');
+  assert.match(uncertain,/救援同伴/);
+  assert.match(uncertain,/记录时状态/);
+  assert.doesNotMatch(uncertain,/"status":"未完成"/,
+    'unverified plan must not look like a current active status');
+  mem=commitLeaf(mem,2,messageFingerprint(chat[2]),normalizeDelta({
+    summary:'钥匙任务完成',plans:[{op:'update',name:'寻找钥匙',kind:'plan',status:'已完成'}]}));
+  const refreshed=injectionText(mem,chat,cfg);
+  assert.doesNotMatch(refreshed,/【历史计划（状态待核对/);
+  assert.ok(refreshed.includes('救援同伴'));
+  assert.doesNotMatch(refreshed,/"name":"寻找钥匙"/,
+    'completed plan is not injected as still pending');
+});
+test('old plans with no newer unsummarized events remain normal; manual plans remain user controlled',()=>{
+  const chat=[{is_user:false,mes:'计划营救森林中的精灵。',swipe_id:0}];
+  let mem=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'计划营救精灵',plans:[{op:'add',name:'营救精灵',status:'未完成'}]}));
+  mem=addManual(mem,'plans','记得调查藏宝图');
+  const value=injectionText(mem,chat,defaultSettings());
+  assert.ok(value.includes('【计划与伏笔】'));
+  assert.match(value,/营救精灵/);
+  assert.match(value,/记得调查藏宝图/);
+  assert.doesNotMatch(value,/历史计划（尚未核对/);
+});
+
+test('latest user message can complete a plan before the delayed AI summary exists',()=>{
+  const chat=[
+    {is_user:false,mes:'约定归还蓝宝石戒指。',swipe_id:0},
+    {is_user:true,mes:'现在已经完成归还蓝宝石戒指，任务结束。'}
+  ];
+  const mem=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'约定归还戒指',
+    plans:[{op:'add',name:'归还蓝宝石戒指',status:'未完成',kind:'plan'}]
+  }));
+  const cfg=defaultSettings();cfg.summary.keepRecent=0;
+  const output=injectionText(mem,chat,cfg);
+  assert.match(output,/"name":"归还蓝宝石戒指"/,
+    'history is retained so the model can understand what the user resolved');
+  assert.match(output,/【历史计划（状态待核对/);
+  assert.doesNotMatch(output,/"status":"未完成"/,
+    'latest user message makes the previously recorded pending status uncertain');
+  assert.match(output,/【剧情摘要】/);
+});
+
+test('unsummarized newer dialogue invalidates plan state without matching its name',()=>{
+  const chat=[
+    {is_user:false,mes:'计划寻找钥匙，尚未取得。',swipe_id:0},
+    {is_user:false,mes:'后来她默默将那枚银色物件交到他的掌心。',swipe_id:0},
+    {is_user:false,mes:'两人随即离开了城堡。',swipe_id:0}
+  ];
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'开始寻找钥匙',
+    plans:[{op:'add',name:'寻找钥匙',status:'未完成',kind:'plan'}]
+  }));
+  const cfg=defaultSettings();cfg.summary.keepRecent=0;
+  const injected=injectionText(memory,chat,cfg);
+  assert.match(injected,/【历史计划（状态待核对/);
+  assert.match(injected,/寻找钥匙/);
+  assert.doesNotMatch(injected,/【计划与伏笔】/);
+  assert.doesNotMatch(injected,/"status":"未完成"/);
+  assert.match(injected,/记录时状态/);
+  assert.match(injected,/不能视为当前待办/);
+  // A newer completed summary removes the stale pending plan from injection.
+  const next=commitLeaf(memory,1,messageFingerprint(chat[1]),normalizeDelta({
+    summary:'拿到了钥匙',plans:[{op:'update',name:'寻找钥匙',status:'已完成'}]
+  }));
+  const stillPending=injectionText(next,chat,cfg);
+  assert.doesNotMatch(stillPending,/"name":"寻找钥匙"/,
+    'confirmed completion is not reintroduced even if an even newer floor is pending');
+});
+
+test('only later unsummarized floors make an individual plan stale',()=>{
+  const chat=[
+    {is_user:false,mes:'先前探索了草地。',swipe_id:0},
+    {is_user:false,mes:'现在计划整理账本。',swipe_id:0}
+  ];
+  const memory=commitLeaf(freshMemory(),1,messageFingerprint(chat[1]),normalizeDelta({
+    summary:'计划整理账本',plans:[{op:'add',name:'整理账本',status:'未完成'}]
+  }));
+  const cfg=defaultSettings();cfg.summary.keepRecent=0;
+  const injected=injectionText(memory,chat,cfg);
+  assert.match(injected,/【计划与伏笔】/);
+  assert.match(injected,/"name":"整理账本"/);
+  assert.doesNotMatch(injected,/【历史计划（状态待核对/);
+});
+
+test('manual plans remain intentionally visible while automated ones are stale',()=>{
+  const chat=[
+    {is_user:false,mes:'计划进入北塔。',swipe_id:0},
+    {is_user:false,mes:'然后发生了变化。',swipe_id:0}
+  ];
+  let memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'计划进入北塔',plans:[{op:'add',name:'进入北塔',status:'未完成'}]
+  }));
+  memory=addManual(memory,'plans','用户手动记下：调查钟楼');
+  const cfg=defaultSettings();cfg.summary.keepRecent=0;
+  const injected=injectionText(memory,chat,cfg);
+  assert.match(injected,/【计划与伏笔】/);
+  assert.match(injected,/调查钟楼/);
+  assert.match(injected,/【历史计划（状态待核对/);
+  assert.match(injected,/进入北塔/);
+});
