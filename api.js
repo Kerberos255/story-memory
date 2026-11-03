@@ -1,5 +1,5 @@
 // Minimal ST-proxied OpenAI compatible client. Never log headers, keys, or story text.
-import {floorUserMessages,leafValid} from './core.js';
+import {floorUserMessages,leafValid,deriveState} from './core.js';
 const HOP=new Set(['host','connection','cookie','set-cookie','content-length','transfer-encoding','proxy-authorization','proxy-authenticate','origin','referer','authorization','x-api-key','api-key','x-auth-token','x-goog-api-key']);
 export class ApiFault extends Error {
   constructor(message,status=0,code='api_error'){super(message);this.name='ApiFault';this.status=status;this.code=code;}
@@ -141,6 +141,7 @@ export const DEFAULT_SUMMARY_PROMPT=[
   '【真实性】以原文为准，区分已发生事实、人物主观认知、传闻与推测。模糊的时间、地点、姓名不要自行补全。',
   '【时间 time】只记录原文明确提供的剧情时间；完整日期与时刻统一 YYYY/MM/DD HH:mm，范围统一 YYYY/MM/DD HH:mm–HH:mm。不要添加星期、地点、装饰符号。只有时刻则用 HH:mm 或 HH:mm–HH:mm，时间不明确则留空。地点单独填写 location。',
   '【物品 items】只记录本轮确实发生的取得、交付、消耗、遗失或状态变化；写明归属 owner、存放地点 location、证据确凿的数量 quantity。已有物品没有变化就不更新。',
+  '【实体身份】物品、场景、人物各自都有稳定身份，不能因为称呼、归属、位置或状态变化就新建实体。先查下方现有实体表：如果是同一个对象，使用已有的 entity_id，并尽量沿用其 name；仅有证据证明是不同对象时才新增。不能只凭类似名称、同类别或同一主人认定为同一个实体。每类同一实体在同一轮最多输出一次变化，记录最终状态。',
   '【场景 scenes】只记录重要的新地点、环境变化和地点间关系；角色的短暂位移可以写进剧情摘要，必要时在 characters.location 更新。',
   '【人物 characters】只记录人物的可核实身份、状态、所在位置、关系变化及其知情范围。不要根据一句情绪化对白擅自量化好感度。',
   '【计划 plans】保留承诺、约定、正在执行的计划、已结束的任务与长期伏笔；status 表示当前进度，kind 为 plan 或 suspense。',
@@ -149,9 +150,9 @@ export const DEFAULT_SUMMARY_PROMPT=[
   '【输出】严格输出一个合法 JSON 对象，不包含 Markdown 围栏、解释、思考标签或任何工具调用。必填 summary。',
   'JSON 字段示例（不是必须填满所有字段）：',
   '{"summary":"按时间顺序整理本轮剧情","time":"有依据时填写故事时间","location":"有依据时填写当前地点",',
-  '"items":[{"op":"add","name":"物品名称","quantity":1,"owner":"持有者","location":"存放地点","description":"物品变化"}],',
-  '"scenes":[{"op":"update","name":"地点名称","location":"上级地点","description":"环境或结构变化"}],',
-  '"characters":[{"op":"update","name":"人物名称","location":"当前位置","relationship":"关系变化","status":"当前状态","description":"人物背景与认知变化"}],',
+  '"items":[{"op":"update","entity_id":"已存在实体的完整 ID（新物品省略）","name":"沿用旧名称","quantity":1,"owner":"持有者","location":"存放地点","description":"物品变化"}],',
+  '"scenes":[{"op":"update","entity_id":"匹配旧地点才填写","name":"地点名称","location":"上级地点","description":"环境或结构变化"}],',
+  '"characters":[{"op":"update","entity_id":"匹配旧人物才填写","name":"人物名称","location":"当前位置","relationship":"关系变化","status":"当前状态","description":"人物背景与认知变化"}],',
   '"plans":[{"op":"add","name":"约定或悬念","kind":"plan","status":"未完成","description":"来源与进度"}]}',
   '没有变化的 items、scenes、characters、plans 可以省略或输出空数组。数量与状态不能凭空推断。'
 ].join('\n');
@@ -188,8 +189,34 @@ export function buildSummaryMessages(index,chat,memory,settings){
   const prior=Object.keys(memory.leaves||{}).map(Number).filter(i=>i<index&&leafValid(memory,chat,i)).sort((a,b)=>a-b).slice(-3).map(i=>memory.leaves[i]?.summary||'').join('\n').slice(-3500);
   const maxChars=Math.max(2000,Math.min(30000,Number(settings.summary?.maxInputChars)||16000));
   const source='【本轮用户输入】\n'+preceding+'\n\n【本轮 AI 剧情】\n'+String(msg.mes).slice(-maxChars);
+  // A manual backfill must not expose future story events to earlier floors.
+  const history={...memory,leaves:Object.fromEntries(Object.entries(memory.leaves||{}).filter(([floor])=>Number(floor)<index))};
+  const state=deriveState(history,chat);
+  const kinds=[['items','物品',36],['scenes','场景',24],['characters','人物',36],['plans','计划',16]];
+  // Keep each catalog row complete; never cut a JSON entity record mid-field.
+  let remaining=8500;
+  const catalogSections=[];
+  for(const [kind,label,max] of kinds){
+    const rows=(state[kind]||[]).filter(x=>!x.manual).slice(-max);
+    if(!rows.length)continue;
+    const header='【已登记'+label+'（仅供实体身份核对，非本轮新事件）】';
+    if(header.length+80>remaining)break;
+    let section=header;
+    for(const entity of rows){
+      const line=JSON.stringify({entity_id:entity.entity_id,name:entity.name,
+        aliases:entity.aliases?.slice(-3)||[],owner:entity.owner||'',
+        location:entity.location||'',status:entity.status||''});
+      if(section.length+line.length+1>remaining)break;
+      section+='\n'+line;
+    }
+    if(section!==header){
+      catalogSections.push(section);
+      remaining-=section.length+2;
+    }
+  }
+  const catalog=catalogSections.join('\n\n');
   const instruction=effectiveSummaryPrompt(settings).slice(0,14000);
-  return [{role:'system',content:instruction},{role:'user',content:'【已有摘要，仅供去重】\n'+prior+'\n\n'+source}];
+  return [{role:'system',content:instruction},{role:'user',content:'【已有摘要，仅供去重】\n'+prior+'\n\n'+(catalog?catalog+'\n\n【实体引用要求】如为上述已有实体，请引用完全一致的 entity_id，保留统一名称；如无法确定则不要猜测 ID。\n\n':'')+source}];
 }
 export function buildChapterMessages(entries,settings,kind='chapter'){
   const rule=effectiveChapterPrompt(settings,kind);

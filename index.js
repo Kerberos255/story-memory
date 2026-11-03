@@ -1,4 +1,4 @@
-import {defaultSettings,SETTINGS_KEY,readMemory,writeMemory,addManual,editManual,removeManual,editGeneratedLeaf,deleteGeneratedLeaf,resumeGeneratedFloor,editGeneratedChapter,deleteGeneratedChapter,injectionText} from './core.js';
+import {defaultSettings,SETTINGS_KEY,readMemory,writeMemory,addManual,editManual,removeManual,editGeneratedLeaf,deleteGeneratedLeaf,resumeGeneratedFloor,editGeneratedChapter,deleteGeneratedChapter,mergeEntities,unmergeEntity,injectionText} from './core.js';
 import {SummaryQueue} from './queue.js';
 import {listSummaryModels} from './api.js';
 import {indexSummaries,recall} from './vector-local.js';
@@ -70,6 +70,16 @@ function deleteChapter(id){
   queue.cancel(false);
   writeMemory(ctx,deleteGeneratedChapter(readMemory(ctx),ctx.chat,id));afterMemoryChanged();
 }
+function mergeEntity(kind,fromId,toId){
+  const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
+  queue.cancel(false);
+  writeMemory(ctx,mergeEntities(readMemory(ctx),ctx.chat,kind,fromId,toId));afterMemoryChanged();
+}
+function unmergeAlias(kind,fromName){
+  const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
+  queue.cancel(false);
+  writeMemory(ctx,unmergeEntity(readMemory(ctx),kind,fromName));afterMemoryChanged();
+}
 async function fetchSummaryModels(config){
   return listSummaryModels(getContext(),config);
 }
@@ -120,7 +130,7 @@ function init(){
   queue=new SummaryQueue(getContext,getSettings,afterMemoryChanged);
   ui=mountUI({context:getContext,memory:()=>readMemory(getContext()),settings:getSettings,saveSettings,
     addManual:add,editManual:edit,removeManual:remove,
-    editLeaf,deleteLeaf,resumeLeaf,editChapter,deleteChapter,queue,indexNow,fetchSummaryModels});
+    editLeaf,deleteLeaf,resumeLeaf,editChapter,deleteChapter,mergeEntity,unmergeAlias,queue,indexNow,fetchSummaryModels});
   lastChat=ctx.getCurrentChatId?.()||'';
   const onChatChanged=()=>{const now=getContext()?.getCurrentChatId?.()||'';if(now!==lastChat){lastChat=now;queue.cancel();}inject();ui?.refresh();};
   ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED,onChatChanged);

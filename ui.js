@@ -1,4 +1,4 @@
-import {defaultSettings,formatStoryTime,messageFingerprint,userFingerprint,pendingFloors,automaticFloorIndices,deriveState,injectionText,validChapters} from './core.js';
+import {defaultSettings,entityNameKey,formatStoryTime,messageFingerprint,userFingerprint,pendingFloors,automaticFloorIndices,deriveState,injectionText,validChapters} from './core.js';
 import {DEFAULT_SUMMARY_PROMPT,DEFAULT_CHAPTER_PROMPT,DEFAULT_RESUMMARY2_PROMPT,DEFAULT_OVERVIEW_PROMPT,effectiveSummaryPrompt,parseExtraBody,parseExcluded,parseHeaderLines} from './api.js';
 
 const NAV=[['summaries','摘要','book'],['items','物品','package'],['scenes','场景','pin'],['characters','角色','users'],['settings','设置','sliders']];
@@ -95,17 +95,20 @@ export function mountUI(api){
     const old=body.querySelector('.sm-notice');if(old)old.remove();
     if(notice){const toast=el('div','sm-notice',notice);body.prepend(toast);}
   };
-  dialog.addEventListener('cancel',e=>{e.preventDefault();open(false);});
+  dialog.addEventListener('cancel',e=>{e.preventDefault();if(recordOverlay)closeRecordModal();else open(false);});
   dialog.addEventListener('click',e=>{
     if(e.target!==dialog)return;
     const rect=dialog.getBoundingClientRect();
-    if(e.clientX<rect.left||e.clientX>rect.right||e.clientY<rect.top||e.clientY>rect.bottom)open(false);
+    if(e.clientX<rect.left||e.clientX>rect.right||e.clientY<rect.top||e.clientY>rect.bottom){
+      if(recordOverlay)closeRecordModal();else open(false);
+    }
   });
   function open(value=true){
     if(value){
       active=true;if(!dialog.open)dialog.showModal();
       render();close.focus();
     }else{
+      closeRecordModal(false);
       active=false;if(dialog.open)dialog.close();
       body.replaceChildren();nav.replaceChildren();
       api.onClose?.();
@@ -124,54 +127,113 @@ export function mountUI(api){
     const mark=el('span','sm-empty-icon');mark.append(svg(icon));
     box.append(mark,el('strong','',titleText),el('p','',description));body.append(box);
   }
-  function recordCards(heading,entries,extract,editorFactory=null){
+  // Keep generated summaries read-only in the timeline. Edit/delete are
+  // separate dialogs layered over the existing SillyTavern extension dialog.
+  let recordOverlay=null,recordReturnFocus=null;
+  function closeRecordModal(refocus=true){
+    if(!recordOverlay)return;
+    recordOverlay.remove();recordOverlay=null;
+    layout.inert=false;top.inert=false;
+    const target=recordReturnFocus;recordReturnFocus=null;
+    if(refocus)target?.focus?.();
+  }
+  function openRecordModal(entry,type,mode,trigger){
+    closeRecordModal(false);
+    recordReturnFocus=trigger||null;
+    const isFloor=type==='floor',isDelete=mode==='delete';
+    const overlay=el('div','sm-record-modal-overlay');
+    recordOverlay=overlay;
+    const panel=el('section','sm-record-modal');
+    panel.setAttribute('role','dialog');
+    panel.setAttribute('aria-modal','true');
+    const modalTitle=el('h3','sm-record-modal-title',
+      (isDelete?'删除':'编辑')+(isFloor?' #'+entry.sourceIndex+' 楼摘要':' '+(entry.level===1?'阶段总结':entry.level===2?'二次总结':'高层总结')));
+    modalTitle.id='sm-record-modal-heading';
+    panel.setAttribute('aria-labelledby',modalTitle.id);
+    const head=el('div','sm-record-modal-head');
+    const x=button('',()=>closeRecordModal(),'sm-record-modal-close');
+    x.append(svg('x'));x.setAttribute('aria-label','关闭弹窗');
+    head.append(modalTitle,x);
+    const content=el('div','sm-record-modal-body');
+    const footer=el('div','sm-record-modal-footer');
+    const cancel=button('取消',()=>closeRecordModal(),'sm-btn');
+    const action=isDelete?button('确认删除',()=>{
+      try{
+        if(isFloor)api.deleteLeaf(entry.sourceIndex);
+        else api.deleteChapter(entry.id);
+        closeRecordModal(false);render();showNotice('摘要已删除');
+      }catch(e){error.textContent=e?.message||'删除失败';}
+    },'sm-btn sm-record-modal-danger'):button('保存修改',()=>{
+      if(!editor.value.trim()){error.textContent='摘要正文不能为空';editor.focus?.();return;}
+      try{
+        if(isFloor)api.editLeaf(entry.sourceIndex,{summary:editor.value,time:time.input.value,location:place.input.value});
+        else api.editChapter(entry.id,editor.value);
+        closeRecordModal(false);render();showNotice('修改已保存');
+      }catch(e){error.textContent=e?.message||'保存失败';}
+    },'sm-btn sm-btn-primary');
+    const error=el('p','sm-record-modal-error');
+    error.setAttribute('role','alert');
+    let editor=null,time=null,place=null;
+    if(isDelete){
+      content.append(el('p','sm-record-modal-warning','确定删除这条摘要吗？'));
+      content.append(el('p','sm-record-modal-explain',isFloor
+        ?'将删除此楼层摘要及其提取的物品、场景、角色等状态变化，并使相关高层总结失效。'
+        :'相关的更高层总结将失效，但楼层摘要和下层记录仍会保留。'));
+      content.append(el('p','sm-record-modal-safe','原始聊天不会删除。'+(isFloor?'之后可手动重新摘要。':'')));
+    }else{
+      const summaryField=el('label','sm-field');
+      summaryField.append(el('span','sm-field-label','剧情摘要'));
+      editor=textArea(entry.summary,6,'输入整理后的剧情摘要…');
+      editor.setAttribute('aria-label',isFloor?'编辑楼层摘要':'编辑分层总结');
+      summaryField.append(editor);content.append(summaryField);
+      if(isFloor){
+        const fields=el('div','sm-grid sm-record-modal-fields');
+        time=field('故事时间',formatStoryTime(entry.time||''),'text');
+        place=field('地点',entry.location||'');
+        fields.append(time.wrapper,place.wrapper);
+        content.append(fields);
+        content.append(el('p','sm-record-modal-help','修改摘要正文不会自动改写已提取的物品、场景、角色状态。'));
+      }
+    }
+    content.append(error);
+    footer.append(cancel,action);panel.append(head,content,footer);overlay.append(panel);dialog.append(overlay);
+    layout.inert=true;top.inert=true;
+    overlay.addEventListener('click',e=>{if(e.target===overlay)closeRecordModal();});
+    overlay.addEventListener('keydown',e=>{
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation?.();closeRecordModal();return;}
+      if(e.key!=='Tab')return;
+      const controls=[...panel.querySelectorAll('button:not([disabled]),input:not([disabled]),textarea:not([disabled])')];
+      if(!controls.length)return;
+      const first=controls[0],last=controls[controls.length-1];
+      if(e.shiftKey&&e.target===first){e.preventDefault();last.focus();}
+      else if(!e.shiftKey&&e.target===last){e.preventDefault();first.focus();}
+    });
+    (isDelete?cancel:editor)?.focus?.();
+  }
+  function recordCards(heading,entries,extract,type=null,detailFactory=null){
     if(!entries.length)return;
     body.append(sectionTitle(heading));
     const list=el('div','sm-record-list');
     for(const entry of entries){
       const value=extract(entry),details=el('details','sm-record');
-      const head=el('summary','sm-record-head'),label=el('span','sm-record-label',value.title);
-      head.append(label,svg('chevron'));
+      const head=el('summary','sm-record-head');
+      const headingCopy=el('span','sm-record-heading');
+      headingCopy.append(el('span','sm-record-label',value.title));
+      if(value.subtitle)headingCopy.append(el('small','sm-record-subtitle',value.subtitle));
+      head.append(headingCopy,svg('chevron'));
       details.append(head,el('p','sm-record-text',value.description||'暂无详情'));
-      if(editorFactory)details.append(editorFactory(entry));
+      if(detailFactory)details.append(detailFactory(entry));
+      if(type){
+        const actions=el('div','sm-record-actions');
+        const edit=button('编辑',()=>openRecordModal(entry,type,'edit',edit),'sm-btn sm-record-edit-button');
+        const remove=button('删除',()=>openRecordModal(entry,type,'delete',remove),'sm-btn sm-record-delete-button');
+        edit.setAttribute('aria-label','编辑摘要');
+        remove.setAttribute('aria-label','删除摘要');
+        actions.append(edit,remove);details.append(actions);
+      }
       list.append(details);
     }
     body.append(list);
-  }
-
-  function generatedEditor(entry,type){
-    const panel=el('div','sm-record-edit sm-generated-editor');
-    const editor=textArea(type==='floor'?entry.summary:entry.summary,5,'修改剧情摘要…');
-    editor.setAttribute('aria-label',type==='floor'?'编辑楼层摘要':'编辑分层总结');
-    panel.append(el('span','sm-field-label','摘要正文'),editor);
-    let time=null,location=null;
-    if(type==='floor'){
-      const gridRow=el('div','sm-grid');
-      time=field('故事时间',formatStoryTime(entry.time||''),'text','示例：2026/07/11 · 06:22–06:29；时间不明可留空');
-      location=field('地点',entry.location||'');
-      gridRow.append(time.wrapper,location.wrapper);panel.append(gridRow);
-      panel.append(el('small','sm-help','修改剧情正文不会自动重写物品、场景和角色状态；删除整条摘要则会撤销该楼层的状态变化。'));
-    }
-    const actions=el('div','sm-row-actions');
-    actions.append(button('删除',()=>{
-      const message=type==='floor'
-        ?'删除此楼层摘要及其物品、场景、角色状态变化？依赖它的上层总结也会失效。原始聊天不会删除，此楼层暂不自动重新摘要。'
-        :'删除这条分层总结？原始楼层摘要仍保留，依赖此总结的更高层总结将失效。';
-      if(!window.confirm(message))return;
-      try{
-        if(type==='floor')api.deleteLeaf(entry.sourceIndex);
-        else api.deleteChapter(entry.id);
-        showNotice('摘要已删除');
-      }catch(e){showNotice(e.message||'删除失败');}
-    },'sm-btn sm-btn-danger'));
-    actions.append(button('保存修改',()=>{
-      try{
-        if(type==='floor')api.editLeaf(entry.sourceIndex,{summary:editor.value,time:time.input.value,location:location.input.value});
-        else api.editChapter(entry.id,editor.value);
-        showNotice('修改已保存，相关高层总结已更新状态');
-      }catch(e){showNotice(e.message||'保存失败');}
-    },'sm-btn sm-btn-primary'));
-    panel.append(actions);return panel;
   }
   function manualList(kind,entries){
     if(!entries?.length)return;
@@ -236,9 +298,9 @@ export function mountUI(api){
       pendingBox.append(heading,strip);body.append(pendingBox);
     }
     const valid=validChapters(mem,ctx?.chat||[]);
-    recordCards('分层剧情回顾',valid.slice().reverse(),c=>({title:'L'+c.level+' · '+(c.level===1?'阶段总结':c.level===2?'二次总结':'高层总结')+' · '+c.children.length+' 段',description:c.summary}),c=>generatedEditor(c,'chapter'));
+    recordCards('分层剧情回顾',valid.slice().reverse(),c=>({title:'L'+c.level+' · '+(c.level===1?'阶段总结':c.level===2?'二次总结':'高层总结'),subtitle:c.children.length+' 段剧情',description:c.summary}),'chapter');
     const state=deriveState(mem,ctx?.chat||[]);
-    recordCards('剧情时间线',state.timeline.slice(-50).reverse(),e=>({title:'#'+e.sourceIndex+(e.time?' · '+formatStoryTime(e.time):''),description:e.summary}),e=>generatedEditor(e,'floor'));
+    recordCards('剧情时间线',state.timeline.slice(-50).reverse(),e=>({title:'#'+e.sourceIndex+(e.time?' · '+formatStoryTime(e.time):''),subtitle:e.location||'',description:e.summary}),'floor');
     const skipped=Object.keys(mem.skippedFloors||{}).map(Number).filter(i=>
       mem.skippedFloors[i]?.fingerprint===messageFingerprint(ctx?.chat?.[i])&&
       mem.skippedFloors[i]?.userFingerprint===userFingerprint(ctx.chat,i)).sort((a,b)=>a-b);
@@ -256,14 +318,108 @@ export function mountUI(api){
     if(!state.timeline.length&&!mem.manual.summaries.length)emptyState('book','还没有剧情摘要','可以先添加记忆，或配置副 API 后整理楼层。');
     manualInput('summaries');
   }
+  function entityMergeControl(kind,entry,entries,aliases){
+    const panel=el('div','sm-entity-merge');
+    if(entries.length>1){
+      const caption=el('div','sm-entity-hint','若另一条记录确实是同一实体，可以合并称呼；不会改写原始摘要。');
+      const controls=el('div','sm-entity-controls');
+      const picker=el('select','sm-input sm-select');
+      picker.setAttribute('aria-label','合并到哪条记录');
+      const blank=el('option','','选择同一实体…');blank.value='';picker.append(blank);
+      for(const other of entries){
+        if(other.entity_id===entry.entity_id)continue;
+        const option=el('option','',other.name);option.value=other.entity_id;picker.append(option);
+      }
+      const merge=button('合并到所选记录',()=>{
+        if(!picker.value)return showNotice('请先选择目标记录');
+        const target=entries.find(x=>x.entity_id===picker.value);
+        if(!target)return showNotice('目标实体已变化，请重新打开页面');
+        if(!window.confirm('确定将「'+entry.name+'」识别为「'+target.name+'」的同一实体吗？\n合并仅影响当前聊天的记忆呈现，不会删除原始摘要，可撤销。'))return;
+        try{api.mergeEntity(kind,entry.entity_id,target.entity_id);showNotice('已合并同一实体');}
+        catch(e){showNotice(e?.message||'合并失败');}
+      },'sm-btn');
+      controls.append(picker,merge);panel.append(caption,controls);
+    }
+    if(aliases.length){
+      const aliasBox=el('div','sm-entity-aliases');
+      aliasBox.append(el('small','sm-help','已合并别名'));
+      for(const rule of aliases){
+        const row=el('div','sm-entity-alias');
+        row.append(el('span','',rule.name));
+        row.append(button('撤销合并',()=>{
+          try{api.unmergeAlias(kind,rule.name);showNotice('已撤销合并');}
+          catch(e){showNotice(e?.message||'撤销失败');}
+        },'sm-btn'));
+        aliasBox.append(row);
+      }
+      panel.append(aliasBox);
+    }
+    return panel;
+  }
   function renderCollection(kind,heading,caption){
     const ctx=api.context(),mem=api.memory(),state=deriveState(mem,ctx?.chat||[]);
     title(heading,caption);
     const entries=(state[kind]||[]).filter(x=>!x.manual);
+    const rules=Object.entries(mem.entityAliases?.[kind]||{});
     recordCards('当前'+heading,entries,x=>({title:x.name,description:[
       x.description,x.location&&'位置：'+x.location,x.owner&&'归属：'+x.owner,
       x.relationship&&'关系：'+x.relationship,x.status,x.quantity!==undefined&&'数量：'+x.quantity
-    ].filter(Boolean).join(' · ')}));
+    ].filter(Boolean).join(' · ')}),null,x=>entityMergeControl(kind,x,entries,
+      rules.filter(([,rule])=>entityNameKey(rule.to)===entityNameKey(x.name))
+        .map(([,rule])=>rule)));
+
+    const aliases=Object.values(mem.entityAliases?.[kind]||{});
+    if(entries.length>=2||aliases.length){
+      const panel=el('details','sm-manual sm-entity-merge');
+      const heading=el('summary','sm-manual-head');
+      const label=el('span','sm-manual-title');
+      label.append(el('span','','合并同一实体的不同称呼'));
+      heading.append(label,svg('chevron'));
+      const inside=el('div','sm-manual-content');
+      inside.append(el('p','sm-help','只有确定是同一个物品、场景或角色时才合并；不删除原始摘要，可撤销合并。'));
+      if(entries.length>=2){
+        const pair=el('div','sm-fields-grid');
+        function entityPicker(titleText){
+          const field=el('label','sm-field');
+          field.append(el('span','sm-field-label',titleText));
+          const picker=el('select','sm-input sm-select');
+          const empty=el('option','','请选择…');empty.value='';picker.append(empty);
+          for(const row of entries){
+            const choice=el('option','',row.name);choice.value=row.entity_id;picker.append(choice);
+          }
+          field.append(picker);return {field,picker};
+        }
+        const from=entityPicker('重复名称'),to=entityPicker('保留的名称');
+        from.picker.setAttribute('aria-label','待合并的实体');
+        to.picker.setAttribute('aria-label','合并到实体');
+        pair.append(from.field,to.field);inside.append(pair);
+        inside.append(button('确认合并',()=>{
+          if(!from.picker.value||!to.picker.value||from.picker.value===to.picker.value){
+            showNotice('请选择两个不同的记录');return;
+          }
+          const source=entries.find(x=>x.entity_id===from.picker.value);
+          const target=entries.find(x=>x.entity_id===to.picker.value);
+          if(!source||!target)return;
+          if(!window.confirm('确认「'+source.name+'」与「'+target.name+'」指同一实体？合并后以「'+target.name+'」显示，可随时撤销。'))return;
+          try{api.mergeEntity(kind,source.entity_id,target.entity_id);showNotice('已合并重复记录');}
+          catch(e){showNotice(e.message||'合并失败');}
+        },'sm-btn sm-btn-primary'));
+      }
+      if(aliases.length){
+        const ruleList=el('div','sm-entity-alias-list');
+        for(const rule of aliases){
+          const line=el('div','sm-entity-alias-row');
+          line.append(el('span','',rule.name+' → '+rule.to));
+          line.append(button('撤销合并',()=>{
+            try{api.unmergeAlias(kind,rule.name);showNotice('已撤销合并');}
+            catch(e){showNotice(e.message||'撤销失败');}
+          },'sm-btn'));
+          ruleList.append(line);
+        }
+        inside.append(ruleList);
+      }
+      panel.append(heading,inside);body.append(panel);
+    }
     manualList(kind,mem.manual[kind]);
     if(!entries.length&&!mem.manual[kind].length)emptyState('package','暂无'+heading+'记录','从剧情提取后会显示在这里，也可以手动添加。');
     manualInput(kind);
@@ -574,6 +730,7 @@ export function mountUI(api){
   }
   function render(){
     if(!active)return;
+    closeRecordModal(false);
     body.replaceChildren();nav.replaceChildren();
     for(const [name,label,icon] of NAV){
       const item=button('',()=>{if(page===name)return;page=name;notice='';render();body.scrollTop=0;},'sm-nav-item'+(page===name?' is-current':''));

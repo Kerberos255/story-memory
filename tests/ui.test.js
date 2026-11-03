@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mountUI} from '../ui.js';
-import {freshMemory,defaultSettings,commitLeaf,normalizeDelta,messageFingerprint,userFingerprint,editGeneratedLeaf,deleteGeneratedLeaf,editGeneratedChapter,deleteGeneratedChapter} from '../core.js';
+import {freshMemory,defaultSettings,commitLeaf,normalizeDelta,messageFingerprint,userFingerprint,editGeneratedLeaf,deleteGeneratedLeaf,editGeneratedChapter,deleteGeneratedChapter,mergeEntities,unmergeEntity,deriveState} from '../core.js';
 import {readFileSync} from 'node:fs';
 
 class FakeElement{
@@ -297,61 +297,188 @@ test('dark and light palettes have clear foreground and neutral cool backgrounds
  assert.doesNotMatch(css,/#f8f7f4|#fffefa|#d3a569/i);
 });
 
-test('AI-generated timeline allows editing time, place, text and confirmed deletion',()=>withUI(body=>{
- const oldWindow=globalThis.window;
- let confirmDelete=true;
- globalThis.window={confirm:()=>confirmDelete};
- try{
-   const ctx={chat:[{is_user:true,mes:'用户问路'},{is_user:false,mes:'角色进入小巷',swipe_id:0}],getCurrentChatId:()=> 'local-test'};
-   let memory=commitLeaf(freshMemory(),1,messageFingerprint(ctx.chat[1]),
-     normalizeDelta({summary:'旧摘要',time:'2026/7/11 星期六 06:22-06:29',location:'巷口',
-       items:[{op:'add',name:'钥匙',owner:'角色'}]}),userFingerprint(ctx.chat,1));
-   const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
-     queue:{busy:false,enqueueMissing(){}},
-     editLeaf:(index,patch)=>{memory=editGeneratedLeaf(memory,ctx.chat,index,patch);},
-     deleteLeaf:index=>{memory=deleteGeneratedLeaf(memory,ctx.chat,index);}
-   });
-   view.open();const dialog=body.children[0].shadow.children[1];
-   const editor=find(dialog,x=>x.className?.includes('sm-generated-editor'));
-   assert.ok(editor,'AI-generated card should have editor');
-   const story=walk(editor).find(x=>x.tag==='textarea');
-   const time=walk(editor).find(x=>x.tag==='input'&&x.value.startsWith('2026'));
-   assert.ok(time);
-   assert.equal(time.value,'2026/07/11 · 06:22–06:29');
-   story.value='人工更正后的剧情';
-   time.value='2026/7/11 06:22-06:29';
-   find(editor,x=>x.tag==='button'&&x.textContent==='保存修改').fire('click');
-   assert.equal(memory.leaves[1].summary,'人工更正后的剧情');
-   assert.equal(memory.leaves[1].time,'2026/07/11 · 06:22–06:29');
-   confirmDelete=false;
-   find(editor,x=>x.tag==='button'&&x.textContent==='删除').fire('click');
-   assert.ok(memory.leaves[1],'cancelled delete must not modify memory');
-   confirmDelete=true;
-   find(editor,x=>x.tag==='button'&&x.textContent==='删除').fire('click');
-   assert.equal(memory.leaves[1],undefined);
-   assert.equal(ctx.chat[1].mes,'角色进入小巷','original chat text must be preserved');
- }finally{globalThis.window=oldWindow;}
+test('generated timeline reads once; edit and delete use separate modal dialogs',()=>withUI(body=>{
+ const ctx={chat:[{is_user:true,mes:'用户问路'},{is_user:false,mes:'角色进入小巷',swipe_id:0}],getCurrentChatId:()=> 'local-test'};
+ let memory=commitLeaf(freshMemory(),1,messageFingerprint(ctx.chat[1]),
+   normalizeDelta({summary:'旧摘要',time:'2026/7/11 星期六 06:22-06:29',location:'巷口',
+     items:[{op:'add',name:'钥匙',owner:'角色'}]}),userFingerprint(ctx.chat,1));
+ const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+   queue:{busy:false,enqueueMissing(){}},
+   editLeaf:(index,patch)=>{memory=editGeneratedLeaf(memory,ctx.chat,index,patch);},
+   deleteLeaf:index=>{memory=deleteGeneratedLeaf(memory,ctx.chat,index);}
+ });
+ view.open();
+ const dialog=body.children[0].shadow.children[1];
+ let card=find(dialog,x=>x.className==='sm-record');
+ assert.ok(card);
+ assert.equal(walk(card).filter(x=>x.tag==='textarea').length,0);
+ assert.equal(find(card,x=>x.className==='sm-record-text').textContent,'旧摘要');
+ assert.ok(walk(card).some(x=>x.className==='sm-record-subtitle'&&x.textContent==='巷口'));
+ card.open=true;
+ find(card,x=>x.attrs['aria-label']==='编辑摘要').fire('click');
+ let overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+ assert.ok(overlay);
+ assert.equal(walk(overlay).find(x=>x.attrs.role==='dialog')?.attrs['aria-modal'],'true');
+ assert.equal(find(card,x=>x.className==='sm-record-text').textContent,'旧摘要','read view is not duplicated');
+ assert.equal(walk(card).some(x=>x.tag==='textarea'),false);
+ let editor=find(overlay,x=>x.tag==='textarea'),time=find(overlay,x=>x.tag==='input'&&x.value.startsWith('2026'));
+ assert.ok(editor&&time);
+ assert.equal(time.value,'2026/07/11 · 06:22–06:29');
+ editor.value='不应保存的草稿';
+ find(overlay,x=>x.tag==='button'&&x.textContent==='取消').fire('click');
+ assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
+ assert.equal(memory.leaves[1].summary,'旧摘要');
+
+ find(card,x=>x.attrs['aria-label']==='编辑摘要').fire('click');
+ overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+ editor=find(overlay,x=>x.tag==='textarea');time=find(overlay,x=>x.tag==='input'&&x.value.startsWith('2026'));
+ editor.value='人工更正后的剧情';time.value='2026/7/11 06:22-06:29';
+ find(overlay,x=>x.tag==='button'&&x.textContent==='保存修改').fire('click');
+ assert.equal(memory.leaves[1].summary,'人工更正后的剧情');
+ assert.equal(memory.leaves[1].time,'2026/07/11 · 06:22–06:29');
+ assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
+
+ card=find(dialog,x=>x.className==='sm-record');
+ find(card,x=>x.attrs['aria-label']==='删除摘要').fire('click');
+ overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+ assert.ok(overlay);
+ assert.ok(walk(overlay).some(x=>x.textContent.includes('原始聊天不会删除')));
+ assert.ok(memory.leaves[1]);
+ find(overlay,x=>x.tag==='button'&&x.textContent==='取消').fire('click');
+ assert.ok(memory.leaves[1]);
+ find(card,x=>x.attrs['aria-label']==='删除摘要').fire('click');
+ overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+ find(overlay,x=>x.tag==='button'&&x.textContent==='确认删除').fire('click');
+ assert.equal(memory.leaves[1],undefined);
+ assert.equal(ctx.chat[1].mes,'角色进入小巷');
+ assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
 }));
-test('generated L1 chapter exposes manual editing and deletion controls',()=>withUI(body=>{
+test('generated L1 chapter uses text-only edit modal; Esc closes nested modal not whole extension',()=>withUI(body=>{
+ const ctx={chat:[{is_user:false,mes:'AI剧情'}],getCurrentChatId:()=> 'local-test'};
+ let memory=commitLeaf(freshMemory(),0,messageFingerprint(ctx.chat[0]),normalizeDelta({summary:'楼层'}));
+ memory.chapters.push({id:'chapter:1',level:1,children:['floor:0'],summary:'阶段总结'});
+ const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+   queue:{busy:false,enqueueMissing(){}},
+   editChapter:(id,summary)=>{memory=editGeneratedChapter(memory,ctx.chat,id,summary);},
+   deleteChapter:id=>{memory=deleteGeneratedChapter(memory,ctx.chat,id);}
+ });
+ view.open();const dialog=body.children[0].shadow.children[1];
+ let card=find(dialog,x=>x.className==='sm-record');
+ find(card,x=>x.attrs['aria-label']==='编辑摘要').fire('click');
+ let overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+ assert.ok(overlay);
+ assert.equal(walk(overlay).filter(x=>x.tag==='input').length,0,'L1 modal only has summary field');
+ assert.ok(walk(overlay).some(x=>x.textContent==='编辑 阶段总结'));
+ dialog.fire('cancel');
+ assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
+ assert.equal(dialog.open,true,'closing inner modal does not close extension');
+ find(card,x=>x.attrs['aria-label']==='编辑摘要').fire('click');
+ overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+ find(overlay,x=>x.tag==='textarea').value='改写过的 L1 阶段总结';
+ find(overlay,x=>x.tag==='button'&&x.textContent==='保存修改').fire('click');
+ assert.equal(memory.chapters[0].summary,'改写过的 L1 阶段总结');
+ card=find(dialog,x=>x.className==='sm-record');
+ find(card,x=>x.attrs['aria-label']==='删除摘要').fire('click');
+ overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+ find(overlay,x=>x.tag==='button'&&x.textContent==='确认删除').fire('click');
+ assert.equal(memory.chapters.length,0);
+ assert.ok(memory.leaves[0],'underlying fact stays');
+}));
+test('modal backdrop and close actions discard draft without changing saved summary',()=>withUI(body=>{
+ const ctx={chat:[{is_user:false,mes:'内容'}],getCurrentChatId:()=> 'test'};
+ const memory=commitLeaf(freshMemory(),0,messageFingerprint(ctx.chat[0]),normalizeDelta({summary:'保存的内容'}));
+ const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+   queue:{busy:false,enqueueMissing(){}}});
+ view.open();
+ const dialog=body.children[0].shadow.children[1],card=find(dialog,x=>x.className==='sm-record');
+ find(card,x=>x.attrs['aria-label']==='编辑摘要').fire('click');
+ const overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+ find(overlay,x=>x.tag==='textarea').value='草稿';
+ overlay.fire('click',{target:overlay});
+ assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
+ assert.equal(memory.leaves[0].summary,'保存的内容');
+ find(card,x=>x.attrs['aria-label']==='编辑摘要').fire('click');
+ dialog.fire('click',{target:dialog,clientX:-10,clientY:0});
+ assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
+ assert.equal(dialog.open,true,'outer backdrop should close inner dialog first');
+ view.open(false);
+ assert.equal(dialog.open,false);
+}));
+test('items provide an undoable merge selector, without changing scenes or characters',()=>withUI(body=>{
  const oldWindow=globalThis.window;globalThis.window={confirm:()=>true};
  try{
-   const ctx={chat:[{is_user:false,mes:'AI剧情'}],getCurrentChatId:()=> 'local-test'};
-   let memory=commitLeaf(freshMemory(),0,messageFingerprint(ctx.chat[0]),normalizeDelta({summary:'楼层'}));
-   memory.chapters.push({id:'chapter:1',level:1,children:['floor:0'],summary:'阶段总结'});
-   const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+  const ctx={chat:[{is_user:false,mes:'发现道具'},{is_user:false,mes:'道具换称呼'}],getCurrentChatId:()=> 'alias-ui'};
+  let memory=commitLeaf(freshMemory(),0,messageFingerprint(ctx.chat[0]),normalizeDelta({
+    summary:'拾起',items:[{op:'add',name:'银钥匙'}],
+    scenes:[{op:'add',name:'老走廊'}],characters:[{op:'add',name:'向导'}]
+  }));
+  memory=commitLeaf(memory,1,messageFingerprint(ctx.chat[1]),normalizeDelta({
+    summary:'移动',items:[{op:'update',name:'背包里的钥匙',location:'口袋'}],
+    scenes:[{op:'update',name:'走廊'}],characters:[{op:'update',name:'旅行者'}]
+  }));
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},
+    mergeEntity:(kind,from,to)=>{memory=mergeEntities(memory,ctx.chat,kind,from,to);},
+    unmergeAlias:(kind,name)=>{memory=unmergeEntity(memory,kind,name);}
+  });view.open();
+  const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='物品')).fire('click');
+  const before=deriveState(memory,ctx.chat);
+  assert.equal(before.items.length,2);
+  const source=find(dialog,x=>x.tag==='select'&&x.attrs['aria-label']==='待合并的实体');
+  const dest=find(dialog,x=>x.tag==='select'&&x.attrs['aria-label']==='合并到实体');
+  assert.ok(source&&dest);
+  source.value=before.items[1].entity_id;
+  dest.value=before.items[0].entity_id;
+  find(dialog,x=>x.tag==='button'&&x.textContent==='确认合并').fire('click');
+  assert.equal(deriveState(memory,ctx.chat).items.length,1);
+  assert.equal(deriveState(memory,ctx.chat).scenes.length,2);
+  assert.equal(deriveState(memory,ctx.chat).characters.length,2);
+  view.refresh();
+  const undo=find(dialog,x=>x.tag==='button'&&x.textContent==='撤销合并');
+  assert.ok(undo);undo.fire('click');
+  assert.equal(deriveState(memory,ctx.chat).items.length,2);
+ }finally{globalThis.window=oldWindow;}
+}));
+
+test('entity cards offer explicit merge and undo instead of fuzzy automatic grouping',()=>withUI(body=>{
+ const oldWindow=globalThis.window;let allow=false;
+ globalThis.window={confirm:()=>allow};
+ try{
+   const ctx={chat:[{is_user:false,mes:'第一幕'},{is_user:false,mes:'第二幕'}],getCurrentChatId:()=> 'synthetic-chat'};
+   let memory=freshMemory();
+   memory=commitLeaf(memory,0,messageFingerprint(ctx.chat[0]),
+     normalizeDelta({summary:'拾到钥匙',items:[{op:'add',name:'旧铜钥匙'}],
+       scenes:[{op:'add',name:'大厅'}],characters:[{op:'add',name:'店主'}]}));
+   memory=commitLeaf(memory,1,messageFingerprint(ctx.chat[1]),
+     normalizeDelta({summary:'钥匙换了称呼',items:[{op:'update',name:'店主的钥匙'}],
+       scenes:[{op:'add',name:'大厅侧门'}],characters:[{op:'add',name:'店员'}]}));
+   const view=mountUI({
+     context:()=>ctx,memory:()=>memory,settings:defaultSettings,
      queue:{busy:false,enqueueMissing(){}},
-     editChapter:(id,summary)=>{memory=editGeneratedChapter(memory,ctx.chat,id,summary);},
-     deleteChapter:id=>{memory=deleteGeneratedChapter(memory,ctx.chat,id);}
+     mergeEntity:(kind,from,to)=>{memory=mergeEntities(memory,ctx.chat,kind,from,to);},
+     unmergeAlias:(kind,name)=>{memory=unmergeEntity(memory,kind,name);}
    });
    view.open();const dialog=body.children[0].shadow.children[1];
-   const editor=find(dialog,x=>x.className?.includes('sm-generated-editor'));
-   assert.ok(editor);
-   const area=walk(editor).find(x=>x.tag==='textarea');
-   area.value='改写过的 L1 阶段总结';
-   find(editor,x=>x.tag==='button'&&x.textContent==='保存修改').fire('click');
-   assert.equal(memory.chapters[0].summary,'改写过的 L1 阶段总结');
-   find(editor,x=>x.tag==='button'&&x.textContent==='删除').fire('click');
-   assert.equal(memory.chapters.length,0);
-   assert.ok(memory.leaves[0],'underlying fact stays');
+   find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='物品')).fire('click');
+   const cards=walk(dialog).filter(x=>x.className==='sm-record');
+   assert.equal(cards.length,2);
+   const controls=find(cards[1],x=>x.className==='sm-entity-controls');
+   assert.ok(controls);
+   const picker=find(controls,x=>x.tag==='select');
+   const target=deriveState(memory,ctx.chat).items[0];
+   picker.value=target.entity_id;
+   find(controls,x=>x.tag==='button').fire('click');
+   assert.equal(deriveState(memory,ctx.chat).items.length,2,'cancel must preserve both');
+   allow=true;
+   find(controls,x=>x.tag==='button').fire('click');
+   assert.equal(deriveState(memory,ctx.chat).items.length,1);
+   assert.equal(deriveState(memory,ctx.chat).scenes.length,2);
+   assert.equal(deriveState(memory,ctx.chat).characters.length,2);
+   view.refresh();
+   const undo=find(dialog,x=>x.tag==='button'&&x.textContent==='撤销合并');
+   assert.ok(undo);
+   undo.fire('click');
+   assert.equal(deriveState(memory,ctx.chat).items.length,2);
  }finally{globalThis.window=oldWindow;}
 }));

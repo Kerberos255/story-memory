@@ -224,3 +224,137 @@ test('manually edited or deleted chapter invalidates ancestors without removing 
  assert.ok(deleted.skippedPlans.some(s=>s.includes('floor:0')&&s.includes('floor:1')));
  assert.equal(mem.chapters.length,3,'prior state not mutated');
 });
+
+test('existing entity IDs reconcile differently named items without changing canonical name',async()=>{
+ const {mergeEntities,unmergeEntity}=await import('../core.js');
+ const chat=[{is_user:false,mes:'拾起银钥匙'},{is_user:false,mes:'守卫交出那把钥匙'}];
+ let mem=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+   summary:'发现钥匙',items:[{op:'add',name:'银钥匙',owner:'守卫',quantity:1}]
+ }));
+ const entityId=deriveState(mem,chat).items[0].entity_id;
+ assert.match(entityId,/^items:0:[a-f0-9]{8}$/);
+ mem=commitLeaf(mem,1,messageFingerprint(chat[1]),normalizeDelta({
+   summary:'钥匙转交',items:[{op:'update',entity_id:entityId,name:'守卫的钥匙',owner:'旅人',quantity:1}]
+ }));
+ const [item]=deriveState(mem,chat).items;
+ assert.equal(deriveState(mem,chat).items.length,1);
+ assert.equal(item.name,'银钥匙');
+ assert.equal(item.owner,'旅人');
+ assert.deepEqual(item.aliases,['守卫的钥匙']);
+ const original=structuredClone(mem);
+ const rederived=deriveState(mem,chat);
+ assert.deepEqual(rederived.items,deriveState(mem,chat).items);
+ assert.deepEqual(mem,original,'deriving state must not rewrite chat memory');
+});
+test('scenes and characters use stable IDs; same-named types remain distinct',()=>{
+ const chat=[{is_user:false,mes:'地点与人物出现'},{is_user:false,mes:'称呼改变'}];
+ let mem=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+   summary:'出现',
+   scenes:[{op:'add',name:'东侧走廊',location:'旧宅'}],
+   characters:[{op:'add',name:'守门人',status:'在场'}],
+   items:[{op:'add',name:'守门人',description:'写有此名字的徽章'}]
+ }));
+ const state=deriveState(mem,chat);
+ mem=commitLeaf(mem,1,messageFingerprint(chat[1]),normalizeDelta({
+   summary:'更多信息',
+   scenes:[{op:'update',entity_id:state.scenes[0].entity_id,name:'东廊',description:'灯光变暗'}],
+   characters:[{op:'update',entity_id:state.characters[0].entity_id,name:'老门卫',status:'离开'}],
+ }));
+ const now=deriveState(mem,chat);
+ assert.equal(now.scenes.length,1);
+ assert.equal(now.scenes[0].name,'东侧走廊');
+ assert.equal(now.scenes[0].description,'灯光变暗');
+ assert.equal(now.characters.length,1);
+ assert.equal(now.characters[0].name,'守门人');
+ assert.equal(now.characters[0].status,'离开');
+ assert.equal(now.items.length,1,'a name shared with a character must not collide');
+});
+test('different named objects are not fuzzy-merged; unknown IDs cannot force identity',()=>{
+ const chat=[{is_user:false,mes:'两把钥匙'},{is_user:false,mes:'另外一把'}];
+ let mem=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({summary:'两把钥匙',
+   items:[{op:'add',name:'银钥匙',quantity:1},{op:'add',name:'铜钥匙',quantity:1}]}));
+ const fake='items:999:deadbeef';
+ mem=commitLeaf(mem,1,messageFingerprint(chat[1]),normalizeDelta({summary:'新的描述',
+   items:[{op:'update',name:'钥匙扣上的钥匙',entity_id:fake,owner:'旅人'}]}));
+ assert.equal(deriveState(mem,chat).items.length,3);
+ assert.equal(normalizeDelta({summary:'a',items:[{name:'a',entity_id:'characters:bad'}]}).delta.items[0].entity_id,undefined);
+});
+test('manual alias merge works for existing records and can be reverted independently per kind',async()=>{
+ const {mergeEntities,unmergeEntity}=await import('../core.js');
+ const chat=[{is_user:false,mes:'道具出现'},{is_user:false,mes:'同一件道具的新称呼'}];
+ let mem=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({summary:'拾起物品',
+   items:[{op:'add',name:'银色钥匙',owner:'旅人',quantity:1}],
+   scenes:[{op:'add',name:'银色钥匙',description:'房间代号'}]}));
+ mem=commitLeaf(mem,1,messageFingerprint(chat[1]),normalizeDelta({summary:'物品位置变化',
+   items:[{op:'update',name:'旅人的钥匙',location:'背包',quantity:1}],
+   scenes:[{op:'add',name:'旅人的钥匙',description:'另一房间代号'}]}));
+ const before=deriveState(mem,chat);
+ assert.equal(before.items.length,2);
+ assert.equal(before.scenes.length,2);
+ const merged=mergeEntities(mem,chat,'items',before.items[1].entity_id,before.items[0].entity_id);
+ assert.equal(deriveState(merged,chat).items.length,1);
+ assert.equal(deriveState(merged,chat).items[0].name,'银色钥匙');
+ assert.equal(deriveState(merged,chat).items[0].location,'背包');
+ assert.equal(deriveState(merged,chat).scenes.length,2);
+ assert.equal(Object.keys(mem.entityAliases).length,0);
+ const undone=unmergeEntity(merged,'items','旅人的钥匙');
+ assert.equal(deriveState(undone,chat).items.length,2);
+ assert.throws(()=>mergeEntities(mem,chat,'items',before.items[0].entity_id,before.items[0].entity_id),/不同/);
+});
+test('remove by known entity ID updates tracked identity rather than creating another item',()=>{
+ const chat=[{is_user:false,mes:'添加物品'},{is_user:false,mes:'物品遗失'}];
+ let mem=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+   summary:'获得',items:[{op:'add',name:'旧钥匙'}]}));
+ const id=deriveState(mem,chat).items[0].entity_id;
+ mem=commitLeaf(mem,1,messageFingerprint(chat[1]),normalizeDelta({
+   summary:'遗失',items:[{op:'remove',name:'随身钥匙',entity_id:id}]}));
+ assert.equal(deriveState(mem,chat).items.length,0);
+});
+
+test('canonical entity reference preserves item identity across descriptions and owners',async()=>{
+ const {mergeEntities,unmergeEntity}=await import('../core.js');
+ const chat=Array.from({length:3},(_,i)=>({is_user:false,mes:'剧情'+i}));
+ let memory=freshMemory();
+ const first=normalizeDelta({summary:'物品首次出现',items:[{op:'add',name:'纯棉内裤',owner:'星',quantity:1}]});
+ memory=commitLeaf(memory,0,messageFingerprint(chat[0]),first);
+ const known=deriveState(memory,chat).items[0];
+ assert.match(known.entity_id,/^items:0:[a-f0-9]{8}$/);
+ memory=commitLeaf(memory,1,messageFingerprint(chat[1]),normalizeDelta({summary:'后续发展',items:[
+  {op:'update',entity_id:known.entity_id,name:'星的内裤',location:'星右脚踝',description:'移动位置'}
+ ]}));
+ let items=deriveState(memory,chat).items;
+ assert.equal(items.length,1);
+ assert.equal(items[0].entity_id,known.entity_id);
+ assert.equal(items[0].name,'纯棉内裤');
+ assert.deepEqual(items[0].aliases,['星的内裤']);
+ memory=commitLeaf(memory,2,messageFingerprint(chat[2]),normalizeDelta({summary:'又有一件不同物品',items:[
+  {op:'add',name:'另一件内裤',owner:'星',quantity:1}
+ ]}));
+ items=deriveState(memory,chat).items;
+ assert.equal(items.length,2,'similar items may actually be different objects');
+ const merged=mergeEntities(memory,chat,'items',items[1].entity_id,items[0].entity_id);
+ assert.equal(deriveState(merged,chat).items.length,1,'manual explicit merge reunifies legacy aliases');
+ assert.equal(deriveState(memory,chat).items.length,2,'original memory preserved');
+ assert.equal(deriveState(unmergeEntity(merged,'items','另一件内裤'),chat).items.length,2);
+});
+test('scene and character IDs avoid duplicate records without mixing categories',async()=>{
+ const chat=Array.from({length:2},(_,i)=>({is_user:false,mes:'故事'+i}));
+ let memory=freshMemory();
+ memory=commitLeaf(memory,0,messageFingerprint(chat[0]),normalizeDelta({summary:'初始',
+  scenes:[{op:'add',name:'街道十字路口'},{op:'add',name:'十字路口旁酒馆'}],
+  characters:[{op:'add',name:'林静'},{op:'add',name:'林静的妹妹'}]
+ }));
+ const current=deriveState(memory,chat);
+ memory=commitLeaf(memory,1,messageFingerprint(chat[1]),normalizeDelta({summary:'称呼变化',
+  scenes:[{op:'update',entity_id:current.scenes[0].entity_id,name:'路口',status:'雨中'}],
+  characters:[{op:'update',entity_id:current.characters[0].entity_id,name:'林老师',status:'平静'}]
+ }));
+ const result=deriveState(memory,chat);
+ assert.equal(result.scenes.length,2);
+ assert.equal(result.characters.length,2);
+ assert.equal(result.scenes[0].name,'街道十字路口');
+ assert.equal(result.characters[0].name,'林静');
+ assert.equal(result.characters[1].name,'林静的妹妹');
+ assert.equal(result.scenes[0].status,'雨中');
+ assert.equal(result.characters[0].status,'平静');
+});

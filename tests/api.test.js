@@ -16,7 +16,7 @@ test('custom headers and body parameters pass through ST Custom route',()=>{
  assert.equal(body.tool_choice,'none');
  assert.equal(body.messages.length,1);
  assert.equal(JSON.parse(body.custom_include_headers)['X-Project'],'private-test');
-  assert.equal(JSON.parse(body.custom_include_headers).Authorization,['Bearer',api.key].join(' '));
+ assert.equal(JSON.parse(body.custom_include_headers).Authorization,['Bearer',api.key].join(' '));
  assert.equal(JSON.parse(body.custom_include_headers).Connection,undefined);
  assert.equal(JSON.parse(body.custom_include_body).reasoning_effort,'low');
 });
@@ -96,7 +96,7 @@ test('model refresh uses only standalone key and leaves main API untouched',asyn
    assert.equal(request.body.custom_url,'https://summary.example.invalid/v1');
    assert.equal(request.body.secret_id,undefined);
    const h=JSON.parse(request.body.custom_include_headers);
-    assert.equal(h.Authorization,['Bearer','synthetic-summary-key'].join(' '));
+   assert.equal(h.Authorization,['Bearer','synthetic-summary-key'].join(' '));
    assert.equal(h['x-opencode-session'],'custom-session');
  }finally{globalThis.fetch=oldFetch;}
 });
@@ -113,4 +113,30 @@ test('max tokens is configurable up to 65536, temperature 0 remains explicit',()
  const body=makeBody(api,[{role:'user',content:'test'}]);
  assert.equal(body.max_tokens,65536);
  assert.equal(body.temperature,0);
+});
+
+test('summary request provides bounded prior entity IDs without leaking later story state',async()=>{
+ const {commitLeaf,normalizeDelta,messageFingerprint}=await import('../core.js');
+ const chat=[
+  {is_user:false,mes:'拾取一把银钥匙'},
+  {is_user:false,mes:'钥匙移交给同伴'},
+  {is_user:false,mes:'后续才遇见一位新人物'}
+ ];
+ let mem=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+   summary:'获得道具',items:[{op:'add',name:'银钥匙',owner:'守卫'}],
+   scenes:[{op:'add',name:'东侧走廊'}],
+   characters:[{op:'add',name:'旅人'}]
+ }));
+ mem=commitLeaf(mem,2,messageFingerprint(chat[2]),normalizeDelta({
+   summary:'后来才出现的人物',characters:[{op:'add',name:'后来才出现的访客'}]
+ }));
+ const req=buildSummaryMessages(1,chat,mem,defaultSettings());
+ assert.equal(req.length,2);
+ assert.ok(req[1].content.includes('已登记物品'));
+ assert.ok(req[1].content.includes('银钥匙'));
+ assert.match(req[1].content,/items:0:[a-f0-9]{8}/);
+ assert.ok(req[1].content.includes('东侧走廊'));
+ assert.ok(req[1].content.includes('旅人'));
+ assert.ok(!req[1].content.includes('后来才出现的访客'));
+ assert.ok(req[0].content.includes('稳定身份'));
 });

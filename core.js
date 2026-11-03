@@ -12,7 +12,7 @@ export function defaultSettings() {
   };
 }
 export function freshMemory() {
-  return {version:1,leaves:{},chapters:[],skippedFloors:{},skippedPlans:[],manual:{summaries:[],items:[],scenes:[],characters:[]},tasks:{},revision:0};
+  return {version:1,leaves:{},chapters:[],skippedFloors:{},skippedPlans:[],entityAliases:{},manual:{summaries:[],items:[],scenes:[],characters:[]},tasks:{},revision:0};
 }
 export function readMemory(ctx) {
   if (!ctx?.chatMetadata) return freshMemory();
@@ -104,6 +104,7 @@ export function normalizeDelta(raw) {
       const name=cleanString(item.name,120);
       if(!name)continue;
       const out={op,name};
+      if(typeof item.entity_id==='string'&&/^(?:items|scenes|characters|plans):\d+:[a-f0-9]{8}$/.test(item.entity_id))out.entity_id=item.entity_id;
       for(const key of ['description','location','owner','status','relationship','time','kind']) {
         const value=cleanString(item[key],600);if(value)out[key]=value;
       }
@@ -231,8 +232,49 @@ export function validChapters(memory,chat){
   }
   return chapters;
 }
+
+const entityKinds=['items','scenes','characters','plans'];
+export const entityNameKey=name=>String(name||'').normalize('NFKC').trim().toLocaleLowerCase().replace(/\s+/g,'');
+function canonicalEntity(memory,kind,name){
+  const rules=memory.entityAliases?.[kind]||{};
+  let display=String(name||'').trim(),key=entityNameKey(display),steps=0;
+  const seen=new Set();
+  while(Object.hasOwn(rules,key)&&steps++<20&&!seen.has(key)){
+    seen.add(key);
+    const target=String(rules[key]?.to||'').trim();
+    const next=entityNameKey(target);
+    if(!next||seen.has(next))break;
+    display=target;key=next;
+  }
+  return {key,name:display};
+}
+/** Explicit alias mapping scoped to one chat and one category; never edits leaves. */
+export function mergeEntities(memory,chat,kind,fromId,toId){
+  if(!entityKinds.includes(kind))throw Error('未知实体类型');
+  const rows=deriveState(memory,chat)[kind].filter(x=>!x.manual);
+  const source=rows.find(x=>x.entity_id===fromId),target=rows.find(x=>x.entity_id===toId);
+  if(!source||!target||source===target)throw Error('请选择两个不同的现有记录');
+  const from=entityNameKey(source.name),to=entityNameKey(target.name);
+  if(!from||!to||from===to)throw Error('记录名称相同');
+  if(['__proto__','constructor','prototype'].includes(from)||['__proto__','constructor','prototype'].includes(to))throw Error('该名称不能建立合并规则');
+  const next=structuredClone(memory);
+  next.entityAliases??={};
+  next.entityAliases[kind]??={};
+  next.entityAliases[kind][from]={name:source.name,to:target.name};
+  next.revision++;return next;
+}
+export function unmergeEntity(memory,kind,fromName){
+  if(!entityKinds.includes(kind))throw Error('未知实体类型');
+  const key=entityNameKey(fromName);
+  if(!Object.hasOwn(memory.entityAliases?.[kind]||{},key))throw Error('没有可撤销的合并规则');
+  const next=structuredClone(memory);
+  delete next.entityAliases[kind][key];
+  next.revision++;return next;
+}
 export function deriveState(memory,chat) {
   const sections={items:new Map(),scenes:new Map(),characters:new Map(),plans:new Map()};
+  const byId=Object.fromEntries(entityKinds.map(kind=>[kind,new Map()]));
+  const knownAliases=Object.fromEntries(entityKinds.map(kind=>[kind,new Map()]));
   const floors=Object.keys(memory.leaves||{}).map(Number).sort((a,b)=>a-b);
   const timeline=[];
   for(const i of floors){
@@ -242,11 +284,27 @@ export function deriveState(memory,chat) {
     for(const [kind,rows] of Object.entries(entry.delta||{})){
       const map=sections[kind];if(!map||!Array.isArray(rows))continue;
       for(const change of rows){
-        const key=String(change.name||'').trim().toLowerCase();
-        if(!key)continue;
-        if(change.op==='remove'){map.delete(key);continue;}
-        const old=map.get(key)||{name:change.name};
-        map.set(key,{...old,...change,op:undefined,sourceIndex:i});
+        const raw=entityNameKey(change.name);if(!raw)continue;
+        const canonical=canonicalEntity(memory,kind,change.name);
+        // Model-supplied IDs only resolve already established entities in this
+        // category; unknown IDs never create new identity associations.
+        const linked=change.entity_id&&byId[kind].get(change.entity_id);
+        const key=linked||(map.has(canonical.key)?canonical.key:null)||knownAliases[kind].get(raw)||canonical.key;
+        if(change.op==='remove'){
+          const old=map.get(key);
+          if(old)byId[kind].delete(old.entity_id);
+          map.delete(key);
+          continue;
+        }
+        const old=map.get(key);
+        const entity_id=old?.entity_id||(kind+':'+i+':'+hashText(kind+'|'+key));
+        const display=old?.name||canonical.name;
+        const aliases=[...(old?.aliases||[])];
+        if(raw!==entityNameKey(display)&&!aliases.some(x=>entityNameKey(x)===raw)&&aliases.length<12)
+          aliases.push(change.name);
+        map.set(key,{...old,...change,name:display,entity_id,aliases,op:undefined,sourceIndex:i});
+        byId[kind].set(entity_id,key);
+        if(raw!==key&&!map.has(raw))knownAliases[kind].set(raw,key);
       }
     }
   }
@@ -275,7 +333,12 @@ export function injectionText(memory,chat,settings,vectorHits=[]) {
   }
   for(const [flag,key,label] of [['inventory','items','物品'],['scenes','scenes','场景'],['characters','characters','人物']]){
     if(!cfg[flag]||!state[key]?.length)continue;
-    blocks.push('【'+label+'】\n'+state[key].slice(-45).map(x=>x.manual?x.name:JSON.stringify(x)).join('\n'));
+    blocks.push('【'+label+'】\n'+state[key].slice(-45).map(x=>{
+      if(x.manual)return x.name;
+      // Internal reconciliation IDs belong in summary requests, not RP context.
+      const {entity_id,aliases,sourceIndex,op,...publicState}=x;
+      return JSON.stringify(publicState);
+    }).join('\n'));
   }
   if(cfg.vector&&vectorHits.length)blocks.push('【相关旧记忆】\n'+vectorHits.map(x=>x.text).join('\n'));
   const budget=Math.max(400,Math.min(18000,Number(cfg.budget)||4500))*3;
