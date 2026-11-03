@@ -8,6 +8,12 @@ const makeChat=()=>[
  {is_user:false,is_system:false,mes:'同伴收下怀表，答应明日归还。',swipe_id:0}
 ];
 const event=(summary,items=[])=>normalizeDelta({summary,items});
+test('auto-summary and auto-hide default on with a three-floor protection window',()=>{
+ const cfg=defaultSettings();
+ assert.equal(cfg.summary.autoHide,true);
+ assert.equal(cfg.autoSummary,true);
+ assert.equal(cfg.summary.keepRecent,3);
+});
 test('invalid model JSON cannot mutate memory',()=>{
  const memory=freshMemory();
  assert.throws(()=>normalizeDelta({items:[]}),/summary/);
@@ -86,6 +92,33 @@ test('multi-level compression preserves leaf sources and continues through L3+',
  assert.equal(recentAiStart(chat,3),chat.length-5);
  assert.equal(recentAiStart(chat,0),chat.length);
  assert.ok(m.chapters.every(c=>c.children.length>=2));
+});
+test('compression continues through L10 and L11 without a hard-coded maximum',async()=>{
+ const {nextCompression,commitCompression,validChapters}=await import('../core.js');
+ const chat=Array.from({length:4},(_,i)=>({is_user:false,mes:'剧情'+i,swipe_id:0}));
+ let memory=freshMemory();
+ for(let i=0;i<chat.length;i++)memory.leaves[i]={
+   id:'floor:'+i,sourceIndex:i,fingerprint:messageFingerprint(chat[i]),summary:'摘要'+i
+ };
+ // Small synthetic deep tree: existing chapter validation accepts one-child nodes.
+ // Four independent branches at L9 allow two L10 nodes and then an L11 root.
+ for(let level=1;level<=9;level++)for(let i=0;i<4;i++)memory.chapters.push({
+   id:'synthetic:'+level+':'+i,level,
+   children:[level===1?'floor:'+i:'synthetic:'+(level-1)+':'+i],
+   summary:'已有 L'+level+' 记忆'+i
+ });
+ const cfg=defaultSettings();
+ cfg.summary.leafBatchThreshold=2;cfg.summary.leafKeepRecent=0;
+ cfg.summary.resummaryThreshold=2;cfg.summary.higherResummaryThreshold=2;
+ assert.equal(validChapters(memory,chat).length,36);
+ for(const expected of [10,10,11]){
+   const plan=nextCompression(memory,chat,cfg);
+   assert.equal(plan?.level,expected);
+   memory=commitCompression(memory,chat,plan,'新生成 L'+expected);
+ }
+ assert.equal(validChapters(memory,chat).length,39);
+ assert.equal(nextCompression(memory,chat,cfg),null);
+ assert.equal(Object.keys(memory.leaves).length,4,'all source floors remain available');
 });
 test('compression rejects changed swipe and supports disabling each threshold',async()=>{
  const {nextCompression,commitCompression}=await import('../core.js');

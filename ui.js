@@ -520,7 +520,7 @@ export function mountUI(api){
 
     // Keep settings compact: one auto-summary panel and one three-column compression strip.
     const auto=switchRow('自动摘要',cfg.autoSummary,'只处理已离开延迟窗口的楼层');
-    const hide=switchRow('摘要完成后自动隐藏',cfg.summary.autoHide??false,
+    const hide=switchRow('摘要完成后自动隐藏',cfg.summary.autoHide??true,
       '仅隐藏确认已摘要的旧楼层，原文仍可恢复');
     const recent=field('保留正文',cfg.summary.keepRecent,'number');
     const delay=field('延迟摘要',cfg.summary.delayFloors??3,'number');

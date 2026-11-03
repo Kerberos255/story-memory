@@ -92,7 +92,9 @@ async function onGeneration(){
   if(!cfg.enabled||!ctx?.chat?.length)return;
   await queue.restoreStale();
   await queue.hideCompleted();
-  if(cfg.autoSummary)queue.enqueueAutomatic(80);
+  // New default is on: limit catch-up work per generation to prevent API bursts.
+  // Explicit manual backfills keep their own batch size.
+  if(cfg.autoSummary)queue.enqueueAutomatic(5);
 }
 async function generateInterceptor(_chat,_contextSize,_abort,type){
   if(['quiet','impersonate','continue'].includes(String(type||'').toLowerCase()))return;

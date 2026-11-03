@@ -4,8 +4,8 @@ export const SETTINGS_KEY = 'story_memory_settings_v1';
 
 export function defaultSettings() {
   return {
-    enabled: true, autoSummary: false, api: {name:'摘要 API',mode:'main',url:'',key:'',model:'',headers:{},exclude:[],include:{},maxTokens:8192,timeout:90,temperature:0},
-    summary: {keepRecent:3,autoHide:false,delayFloors:3,leafBatchThreshold:12,leafKeepRecent:3,resummaryThreshold:6,higherResummaryThreshold:3,retry:1,maxInputChars:16000},
+    enabled: true, autoSummary: true, api: {name:'摘要 API',mode:'main',url:'',key:'',model:'',headers:{},exclude:[],include:{},maxTokens:8192,timeout:90,temperature:0},
+    summary: {keepRecent:3,autoHide:true,delayFloors:3,leafBatchThreshold:12,leafKeepRecent:3,resummaryThreshold:6,higherResummaryThreshold:3,retry:1,maxInputChars:16000},
     injection: {summary:true,inventory:true,scenes:true,characters:true,vector:false,budget:4500},
     prompts: {summary:'',summaryFull:'',chapter:'',resummary2:'',overview:''},
     vector: {enabled:false,url:'https://api.siliconflow.cn/v1',key:'',model:'BAAI/bge-m3',topK:5,threshold:0.35}
@@ -389,7 +389,14 @@ export function nextCompression(memory,chat,settings){
     Number(opts.resummaryThreshold??6),
     Number(opts.higherResummaryThreshold??3)
   ];
-  const maxLevel=Math.min(8,Math.max(0,...(memory.chapters||[]).map(c=>Number(c.level)||0)));
+  // No arbitrary L9 ceiling. A valid level N requires at least N chapter nodes;
+  // bound the scan by the stored node count to tolerate malformed level values.
+  const chapters=memory.chapters||[];
+  let maxLevel=0;
+  for(const chapter of chapters){
+    const level=Number(chapter.level);
+    if(Number.isSafeInteger(level)&&level>maxLevel&&level<=chapters.length)maxLevel=level;
+  }
   for(let level=0;level<=maxLevel;level++){
     const threshold=Math.trunc(thresholds[Math.min(level,2)]);
     if(!Number.isFinite(threshold)||threshold<2||threshold>100)continue;

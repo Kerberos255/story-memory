@@ -206,11 +206,11 @@ test('summary settings expose delayed floor count and automatic hiding toggle',(
  delayInput.value='4';
  const toggle=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='摘要完成后自动隐藏'));
  assert.ok(toggle);const checkbox=walk(toggle).find(x=>x.tag==='input');
- assert.equal(checkbox.checked,false);
- checkbox.checked=true;
+ assert.equal(checkbox.checked,true);
+ checkbox.checked=false;
  find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
  assert.equal(saved.summary.delayFloors,4);
- assert.equal(saved.summary.autoHide,true);
+ assert.equal(saved.summary.autoHide,false);
 }));
 
 test('restore defaults keeps connection secrets and remembers, asks before replacing settings',()=>withUI(body=>{
@@ -224,7 +224,7 @@ test('restore defaults keeps connection secrets and remembers, asks before repla
   cfg.api.headers={'X-Example':'synthetic'};
   cfg.api.temperature=.2;cfg.api.maxTokens=4096;
   cfg.vector.key='synthetic-vector-value';cfg.vector.model='custom-embedding';
-  cfg.summary.autoHide=true;cfg.summary.delayFloors=6;
+  cfg.autoSummary=false;cfg.summary.autoHide=false;cfg.summary.delayFloors=6;
   cfg.prompts.summaryFull='Custom prompt';
   let consent=false,saves=0;
   globalThis.window={confirm:()=>consent};
@@ -243,7 +243,8 @@ test('restore defaults keeps connection secrets and remembers, asks before repla
     assert.equal(saves,1);
     assert.equal(cfg.api.temperature,0);
     assert.equal(cfg.api.maxTokens,8192);
-    assert.equal(cfg.summary.autoHide,false);
+    assert.equal(cfg.summary.autoHide,true);
+    assert.equal(cfg.autoSummary,true);
     assert.equal(cfg.summary.delayFloors,3);
     assert.equal(cfg.prompts.summaryFull,'');
     assert.equal(cfg.api.mode,'custom');
