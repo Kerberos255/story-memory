@@ -3,12 +3,30 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {defaultSettings,freshMemory,addManual,injectionText} from '../core.js';
 
-test('Story Memory places the summary after the main prompt, outside the live chat sequence',()=>{
+test('Story Memory uses the oldest in-chat slot, not a position relative to the main prompt',()=>{
   const source=readFileSync(new URL('../index.js',import.meta.url),'utf8');
-  // Position 0 = IN_PROMPT (after main prompt and before Chat History).
-  // Position 1 + depth 2 would split the last two turns.
-  assert.match(source,/setExtensionPrompt\('story_memory_injection_v1',text,0,0,false,0,null\)/);
+  // ST release script.js: IN_CHAT=1 and MAX_INJECTION_DEPTH=10000.
+  // A short depth breaks the chronology; IN_PROMPT can precede user presets.
+  assert.match(source,/setExtensionPrompt\('story_memory_injection_v1',text,1,10000,false,0,null\)/);
+  assert.doesNotMatch(source,/setExtensionPrompt\('story_memory_injection_v1',text,0,0/);
   assert.doesNotMatch(source,/setExtensionPrompt\('story_memory_injection_v1',text,1,2/);
+});
+
+test('SillyTavern in-chat depth places the archive before all retained dialogue turns',()=>{
+  // Mirror the release Chat Completion algorithm: messages arrive newest-first,
+  // splice at injection_depth, then reverse into chronological Chat History.
+  const insert = messages=>{
+    const newestFirst=[...messages].reverse();
+    newestFirst.splice(10000,0,'【历史剧情记忆】');
+    return newestFirst.reverse();
+  };
+  for(const count of [0,1,2,6,128,9500]){
+    const turns=Array.from({length:count},(_,i)=>i%2?'ai'+i:'user'+i);
+    const history=insert(turns);
+    assert.equal(history[0],'【历史剧情记忆】');
+    assert.deepEqual(history.slice(1),turns);
+  }
+  // This guarantee concerns ordering, not retention under context token trimming.
 });
 
 test('injected memory declares itself an older archive and gives recent dialogue precedence',()=>{

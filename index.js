@@ -34,9 +34,10 @@ function inject(hits=[],historyHits=[],memory=null,forGeneration=false){
   const ctx=getContext();if(!ctx?.setExtensionPrompt)return;
   const cfg=getSettings();
   const text=cfg.enabled?injectionText(memory||peekMemory(ctx),ctx.chat,cfg,hits,historyHits):'';
-  // IN_PROMPT = 0: historical context after the main/story prompt, before chat history.
-  // IN_CHAT depth 2 used to break the chronology between the most recent turns.
-  ctx.setExtensionPrompt('story_memory_injection_v1',text,0,0,false,0,null);
+  // IN_CHAT = 1, MAX_INJECTION_DEPTH = 10000 in SillyTavern.
+  // Depth is counted from the newest turn, so the maximum inserts at the
+  // beginning of Chat History (after the preset prompts) even after trimming.
+  ctx.setExtensionPrompt('story_memory_injection_v1',text,1,10000,false,0,null);
   lastInjection={chatId:ctx.getCurrentChatId?.()||'',text,at:Date.now()};
   if(forGeneration)lastGenerationInjection=lastInjection;
 }
