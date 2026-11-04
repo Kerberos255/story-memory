@@ -605,8 +605,10 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
   const roots=chapters.filter(c=>!nested.has(c.id)).slice(-12);
   add('【分层剧情记忆】',roots.map(x=>({text:'[L'+x.level+'] '+x.summary,identity:x.summary})));
   if(cfg.vector)add('【相关旧记忆】',vectorHits.map(x=>note(x.text)));
+  // This is a historical archive, not a turn in the live conversation.
+  const archiveHeader='【历史剧情记忆｜非新发生的对话；若与后续实际剧情冲突，以较新的聊天记录为准】\n';
   const budget=Math.max(400,Math.min(18000,Number(cfg.budget)||4500))*3;
-  let remaining=budget;
+  let remaining=budget-archiveHeader.length;
   const result=[],seen=new Set(),breakdown=[];
   // Select entire entries by priority, newest within a section; never slice JSON
   // or prose in the middle. Preserve chronology when presenting chosen entries.
@@ -633,7 +635,8 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
     remaining-=section.length+(result.length>1?2:0);
     breakdown.push({title,selected:chosen.length,omitted,chars:section.length});
   }
-  const text=result.join('\n\n');
+  const content=result.join('\n\n');
+  const text=content?archiveHeader+content:'';
   if(diagnostics&&typeof diagnostics==='object'){
     diagnostics.budgetTokens=Math.floor(budget/3);
     diagnostics.usedTokens=Math.ceil(text.length/3);

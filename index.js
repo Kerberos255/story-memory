@@ -4,6 +4,7 @@ import {listSummaryModels} from './api.js';
 import {indexSummaries,recall} from './vector-local.js';
 import {selectHistory,historyEvidence,sourcePreview} from './retrieval-local.js';
 import {mountUI} from './ui.js';
+import {ensureStoryMemoryEntry} from './toolbar.js';
 // Pure private ST extension. No external scripts, analytics or dependencies.
 let ui,queue,lastChat='',settings;
 let lastInjection={chatId:'',text:'',at:0};
@@ -33,8 +34,9 @@ function inject(hits=[],historyHits=[],memory=null,forGeneration=false){
   const ctx=getContext();if(!ctx?.setExtensionPrompt)return;
   const cfg=getSettings();
   const text=cfg.enabled?injectionText(memory||peekMemory(ctx),ctx.chat,cfg,hits,historyHits):'';
-  // IN_CHAT = 1, SYSTEM = 0 in SillyTavern script.js.
-  ctx.setExtensionPrompt('story_memory_injection_v1',text,1,2,false,0,null);
+  // IN_PROMPT = 0: historical context after the main/story prompt, before chat history.
+  // IN_CHAT depth 2 used to break the chronology between the most recent turns.
+  ctx.setExtensionPrompt('story_memory_injection_v1',text,0,0,false,0,null);
   lastInjection={chatId:ctx.getCurrentChatId?.()||'',text,at:Date.now()};
   if(forGeneration)lastGenerationInjection=lastInjection;
 }
@@ -165,20 +167,14 @@ function refreshButtonStatus(){
   if(!entry)return;
   const tasks=Object.values(peekMemory(getContext()).tasks||{});
   const failed=tasks.filter(x=>x?.status==='failed').length;
-  entry.textContent=queue?.busy?'✦ 剧情记忆 · 整理中':failed?'✦ 剧情记忆 · '+failed+' 项失败':'✦ 剧情记忆';
-  entry.title=failed&&!queue?.busy?'有整理失败的楼层，点击查看':'打开剧情记忆';
+  const label=queue?.busy?'✦ 剧情记忆 · 整理中':failed?'✦ 剧情记忆 · '+failed+' 项失败':'✦ 剧情记忆';
+  const title=failed&&!queue?.busy?'有整理失败的楼层，点击查看':'打开剧情记忆';
+  if(entry.textContent!==label)entry.textContent=label;
+  if(entry.title!==title)entry.title=title;
 }
 function ensureButton(){
-  const form=document.querySelector('#send_form');if(!form||document.getElementById('story-memory-open'))return;
-  let bar=form.querySelector('#qr--bar');
-  if(!bar){bar=document.createElement('div');bar.id='qr--bar';bar.className='flex-container flexGap5 story-memory-made-bar';form.prepend(bar);}
-  let holder=bar.querySelector('.qr--buttons');
-  if(!holder){holder=document.createElement('div');holder.className='qr--buttons';bar.append(holder);}
-  const button=document.createElement('div');button.id='story-memory-open';button.className='qr--button menu_button interactable';
-  button.tabIndex=0;button.setAttribute('role','button');button.title='打开剧情记忆';button.textContent='✦ 剧情记忆';
-  button.addEventListener('click',()=>ui?.open());
-  button.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();ui?.open();}});
-  holder.append(button);refreshButtonStatus();
+  const entry=ensureStoryMemoryEntry(document,()=>ui?.open());
+  if(entry)refreshButtonStatus();
 }
 function init(){
   const ctx=getContext();
@@ -221,12 +217,12 @@ function init(){
     const form=document.getElementById('send_form');
     if(!form)return false;
     observer?.disconnect();
-    observer=new MutationObserver(()=>{if(!document.getElementById('story-memory-open'))ensureButton();});
+    observer=new MutationObserver(()=>ensureButton());
     observer.observe(form,{childList:true,subtree:true});ensureButton();return true;
   };
   attach();
   let tries=0;const timer=setInterval(()=>{
-    if(!document.getElementById('story-memory-open'))ensureButton();
+    ensureButton();
     if(!observer)attach();
     if(++tries>60)clearInterval(timer);
   },1000);
