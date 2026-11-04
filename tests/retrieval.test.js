@@ -112,3 +112,27 @@ test('chapter source viewer can page through every original floor in chronologic
   assert.deepEqual(second.map(x=>x.index),[5,6,7,8,9,10]);
   assert.deepEqual(third.map(x=>x.index),[10,11,12,13]);
 });
+
+
+test('semantic-only history survives a query with no lexical search terms',()=>{
+  const {ctx,memory}=fixture();
+  assert.deepEqual(searchTerms('嗯'),[]);
+  const result=selectHistory(ctx,memory,'嗯',[{key:'floor:1',score:.94}],5);
+  assert.equal(result.length,1);
+  assert.equal(result[0].key,'floor:1');
+  assert.ok(result[0].from.includes('semantic'));
+});
+
+
+test('full entity names outweigh nearby generic Chinese ngrams without downranking old plot clues',()=>{
+  const chat=[
+    {is_user:false,mes:'通用的调查故事',swipe_id:0},
+    {is_user:false,mes:'独特物件登场',swipe_id:0}
+  ];
+  let memory=freshMemory();
+  memory=commitLeaf(memory,0,messageFingerprint(chat[0]),normalizeDelta({summary:'调查许多旧线索'}));
+  memory=commitLeaf(memory,1,messageFingerprint(chat[1]),normalizeDelta({summary:'遇见一件普通物品',items:[{op:'add',name:'苍雷灵珠',owner:'少女'}]}));
+  const ctx={chat,chatMetadata:{[META_KEY]:memory},getCurrentChatId:()=> 'entity-rank'};
+  const results=selectHistory(ctx,memory,'苍雷灵珠后来怎样了',[],2);
+  assert.equal(results[0].key,'floor:1');
+});

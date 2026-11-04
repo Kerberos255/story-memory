@@ -15,13 +15,41 @@ function db(){
   }).catch(e=>{opening=null;throw e;});
   return opening;
 }
+// Query-time scope cache: avoid cloning the entire IndexedDB vector collection
+// before every user message. Bound both age and number of retained chat scopes.
+const scopeRows=new Map(),SCOPE_CACHE_TTL=30000,MAX_SCOPE_CACHES=2;
+const MAX_SCOPE_CACHE_BYTES=48*1024*1024;
+function rememberRows(prefix,records){
+  // Keep large worlds usable without pinning hundreds of MB of embeddings in JS heap.
+  let bytes=0;
+  for(const row of records){
+    bytes+=(row.vector?.byteLength||row.vector?.length*8||0)+String(row.text||'').length*2+120;
+    if(bytes>MAX_SCOPE_CACHE_BYTES){scopeRows.delete(prefix);return;}
+  }
+  scopeRows.delete(prefix);scopeRows.set(prefix,{records,at:Date.now()});
+  while(scopeRows.size>MAX_SCOPE_CACHES)scopeRows.delete(scopeRows.keys().next().value);
+}
+function invalidateRows(ids){
+  for(const id of ids){
+    const separator=String(id).indexOf(':');
+    if(separator>=0)scopeRows.delete(String(id).slice(0,separator+1));
+  }
+}
 async function rows(prefix){
+  const hit=scopeRows.get(prefix);
+  if(hit&&Date.now()-hit.at<SCOPE_CACHE_TTL){
+    scopeRows.delete(prefix);scopeRows.set(prefix,hit);
+    return hit.records;
+  }
   const database=await db();
   return new Promise((resolve,reject)=>{
     const store=database.transaction(TABLE,'readonly').objectStore(TABLE);
     const range=typeof IDBKeyRange!=='undefined'?IDBKeyRange.bound(prefix,prefix+'\uffff'):undefined;
     const req=store.getAll(range);
-    req.onsuccess=()=>resolve(req.result.filter(x=>x.id.startsWith(prefix)));
+    req.onsuccess=()=>{
+      const records=req.result.filter(x=>x.id.startsWith(prefix));
+      rememberRows(prefix,records);resolve(records);
+    };
     req.onerror=()=>reject(Error('向量索引读取失败'));
   });
 }
@@ -32,7 +60,7 @@ async function write(additions=[],removals=[]){
     const tx=database.transaction(TABLE,'readwrite'),store=tx.objectStore(TABLE);
     for(const id of removals)store.delete(id);
     for(const item of additions)store.put(item);
-    tx.oncomplete=()=>resolve();
+    tx.oncomplete=()=>{invalidateRows([...additions.map(x=>x.id),...removals]);resolve();};
     tx.onerror=()=>reject(Error('向量索引保存失败'));
   });
 }
@@ -71,9 +99,14 @@ export async function embed(settings,texts,signal){
     throw e;
   }finally{clearTimeout(timer);signal?.removeEventListener('abort',cancel);}
 }
-function normalized(v){
-  const length=Math.hypot(...v);
-  return v.map(n=>length?n/length:0);
+// IndexedDB can structured-clone typed arrays; Float32 reduces stored vector bytes.
+// Older Array<number> cache entries remain readable through cosine().
+export function normalizeEmbedding(v){
+  let squared=0;
+  for(const n of v)squared+=n*n;
+  const length=Math.sqrt(squared),out=new Float32Array(v.length);
+  if(length)for(let i=0;i<v.length;i++)out[i]=v[i]/length;
+  return out;
 }
 export function cosine(a,b){
   if(a.length!==b.length)return -1;
@@ -149,7 +182,7 @@ export async function indexSummaries(ctx,memory,settings,signal){
     const batch=changed.slice(i,i+6),vectors=await embed(settings,batch.map(x=>x.text),signal);
     if(prefix!==scopeId(ctx,settings))return count;
     await write(batch.map((item,j)=>({
-      id:prefix+item.key,hash:hashText(item.text),key:item.key,text:item.text,vector:normalized(vectors[j])
+      id:prefix+item.key,hash:hashText(item.text),key:item.key,text:item.text,vector:normalizeEmbedding(vectors[j])
     })));
     count+=batch.length;
   }
@@ -164,14 +197,34 @@ export async function selectRecallHits(settings,query,ranked,signal){
   try{return (await rerankCandidates(settings,query,ranked.slice(0,pool),signal)).slice(0,limit);}
   catch{return ranked.slice(0,limit);} // Never lose vector candidates if rerank is unavailable.
 }
+/** Fixed-size top-K avoids sorting and allocating a row for every stored vector. */
+export function topVectorMatches(cached,current,target,threshold,limit){
+  const cap=Math.max(1,Math.min(30,Math.trunc(Number(limit)||5))),best=[];
+  for(const row of cached){
+    if(current.get(row.key)!==row.text)continue;
+    const score=cosine(target,row.vector);
+    if(!Number.isFinite(score)||score<threshold||best.length>=cap&&score<=best.at(-1).score)continue;
+    let place=best.findIndex(item=>score>item.score);
+    if(place<0)place=best.length;
+    best.splice(place,0,{text:row.text,score,key:row.key});
+    if(best.length>cap)best.pop();
+  }
+  return best;
+}
+export function similarityThreshold(value){
+  if(value===null||value===undefined||value==='')return 0.35;
+  const raw=Number(value);
+  return Math.max(-1,Math.min(1,Number.isFinite(raw)?raw:0.35));
+}
 export async function recall(ctx,memory,settings,query,signal){
   if(!settings.vector?.enabled||!query?.trim())return [];
   const prefix=scopeId(ctx,settings),current=new Map(candidates(ctx,memory).map(x=>[x.key,x.text]));
-  const [q]=await embed(settings,[query.slice(-1800)],signal),target=normalized(q);
+  const [q]=await embed(settings,[query.slice(-1800)],signal),target=normalizeEmbedding(q);
   const cached=await rows(prefix);
-  const threshold=Math.max(-1,Math.min(1,Number(settings.vector.threshold)||0.35));
-  const ranked=cached.filter(row=>current.get(row.key)===row.text)
-    .map(row=>({text:row.text,score:cosine(target,row.vector),key:row.key}))
-    .filter(row=>row.score>=threshold).sort((a,b)=>b.score-a.score);
+  if(signal?.aborted)return [];
+  const threshold=similarityThreshold(settings.vector.threshold);
+  const limit=Math.max(1,Math.min(10,Number(settings.vector.topK)||5));
+  const pool=settings.vector.rerankEnabled?Math.max(limit,Math.min(30,Number(settings.vector.rerankCandidates)||15)):limit;
+  const ranked=topVectorMatches(cached,current,target,threshold,pool);
   return selectRecallHits(settings,query,ranked,signal);
 }

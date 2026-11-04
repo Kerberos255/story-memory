@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {embeddingEndpoint,embed,cosine,candidates,scopeId,rerankEndpoint,rerankCandidates,selectRecallHits} from '../vector-local.js';
+import {embeddingEndpoint,embed,cosine,candidates,scopeId,rerankEndpoint,rerankCandidates,selectRecallHits,similarityThreshold,normalizeEmbedding,indexSummaries,recall,topVectorMatches} from '../vector-local.js';
 import {defaultSettings,freshMemory,commitLeaf,messageFingerprint,normalizeDelta} from '../core.js';
 
 test('embedding endpoint validates URLs without using ST secret vault',()=>{
@@ -84,4 +84,84 @@ test('vector candidates use valid original and compressed summaries, not stale s
  assert.ok(scopeId(ctx,cfg).endsWith(':'));
  ctx.chat[0].swipe_id=1;
  assert.equal(candidates(ctx,memory).length,0);
+});
+
+
+test('explicit zero similarity threshold is preserved',()=>{
+  assert.equal(similarityThreshold(0),0);
+  assert.equal(similarityThreshold('0'),0);
+  assert.equal(similarityThreshold(undefined),0.35);
+  assert.equal(similarityThreshold(''),0.35);
+  assert.equal(similarityThreshold(2),1);
+});
+
+
+test('embedding cache uses compact Float32 vectors with legacy array similarity compatibility',()=>{
+  const compact=normalizeEmbedding([3,4,0]);
+  assert.ok(compact instanceof Float32Array);
+  assert.equal(compact.byteLength,12);
+  assert.ok(Math.abs(cosine(compact,[.6,.8,0])-1)<1e-6);
+  const cloned=structuredClone(compact);
+  assert.ok(cloned instanceof Float32Array);
+  assert.equal(cosine(normalizeEmbedding([0,0]),new Float32Array(2)),0);
+});
+
+
+test('repeated vector recall reuses a bounded IndexedDB scope snapshot',async()=>{
+  const oldFetch=globalThis.fetch,oldDb=globalThis.indexedDB,oldRange=globalThis.IDBKeyRange;
+  const values=new Map();let reads=0;
+  const request=make=>{
+    const req={};queueMicrotask(()=>{
+      try{req.result=make();req.onsuccess?.({target:req});}
+      catch(error){req.error=error;req.onerror?.({target:req});}
+    });return req;
+  };
+  const database={objectStoreNames:{contains:()=>true},
+    transaction:()=>{
+      const tx={};
+      tx.objectStore=()=>({
+        getAll:range=>request(()=>{reads++;return [...values.values()].filter(x=>
+          !range||(x.id>=range.min&&x.id<=range.max));}),
+        put:x=>{values.set(x.id,x);queueMicrotask(()=>tx.oncomplete?.());},
+        delete:id=>{values.delete(id);queueMicrotask(()=>tx.oncomplete?.());}
+      });return tx;
+    }
+  };
+  globalThis.indexedDB={open:()=>request(()=>database)};
+  globalThis.IDBKeyRange={bound:(min,max)=>({min,max})};
+  globalThis.fetch=async(_url,options)=>{
+    const input=JSON.parse(options.body).input;
+    return {ok:true,json:async()=>({data:input.map((_,index)=>({index,embedding:[1,0,0]}))})};
+  };
+  try{
+    const chat=[{is_user:false,mes:'旧钥匙是重要信物',swipe_id:0}];
+    const memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),
+      normalizeDelta({summary:'旧钥匙藏在塔楼'}));
+    const settings=defaultSettings();settings.vector.enabled=true;settings.vector.key='dummy-test-secret';
+    const ctx={chat,getCurrentChatId:()=> 'vector-cache-unique-test'};
+    const indexed=await indexSummaries(ctx,memory,settings);
+    assert.equal(indexed,1);
+    const before=reads;
+    const a=await recall(ctx,memory,settings,'钥匙');
+    assert.equal(a[0].key,'floor:0');
+    assert.equal(reads,before+1);
+    const b=await recall(ctx,memory,settings,'塔楼');
+    assert.equal(b[0].key,'floor:0');
+    assert.equal(reads,before+1,'second query must not clone the same IDB collection again');
+  }finally{
+    globalThis.fetch=oldFetch;globalThis.indexedDB=oldDb;globalThis.IDBKeyRange=oldRange;
+  }
+});
+
+
+test('vector recall keeps exact top scores without allocating or sorting every candidate',()=>{
+  const query=new Float32Array([1,0]);
+  const stored=Array.from({length:1000},(_,i)=>({key:'floor:'+i,
+    text:'剧情'+i,vector:new Float32Array([i/1000,0])}));
+  const active=new Map(stored.map(x=>[x.key,x.text]));
+  const best=topVectorMatches(stored,active,query,0.1,3);
+  assert.deepEqual(best.map(x=>x.key),['floor:999','floor:998','floor:997']);
+  assert.equal(best.length,3);
+  active.set('floor:999','已经改写的剧情');
+  assert.equal(topVectorMatches(stored,active,query,0.1,1)[0].key,'floor:998');
 });

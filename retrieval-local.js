@@ -34,13 +34,25 @@ function content(row,kind){
   }
   return [String(row.summary||''),...details].join(' ').slice(0,4500);
 }
+function entityNames(row){
+  const names=new Set();let mutable=false;
+  for(const list of Object.values(row.delta||{})){
+    if(!Array.isArray(list))continue;
+    for(const item of list.slice(0,35)){
+      const name=String(item?.name||'').normalize('NFKC').toLowerCase().trim();
+      if(name.length>=2&&name.length<=60&&!STOP.has(name))names.add(name);
+      if(item?.status||item?.owner||item?.location)mutable=true;
+    }
+  }
+  return {names:[...names],mutable};
+}
 function allDocs(memory){
   const next=new Map();
   for(const [id,leaf] of Object.entries(memory.leaves||{})){
     if(!leaf?.summary)continue;
     const i=Number(id);if(!Number.isInteger(i)||i<0)continue;
     const key='floor:'+i;
-    next.set(key,{key,summary:leaf.summary,searchText:content(leaf,'floor'),kind:'floor',sourceIndex:i});
+    next.set(key,{key,summary:leaf.summary,searchText:content(leaf,'floor'),kind:'floor',sourceIndex:i,...entityNames(leaf)});
   }
   for(const c of memory.chapters||[]){
     if(!c?.id||!c.summary)continue;
@@ -112,8 +124,9 @@ export function lexicalSearch(ctx,memory,query,limit=18){
 /** Combine lexical and semantic candidates without a second model request. */
 export function selectHistory(ctx,memory,query,semantic=[],limit=5){
   const terms=searchTerms(query);
-  if(!terms.length)return [];
-  const idx=searchIndex(ctx,memory),lex=lexicalSearch(ctx,memory,query,30);
+  // A semantic-only hit is still valid when a short or stop-word query has no lexical tokens.
+  if(!terms.length&&!semantic.length)return [];
+  const idx=searchIndex(ctx,memory),lex=terms.length?lexicalSearch(ctx,memory,query,30):[];
   const valid=new Set(validChapters(memory,ctx.chat||[]).map(x=>x.id));
   const merged=new Map();
   const include=(key,rank,source)=>{
@@ -125,7 +138,18 @@ export function selectHistory(ctx,memory,query,semantic=[],limit=5){
   };
   lex.forEach((r,i)=>include(r.key,i,'keyword'));
   semantic.forEach((r,i)=>include(r.key,i,'semantic'));
-  return [...merged.values()].sort((a,b)=>b.rank-a.rank)
+  const normalizedQuery=String(query||'').normalize('NFKC').toLowerCase();
+  const latest=ctx.chat?.length||1;
+  for(const row of merged.values()){
+    const matched=(row.names||[]).filter(name=>normalizedQuery.includes(name));
+    // Prefer exact names (unique NPCs, objects, places) over shared Chinese bigrams.
+    if(matched.length)row.rank+=Math.min(0.26,matched.reduce((sum,name)=>sum+0.09+Math.min(name.length,12)*0.012,0));
+    // Only current mutable state gains mild recency preference; old plot clues do not decay.
+    if(matched.length&&row.mutable&&Number.isInteger(row.sourceIndex))
+      row.rank+=0.025*Math.max(0,Math.min(1,row.sourceIndex/latest));
+  }
+  return [...merged.values()].sort((a,b)=>b.rank-a.rank||
+    (b.sourceIndex??-1)-(a.sourceIndex??-1))
     .slice(0,Math.max(1,Math.min(10,Number(limit)||5)));
 }
 function childFloor(key,memory,idx,terms,limit=3){

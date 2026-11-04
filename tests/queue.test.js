@@ -263,3 +263,16 @@ test('manual queue commits long floor entities only after all extraction and mer
     assert.equal(memory.tasks[1],undefined);
   }finally{globalThis.fetch=previousFetch;}
 });
+
+
+test('deleting a covered AI message restores its orphaned hidden user input',async()=>{
+  let saves=0;
+  const ctx={chat:[{is_user:true,is_system:true,mes:'打算进入塔楼',extra:{story_memory_hidden:true}}],
+    chatMetadata:{},getCurrentChatId:()=> 'orphaned-input',saveChat:async()=>{saves++;}};
+  const q=new SummaryQueue(()=>ctx,defaultSettings,()=>{});
+  const restored=await q.restoreStale();
+  assert.equal(restored,1);
+  assert.equal(saves,1);
+  assert.equal(ctx.chat[0].is_system,false);
+  assert.equal(ctx.chat[0].extra.story_memory_hidden,undefined);
+});

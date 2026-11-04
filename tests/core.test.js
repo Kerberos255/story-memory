@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {defaultSettings,freshMemory,peekMemory,readMemory,writeMemory,normalizeDelta,commitLeaf,deriveState,pendingFloors,injectionText,messageFingerprint,addManual,editManual} from '../core.js';
+import {defaultSettings,freshMemory,peekMemory,readMemory,writeMemory,normalizeDelta,commitLeaf,deriveState,pendingFloors,injectionText,messageFingerprint,addManual,editManual,staleHiddenIndices,userFingerprint,rebaseDeletedMessages,correctEntity,clearEntityCorrection} from '../core.js';
 const makeChat=()=>[
  {is_user:true,is_system:false,mes:'我找到一只旧怀表。'},
  {is_user:false,is_system:false,mes:'角色拾起怀表并走进图书馆。',swipe_id:0},
@@ -618,4 +618,254 @@ test('manual plans remain intentionally visible while automated ones are stale',
   assert.match(injected,/调查钟楼/);
   assert.match(injected,/【历史计划（状态待核对/);
   assert.match(injected,/进入北塔/);
+});
+
+
+test('plot summaries retain injection priority over verbose entity records',()=>{
+  const chat=[{is_user:false,mes:'剧情已确认，主角找到出口。',swipe_id:0}];
+  const characters=Array.from({length:35},(_,i)=>({name:'人物'+i,op:'add',description:'长期人物状态。'.repeat(25)}));
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'主线关键事实：主角找到出口。',characters
+  }));
+  const cfg=defaultSettings();cfg.summary.keepRecent=0;cfg.injection.budget=400;
+  const output=injectionText(memory,chat,cfg);
+  assert.match(output,/主线关键事实：主角找到出口/);
+  assert.ok(output.length<=1200,'injection respects the character-based budget');
+});
+
+test('orphaned hidden user input is restored after its paired AI floor is deleted',()=>{
+  const user={is_user:true,is_system:true,extra:{story_memory_hidden:true},mes:'我想去灯塔。'};
+  const ai={is_user:false,is_system:true,extra:{story_memory_hidden:true},mes:'主角向灯塔出发。',swipe_id:0};
+  const memory=commitLeaf(freshMemory(),1,messageFingerprint(ai),normalizeDelta({summary:'去了灯塔'}),userFingerprint([user,ai],1));
+  assert.deepEqual(staleHiddenIndices(memory,[user,ai]),[]);
+  assert.deepEqual(staleHiddenIndices(memory,[user]),[0]);
+});
+
+
+test('cached injection state detects swipe and user-source edits without a metadata revision',()=>{
+  const chat=[{is_user:true,mes:'先找到钥匙'},{is_user:false,mes:'主角拿到钥匙',swipe_id:0}];
+  const mem=commitLeaf(freshMemory(),1,messageFingerprint(chat[1]),normalizeDelta({
+    summary:'获得钥匙',items:[{op:'add',name:'钥匙',evidence:'主角拿到钥匙'}]
+  },'主角拿到钥匙'),userFingerprint(chat,1));
+  const cfg=defaultSettings();cfg.summary.keepRecent=0;
+  assert.match(injectionText(mem,chat,cfg),/钥匙/);
+  assert.match(injectionText(mem,chat,cfg),/钥匙/);
+  chat[1].swipe_id=1;
+  assert.doesNotMatch(injectionText(mem,chat,cfg),/获得钥匙/);
+  chat[1].swipe_id=0;
+  assert.match(injectionText(mem,chat,cfg),/获得钥匙/);
+  chat[0].mes='原本没有钥匙';
+  assert.doesNotMatch(injectionText(mem,chat,cfg),/获得钥匙/);
+});
+
+
+test('leaf writes copy touched containers but never mutate the prior memory snapshot',()=>{
+  const ctx={chatMetadata:{}};
+  const previous=freshMemory();
+  const oldLeaf={id:'floor:0',summary:'以前的记忆'};
+  previous.leaves[0]=oldLeaf;previous.tasks[1]={status:'failed'};
+  previous.skippedFloors[2]={fingerprint:'old'};
+  const next=commitLeaf(previous,1,'abc123',{summary:'更新后内容',time:'',location:'',delta:{items:[],scenes:[],characters:[],plans:[]}});
+  assert.notEqual(next,previous);
+  assert.notEqual(next.leaves,previous.leaves);
+  assert.equal(next.leaves[0],oldLeaf,'existing immutable leaves may be structurally shared');
+  assert.equal(previous.leaves[1],undefined);
+  assert.notEqual(next.tasks,previous.tasks);
+  assert.notEqual(next.skippedFloors,previous.skippedFloors);
+  writeMemory(ctx,next);
+  assert.equal(ctx.chatMetadata.story_memory_v1.leaves[1].summary,'更新后内容');
+});
+
+
+test('entity deltas expose source-bound change history while retired states stay out of RP injection',()=>{
+  const chat=[
+    {is_user:false,mes:'主角得到银钥匙',swipe_id:0},
+    {is_user:false,mes:'主角将银钥匙交给同伴',swipe_id:0},
+    {is_user:false,mes:'同伴用完银钥匙，钥匙消失',swipe_id:0}
+  ];
+  let memory=freshMemory();
+  for(const [i,change] of [[0,{op:'add',name:'银钥匙',owner:'主角',evidence:'主角得到银钥匙'}],
+    [1,{op:'update',name:'银钥匙',owner:'同伴',evidence:'主角将银钥匙交给同伴'}],
+    [2,{op:'remove',name:'银钥匙',evidence:'同伴用完银钥匙，钥匙消失'}]]){
+    memory=commitLeaf(memory,i,messageFingerprint(chat[i]),normalizeDelta({summary:'第'+i+'幕',items:[change]},chat[i].mes));
+  }
+  const state=deriveState(memory,chat);
+  assert.equal(state.items.length,0);
+  assert.equal(state.archived.items.length,1);
+  assert.deepEqual(state.archived.items[0].history.map(x=>x.floor),[0,1,2]);
+  assert.equal(state.archived.items[0].retiredAtFloor,2);
+  const cfg=defaultSettings();cfg.summary.keepRecent=0;
+  assert.doesNotMatch(injectionText(memory,chat,cfg),/"name":"银钥匙"/);
+});
+
+
+test('middle deletion rebinds identical-text AI floors by object identity, not matching hashes',()=>{
+  const oldChat=[
+    {is_user:false,mes:'重复剧情',swipe_id:0},
+    {is_user:false,mes:'重复剧情',swipe_id:0},
+    {is_user:false,mes:'之后的剧情',swipe_id:0}
+  ];
+  let memory=freshMemory();
+  for(let i=0;i<oldChat.length;i++)memory=commitLeaf(memory,i,messageFingerprint(oldChat[i]),
+    normalizeDelta({summary:'旧楼层摘要 '+i}));
+  memory.chapters.push({id:'chapter:survive',level:1,children:['floor:1','floor:2'],summary:'后两楼总结'});
+  const updatedChat=oldChat.slice(1);
+  const moved=rebaseDeletedMessages(memory,oldChat,updatedChat);
+  assert.equal(moved.leaves[0].summary,'旧楼层摘要 1');
+  assert.equal(moved.leaves[0].sourceIndex,0);
+  assert.equal(moved.leaves[1].summary,'旧楼层摘要 2');
+  assert.equal(moved.leaves[2],undefined);
+  assert.deepEqual(moved.chapters[0].children,['floor:0','floor:1']);
+  assert.equal(memory.leaves[0].summary,'旧楼层摘要 0','prior snapshot stays unchanged');
+});
+
+test('deleting a source user turn drops affected leaf and its ancestor without poisoning other floors',()=>{
+  const oldChat=[
+    {is_user:true,mes:'我会交出钥匙'},
+    {is_user:false,mes:'同伴接过钥匙',swipe_id:0},
+    {is_user:true,mes:'又进入新房间'},
+    {is_user:false,mes:'同伴向前走',swipe_id:0}
+  ];
+  let memory=freshMemory();
+  for(const i of [1,3])memory=commitLeaf(memory,i,messageFingerprint(oldChat[i]),
+    normalizeDelta({summary:'第'+i+'楼'}),userFingerprint(oldChat,i));
+  memory.chapters.push({id:'chapter:old',level:1,children:['floor:1','floor:3'],summary:'旧记忆'});
+  const updatedChat=oldChat.filter((_,i)=>i!==2);
+  const moved=rebaseDeletedMessages(memory,oldChat,updatedChat);
+  assert.equal(moved.leaves[1].summary,'第1楼');
+  assert.equal(moved.leaves[2],undefined,'AI linked to deleted user cannot retain its stale summary');
+  assert.equal(moved.chapters.length,0,'ancestor involving removed source must be pruned');
+});
+
+
+test('field validity windows are derived from evidence-backed Delta and retire at removal',()=>{
+  const chat=[
+    {is_user:false,mes:'银钥匙现在归属主角。',swipe_id:0},
+    {is_user:false,mes:'同伴接过银钥匙。',swipe_id:0},
+    {is_user:false,mes:'银钥匙彻底消失。',swipe_id:0}
+  ];
+  let mem=freshMemory();
+  for(const [i,delta] of [
+    [0,{op:'add',name:'银钥匙',owner:'主角',evidence:'银钥匙现在归属主角。'}],
+    [1,{op:'update',name:'银钥匙',owner:'同伴',evidence:'同伴接过银钥匙。'}],
+    [2,{op:'remove',name:'银钥匙',evidence:'银钥匙彻底消失。'}]
+  ])mem=commitLeaf(mem,i,messageFingerprint(chat[i]),normalizeDelta({summary:'记录'+i,items:[delta]},chat[i].mes));
+  const state=deriveState(mem,chat);
+  assert.equal(state.items.length,0);
+  const history=state.archived.items[0].fieldVersions.owner;
+  assert.deepEqual(history.map(x=>[x.validFromFloor,x.validToFloor,x.evidenceStatus]),[
+    [0,1,'verified'],[1,2,'verified']]);
+});
+
+test('manual correction overrides current fields without rewriting Delta, and can be restored',()=>{
+  const chat=[{is_user:false,mes:'守门人受伤了。',swipe_id:0}];
+  const original=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'守门人受伤',characters:[{op:'add',name:'守门人',status:'受伤'}]
+  }));
+  const id=deriveState(original,chat).characters[0].entity_id;
+  const modified=correctEntity(original,chat,'characters',id,{status:'康复',presence:'absent'});
+  assert.equal(deriveState(modified,chat).characters[0].status,'康复');
+  assert.equal(original.leaves[0].delta.characters[0].status,'受伤');
+  assert.match(injectionText(modified,chat,defaultSettings()),/康复/);
+  const restored=clearEntityCorrection(modified,'characters',id);
+  assert.equal(deriveState(restored,chat).characters[0].status,'受伤');
+  assert.throws(()=>correctEntity(original,chat,'characters',id,{presence:'nearby'}),/在场状态/);
+});
+
+test('duplicate add with the same name or unknown conflicting ID is quarantined',()=>{
+  const chat=[
+    {is_user:false,mes:'守门人甲出现。',swipe_id:0},
+    {is_user:false,mes:'另一个守门人出现。',swipe_id:0},
+    {is_user:false,mes:'守门人突然换了身份。',swipe_id:0}
+  ];
+  let mem=freshMemory();
+  for(const [i,item] of [
+    [0,{op:'add',name:'守门人',status:'守门人甲'}],
+    [1,{op:'add',name:'守门人',status:'守门人乙'}],
+    [2,{op:'update',name:'守门人',entity_id:'characters:99:deadbeef',status:'神秘人物'}]
+  ])mem=commitLeaf(mem,i,messageFingerprint(chat[i]),normalizeDelta({summary:'身份'+i,characters:[item]}));
+  const state=deriveState(mem,chat);
+  assert.equal(state.characters[0].status,'守门人甲');
+  assert.equal(state.ambiguities.characters.length,2);
+  assert.ok(state.ambiguities.characters.every(x=>x.name==='守门人'));
+});
+
+test('character presence and secondhand knowledge stay explicit in RP injection',()=>{
+  const source='侍从不在场，后来从信使口中听到密道的事情。';
+  const chat=[{is_user:false,mes:source,swipe_id:0}];
+  const mem=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'侍从后来听到消息',characters:[{op:'add',name:'侍从',presence:'absent',
+      description:'穿着红色礼服',relationship:'朋友',evidence:'侍从不在场',
+      knowledge:[{fact:'密道存在',stance:'knows',provenance:'secondhand',evidence:'从信使口中听到密道的事情'}]}]
+  },source));
+  const cfg=defaultSettings();cfg.summary.keepRecent=0;
+  const injected=injectionText(mem,chat,cfg);
+  assert.match(injected,/转述信息，角色并非亲历/);
+  assert.match(injected,/当前不在场/);
+  assert.doesNotMatch(injected,/穿着红色礼服/);
+});
+
+test('injection diagnostics explain section budgets without changing generated text',()=>{
+  const chat=[{is_user:false,mes:'一段完整剧情',swipe_id:0}];
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({summary:'永远不会忘记的故事'}));
+  const cfg=defaultSettings();cfg.summary.keepRecent=0;
+  const diagnostics={};
+  const actual=injectionText(memory,chat,cfg,[],[],diagnostics);
+  assert.equal(actual,injectionText(memory,chat,cfg));
+  assert.ok(diagnostics.budgetTokens>=400);
+  assert.ok(diagnostics.usedTokens>0);
+  assert.ok(diagnostics.sections.some(x=>x.title==='【剧情摘要】'&&x.selected===1));
+});
+
+
+test('an explicit evidenced field retirement closes its validity without deleting the entity',()=>{
+  const chat=[{is_user:false,mes:'银戒指归艾琳所有。',swipe_id:0},
+    {is_user:false,mes:'艾琳失去银戒指的所有权，但戒指仍在。',swipe_id:0}];
+  let mem=freshMemory();
+  mem=commitLeaf(mem,0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'艾琳拥有银戒指',items:[{op:'add',name:'银戒指',owner:'艾琳',evidence:'银戒指归艾琳所有。'}]
+  },chat[0].mes));
+  mem=commitLeaf(mem,1,messageFingerprint(chat[1]),normalizeDelta({
+    summary:'戒指失去主人',items:[{op:'update',name:'银戒指',clear_fields:['owner'],
+      evidence:'艾琳失去银戒指的所有权'}]
+  },chat[1].mes));
+  const now=deriveState(mem,chat).items[0];
+  assert.equal(now.owner,undefined);
+  assert.equal(now.fieldVersions.owner.length,1);
+  assert.equal(now.fieldVersions.owner[0].validToFloor,1);
+  assert.doesNotMatch(injectionText(mem,chat,defaultSettings()),/"owner":"艾琳"/);
+  const rejected=normalizeDelta({summary:'无证据的字段退休',items:[{op:'update',name:'银戒指',clear_fields:['owner']}]},chat[1].mes);
+  assert.equal(rejected.delta.items[0].clear_fields,undefined);
+});
+
+
+test('fingerprint memoization still notices in-place text, swipe and visibility changes',()=>{
+  const msg={is_user:false,mes:'原本的剧情',swipe_id:0};
+  const first=messageFingerprint(msg);
+  assert.equal(messageFingerprint(msg),first);
+  msg.mes='编辑后的剧情';
+  const revised=messageFingerprint(msg);assert.notEqual(revised,first);
+  msg.swipe_id=1;assert.notEqual(messageFingerprint(msg),revised);
+  msg.is_system=true;assert.equal(messageFingerprint(msg),'');
+  msg.extra={story_memory_hidden:true};assert.notEqual(messageFingerprint(msg),'');
+});
+
+
+test('later plot deltas supersede only the manually corrected fields they change',()=>{
+  const chat=[{is_user:false,mes:'守门人受伤。',swipe_id:0},
+    {is_user:false,mes:'守门人又被剑刺伤。',swipe_id:0}];
+  let mem=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'受伤',characters:[{op:'add',name:'守门人',status:'受伤',relationship:'盟友'}]
+  }));
+  const id=deriveState(mem,chat).characters[0].entity_id;
+  mem=correctEntity(mem,chat,'characters',id,{status:'已康复',relationship:'朋友'});
+  assert.equal(deriveState(mem,chat).characters[0].status,'已康复');
+  mem=commitLeaf(mem,1,messageFingerprint(chat[1]),normalizeDelta({
+    summary:'再次受伤',characters:[{op:'update',name:'守门人',entity_id:id,status:'再次受伤'}]
+  }));
+  const latest=deriveState(mem,chat).characters[0];
+  assert.equal(latest.status,'再次受伤','new evidence must win over stale correction');
+  assert.equal(latest.relationship,'朋友','unrelated manual correction can remain');
+  assert.equal(latest.correctionStale,true);
+  assert.match(injectionText(mem,chat,defaultSettings()),/再次受伤/);
 });

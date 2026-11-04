@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mountUI} from '../ui.js';
-import {freshMemory,defaultSettings,commitLeaf,normalizeDelta,messageFingerprint,userFingerprint,editGeneratedLeaf,deleteGeneratedLeaf,editGeneratedChapter,deleteGeneratedChapter,mergeEntities,unmergeEntity,deriveState,addManual} from '../core.js';
+import {freshMemory,defaultSettings,commitLeaf,normalizeDelta,messageFingerprint,userFingerprint,editGeneratedLeaf,deleteGeneratedLeaf,editGeneratedChapter,deleteGeneratedChapter,mergeEntities,unmergeEntity,deriveState,addManual,correctEntity,clearEntityCorrection} from '../core.js';
 import {readFileSync} from 'node:fs';
 
 class FakeElement{
@@ -937,4 +937,137 @@ test('Think dropdown sits with temperature and output limit and persists Auto to
   const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
   assert.match(css,/\.sm-api-tuning-grid\{grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
   assert.match(css,/@media\(max-width:700px\)[\s\S]*\.sm-api-tuning-grid\{grid-template-columns:1fr\}/);
+}));
+
+
+test('async queue refresh preserves open edit dialog and a dirty manual draft',()=>withUI(body=>{
+  const chat=[{is_user:false,mes:'角色到达旧城。',swipe_id:0}];
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({summary:'进入旧城'}));
+  const ctx={chat,chatMetadata:{},getCurrentChatId:()=> 'keep-ui-drafts'};
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},sourcePreview:()=>[],saveSettings() {}});
+  view.open();
+  const dialog=body.children[0].shadow.children[1];
+  const edit=find(dialog,x=>x.attrs['aria-label']==='编辑摘要');
+  assert.ok(edit);
+  edit.fire('click');
+  const modal=find(dialog,x=>x.className==='sm-record-modal-overlay');
+  const area=find(modal,x=>x.tag==='textarea');
+  area.value='正在修改的剧情摘要';
+  view.refresh();
+  assert.ok(find(dialog,x=>x.className==='sm-record-modal-overlay')===modal);
+  assert.equal(area.value,'正在修改的剧情摘要');
+  const close=find(modal,x=>x.attrs['aria-label']==='关闭弹窗');
+  close.fire('click');
+  const manual=find(dialog,x=>x.tag==='textarea'&&x.placeholder==='写下需要长期保留的信息…');
+  assert.ok(manual);
+  manual.value='还没保存的手动记忆';
+  find(dialog,x=>x.tag==='main').fire('input',{target:manual});
+  view.refresh();
+  assert.equal(manual.value,'还没保存的手动记忆');
+}));
+
+
+test('injection viewer distinguishes simulated content from last generation submitted text',()=>withUI(body=>{
+  const ctx={chat:[{is_user:false,mes:'旧城剧情'}],chatMetadata:{},getCurrentChatId:()=> 'snapshot-preview'};
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(ctx.chat[0]),normalizeDelta({summary:'旧城剧情摘要'}));
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    lastInjection:()=>({chatId:'snapshot-preview',text:'【实际提交】\n过去的剧情摘要',at:Date.now()}),
+    queue:{busy:false,enqueueMissing(){}},previewHistory:()=>[]});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  find(dialog,x=>x.tag==='button'&&x.textContent==='查看注入预览').fire('click');
+  const overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+  const text=find(overlay,x=>x.tag==='textarea');
+  assert.ok(!text.value.includes('实际提交'));
+  const toggle=find(overlay,x=>x.tag==='button'&&x.textContent==='查看上轮扩展注入');
+  assert.ok(toggle);toggle.fire('click');
+  assert.equal(text.value,'【实际提交】\n过去的剧情摘要');
+  assert.ok(walk(overlay).some(x=>x.className==='sm-preview-counter'&&x.textContent.includes('上轮生成时提交')));
+  toggle.fire('click');
+  assert.ok(!text.value.includes('实际提交'));
+}));
+
+
+test('long summary timelines page older records and filter by floor number',()=>withUI(body=>{
+  const chat=Array.from({length:76},(_,i)=>({is_user:false,mes:'第'+i+'楼的剧情',swipe_id:0}));
+  let memory=freshMemory();
+  for(let i=0;i<chat.length;i++)memory=commitLeaf(memory,i,messageFingerprint(chat[i]),
+    normalizeDelta({summary:'第'+i+'楼摘要'}));
+  const ctx={chat,chatMetadata:{},getCurrentChatId:()=> 'long-timeline-ui'};
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},sourcePreview:()=>[]});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  const cards=()=>walk(dialog).filter(x=>x.className==='sm-record');
+  assert.equal(cards().length,50,'initial timeline renders only the newest 50');
+  const more=find(dialog,x=>x.tag==='button'&&x.textContent==='加载更早的楼层摘要');
+  assert.ok(more);more.fire('click');
+  assert.equal(cards().length,76);
+  const search=find(dialog,x=>x.attrs['aria-label']==='搜索剧情时间线');
+  assert.ok(search);
+  search.value='#10';
+  find(dialog,x=>x.tag==='button'&&x.textContent==='搜索').fire('click');
+  assert.equal(cards().length,1);
+  assert.ok(walk(cards()[0]).some(x=>x.textContent==='#10'));
+}));
+
+
+test('retired entities are visible as historical records instead of current inventory',()=>withUI(body=>{
+  const chat=[{is_user:false,mes:'获得银钥匙',swipe_id:0},{is_user:false,mes:'丢失银钥匙',swipe_id:0}];
+  let memory=freshMemory();
+  memory=commitLeaf(memory,0,messageFingerprint(chat[0]),normalizeDelta({summary:'获得银钥匙',items:[{op:'add',name:'银钥匙'}]}));
+  memory=commitLeaf(memory,1,messageFingerprint(chat[1]),normalizeDelta({summary:'丢失银钥匙',items:[{op:'remove',name:'银钥匙'}]}));
+  const ctx={chat,chatMetadata:{},getCurrentChatId:()=> 'archive-ui'};
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}}});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='物品')).fire('click');
+  assert.ok(walk(dialog).some(x=>x.textContent==='已归档物品'));
+  assert.ok(walk(dialog).some(x=>x.textContent==='归档于 #1'));
+  assert.ok(find(dialog,x=>x.className==='sm-entity-history'));
+}));
+
+
+test('entity correction stays collapsed by default and updates only after explicit save',()=>withUI(body=>{
+  const chat=[{is_user:false,mes:'守门人目前受伤。',swipe_id:0}];
+  let memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'守门人受伤',characters:[{op:'add',name:'守门人',status:'受伤'}]
+  }));
+  const ctx={chat,chatMetadata:{},getCurrentChatId:()=> 'editable-character'};
+  const changed=[];
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},
+    correctEntity:(kind,id,values)=>{changed.push({kind,id,values});memory=correctEntity(memory,chat,kind,id,values);},
+    clearEntityCorrection:(kind,id)=>{memory=clearEntityCorrection(memory,kind,id);}});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='角色')).fire('click');
+  const correction=find(dialog,x=>x.className==='sm-entity-history sm-entity-correction');
+  assert.ok(correction);
+  assert.equal(correction.open,false,'correction form is not another permanent cluttered card');
+  const input=find(correction,x=>x.attrs['aria-label']==='守门人 · 状态');
+  input.value='痊愈';
+  assert.equal(changed.length,0,'typing must not silently persist the result');
+  find(correction,x=>x.tag==='button'&&x.textContent==='保存纠错').fire('click');
+  assert.equal(changed.length,1);
+  assert.equal(deriveState(memory,chat).characters[0].status,'痊愈');
+  view.refresh(true);
+  assert.ok(find(dialog,x=>x.textContent==='人工纠错 · 已生效'));
+  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+  assert.match(css,/\.sm-entity-correction-fields\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css,/@media\(max-width:700px\)\{\.sm-entity-correction-fields\{grid-template-columns:1fr\}/);
+}));
+
+test('injection preview reveals per-section budget in a collapsed drawer',()=>withUI(body=>{
+  const chat=[{is_user:false,mes:'记住这些剧情',swipe_id:0}];
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({summary:'回到故乡'}));
+  const ctx={chat,chatMetadata:{},getCurrentChatId:()=> 'budget-ui'};
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},previewHistory:()=>[]});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  find(dialog,x=>x.tag==='button'&&x.textContent==='查看注入预览').fire('click');
+  const drawer=find(dialog,x=>x.className==='sm-injection-breakdown');
+  assert.ok(drawer);
+  assert.equal(drawer.open,false);
+  assert.ok(walk(drawer).some(x=>String(x.textContent||'').includes('注入预算')));
 }));

@@ -1,4 +1,4 @@
-import {defaultSettings,SETTINGS_KEY,META_KEY,peekMemory,readMemory,writeMemory,addManual,editManual,removeManual,editGeneratedLeaf,deleteGeneratedLeaf,resumeGeneratedFloor,editGeneratedChapter,deleteGeneratedChapter,mergeEntities,unmergeEntity,injectionText} from './core.js';
+import {defaultSettings,SETTINGS_KEY,META_KEY,peekMemory,writeMemory,addManual,editManual,removeManual,editGeneratedLeaf,deleteGeneratedLeaf,resumeGeneratedFloor,editGeneratedChapter,deleteGeneratedChapter,mergeEntities,unmergeEntity,injectionText,rebaseDeletedMessages,correctEntity,clearEntityCorrection} from './core.js';
 import {SummaryQueue} from './queue.js';
 import {listSummaryModels} from './api.js';
 import {indexSummaries,recall} from './vector-local.js';
@@ -6,6 +6,10 @@ import {selectHistory,historyEvidence,sourcePreview} from './retrieval-local.js'
 import {mountUI} from './ui.js';
 // Pure private ST extension. No external scripts, analytics or dependencies.
 let ui,queue,lastChat='',settings;
+let lastInjection={chatId:'',text:'',at:0};
+let lastGenerationInjection=null;
+let knownChatMessages=[];
+function rememberChatMessages(){knownChatMessages=[...(getContext()?.chat||[])];}
 const getContext=()=>{try{return window.SillyTavern?.getContext?.()||null;}catch{return null;}};
 function getSettings(){
   if(settings)return settings;
@@ -25,62 +29,88 @@ function saveSettings(next){
   ctx.extensionSettings[SETTINGS_KEY]=settings;ctx.saveSettingsDebounced?.();
   inject();
 }
-function inject(hits=[],historyHits=[],memory=null){
+function inject(hits=[],historyHits=[],memory=null,forGeneration=false){
   const ctx=getContext();if(!ctx?.setExtensionPrompt)return;
   const cfg=getSettings();
   const text=cfg.enabled?injectionText(memory||peekMemory(ctx),ctx.chat,cfg,hits,historyHits):'';
   // IN_CHAT = 1, SYSTEM = 0 in SillyTavern script.js.
   ctx.setExtensionPrompt('story_memory_injection_v1',text,1,2,false,0,null);
+  lastInjection={chatId:ctx.getCurrentChatId?.()||'',text,at:Date.now()};
+  if(forGeneration)lastGenerationInjection=lastInjection;
+}
+function afterQueueChanged(){
+  inject();ui?.refresh();refreshButtonStatus();
 }
 function afterMemoryChanged(){
-  inject();ui?.refresh();
-  void queue?.restoreStale().then(()=>queue.restoreStale()).catch(()=>{});
+  inject();ui?.refresh(true);refreshButtonStatus();
+  void queue?.restoreStale().catch(()=>{});
+}
+function afterSourceChanged(eventName){
+  // Edits, swipe changes and deletions invalidate any in-flight extraction or chapter job.
+  queue?.cancel(false);
+  const ctx=getContext();
+  if(eventName==='MESSAGE_DELETED'&&ctx?.chat&&knownChatMessages.length>ctx.chat.length){
+    const before=peekMemory(ctx),rebound=rebaseDeletedMessages(before,knownChatMessages,ctx.chat);
+    if(rebound!==before)writeMemory(ctx,rebound);
+  }
+  rememberChatMessages();
+  inject();ui?.refresh();refreshButtonStatus();
+  void queue?.restoreStale().catch(()=>{});
 }
 function add(kind,text){
   const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
-  const next=addManual(readMemory(ctx),kind,text);writeMemory(ctx,next);afterMemoryChanged();
+  const next=addManual(peekMemory(ctx),kind,text);writeMemory(ctx,next);afterMemoryChanged();
 }
 function edit(kind,id,text){
   const ctx=getContext();if(!ctx)throw Error('聊天未就绪');
-  writeMemory(ctx,editManual(readMemory(ctx),kind,id,text));afterMemoryChanged();
+  writeMemory(ctx,editManual(peekMemory(ctx),kind,id,text));afterMemoryChanged();
 }
 function remove(kind,id){
   const ctx=getContext();if(!ctx)throw Error('聊天未就绪');
-  writeMemory(ctx,removeManual(readMemory(ctx),kind,id));afterMemoryChanged();
+  writeMemory(ctx,removeManual(peekMemory(ctx),kind,id));afterMemoryChanged();
 }
 function editLeaf(index,changes){
   const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
   queue.cancel(false);
-  writeMemory(ctx,editGeneratedLeaf(readMemory(ctx),ctx.chat,index,changes));afterMemoryChanged();
+  writeMemory(ctx,editGeneratedLeaf(peekMemory(ctx),ctx.chat,index,changes));afterMemoryChanged();
 }
 function deleteLeaf(index){
   const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
   queue.cancel(false);
-  writeMemory(ctx,deleteGeneratedLeaf(readMemory(ctx),ctx.chat,index));afterMemoryChanged();
+  writeMemory(ctx,deleteGeneratedLeaf(peekMemory(ctx),ctx.chat,index));afterMemoryChanged();
 }
 function resumeLeaf(index){
   const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
-  writeMemory(ctx,resumeGeneratedFloor(readMemory(ctx),index));afterMemoryChanged();
+  writeMemory(ctx,resumeGeneratedFloor(peekMemory(ctx),index));afterMemoryChanged();
 }
 function editChapter(id,summary){
   const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
   queue.cancel(false);
-  writeMemory(ctx,editGeneratedChapter(readMemory(ctx),ctx.chat,id,summary));afterMemoryChanged();
+  writeMemory(ctx,editGeneratedChapter(peekMemory(ctx),ctx.chat,id,summary));afterMemoryChanged();
 }
 function deleteChapter(id){
   const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
   queue.cancel(false);
-  writeMemory(ctx,deleteGeneratedChapter(readMemory(ctx),ctx.chat,id));afterMemoryChanged();
+  writeMemory(ctx,deleteGeneratedChapter(peekMemory(ctx),ctx.chat,id));afterMemoryChanged();
 }
 function mergeEntity(kind,fromId,toId){
   const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
   queue.cancel(false);
-  writeMemory(ctx,mergeEntities(readMemory(ctx),ctx.chat,kind,fromId,toId));afterMemoryChanged();
+  writeMemory(ctx,mergeEntities(peekMemory(ctx),ctx.chat,kind,fromId,toId));afterMemoryChanged();
 }
 function unmergeAlias(kind,fromName){
   const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
   queue.cancel(false);
-  writeMemory(ctx,unmergeEntity(readMemory(ctx),kind,fromName));afterMemoryChanged();
+  writeMemory(ctx,unmergeEntity(peekMemory(ctx),kind,fromName));afterMemoryChanged();
+}
+function saveEntityCorrection(kind,id,values){
+  const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('聊天未就绪');
+  queue.cancel(false);
+  writeMemory(ctx,correctEntity(peekMemory(ctx),ctx.chat,kind,id,values));afterMemoryChanged();
+}
+function removeEntityCorrection(kind,id){
+  const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('聊天未就绪');
+  writeMemory(ctx,clearEntityCorrection(peekMemory(ctx),kind,id));afterMemoryChanged();
 }
 async function fetchSummaryModels(config){
   return listSummaryModels(getContext(),config);
@@ -126,10 +156,18 @@ async function generateInterceptor(_chat,_contextSize,_abort,type){
         .map(row=>({key:row.key,text:'['+(row.kind==='floor'?'#'+row.sourceIndex:'历史摘要')+'] '+row.summary}))];
     }catch{/* Damaged indexes must not affect roleplay. */}
   }
-  inject(cfg.retrieval?.enabled!==false&&cfg.injection.retrieval!==false?[]:vectors,history,activeMemory);
+  inject(cfg.retrieval?.enabled!==false&&cfg.injection.retrieval!==false?[]:vectors,history,activeMemory,true);
 }
 // SillyTavern calls this by manifest name during user generation.
 globalThis.storyMemoryGenerationInterceptor=generateInterceptor;
+function refreshButtonStatus(){
+  const entry=typeof document==='undefined'?null:document.getElementById('story-memory-open');
+  if(!entry)return;
+  const tasks=Object.values(peekMemory(getContext()).tasks||{});
+  const failed=tasks.filter(x=>x?.status==='failed').length;
+  entry.textContent=queue?.busy?'✦ 剧情记忆 · 整理中':failed?'✦ 剧情记忆 · '+failed+' 项失败':'✦ 剧情记忆';
+  entry.title=failed&&!queue?.busy?'有整理失败的楼层，点击查看':'打开剧情记忆';
+}
 function ensureButton(){
   const form=document.querySelector('#send_form');if(!form||document.getElementById('story-memory-open'))return;
   let bar=form.querySelector('#qr--bar');
@@ -140,15 +178,17 @@ function ensureButton(){
   button.tabIndex=0;button.setAttribute('role','button');button.title='打开剧情记忆';button.textContent='✦ 剧情记忆';
   button.addEventListener('click',()=>ui?.open());
   button.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();ui?.open();}});
-  holder.append(button);
+  holder.append(button);refreshButtonStatus();
 }
 function init(){
   const ctx=getContext();
   if(!ctx?.eventSource||!ctx?.chatMetadata||!ctx?.extensionSettings)return false;
   getSettings();
-  queue=new SummaryQueue(getContext,getSettings,afterMemoryChanged);
+  queue=new SummaryQueue(getContext,getSettings,afterQueueChanged);
   ui=mountUI({context:getContext,memory:()=>peekMemory(getContext()),settings:getSettings,saveSettings,
     addManual:add,editManual:edit,removeManual:remove,
+    correctEntity:saveEntityCorrection,clearEntityCorrection:removeEntityCorrection,
+    lastInjection:()=>lastGenerationInjection,
     editLeaf,deleteLeaf,resumeLeaf,editChapter,deleteChapter,mergeEntity,unmergeAlias,queue,indexNow,fetchSummaryModels,
     previewHistory:(ctx,memory,previewCfg)=>{
       const settings=previewCfg||getSettings();
@@ -160,14 +200,20 @@ function init(){
     },
     sourcePreview:(ctx,memory,key,limit,offset)=>sourcePreview(ctx,memory,key,limit,offset)});
   lastChat=ctx.getCurrentChatId?.()||'';
-  const onChatChanged=()=>{const now=getContext()?.getCurrentChatId?.()||'';if(now!==lastChat){lastChat=now;queue.cancel();}inject();ui?.refresh();};
+  rememberChatMessages();
+  const onChatChanged=()=>{const now=getContext()?.getCurrentChatId?.()||'';if(now!==lastChat){lastChat=now;queue.cancel();ui?.resetChatView?.();}rememberChatMessages();inject();ui?.refresh();refreshButtonStatus();};
   ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED,onChatChanged);
   ctx.eventSource.on(ctx.eventTypes.GENERATION_ENDED,()=>{
+    rememberChatMessages();
     // Short delay lets the host finish persisting the final AI message.
     setTimeout(()=>void onGeneration(),500);
   });
-  if(ctx.eventTypes.MESSAGE_SWIPED)ctx.eventSource.on(ctx.eventTypes.MESSAGE_SWIPED,afterMemoryChanged);
-  if(ctx.eventTypes.MESSAGE_EDITED)ctx.eventSource.on(ctx.eventTypes.MESSAGE_EDITED,afterMemoryChanged);
+  for(const name of ['MESSAGE_SENT','MESSAGE_RECEIVED']){
+    if(ctx.eventTypes[name])ctx.eventSource.on(ctx.eventTypes[name],rememberChatMessages);
+  }
+  for(const name of ['MESSAGE_SWIPED','MESSAGE_EDITED','MESSAGE_UPDATED','MESSAGE_DELETED','MESSAGE_SWIPE_DELETED']){
+    if(ctx.eventTypes[name])ctx.eventSource.on(ctx.eventTypes[name],()=>afterSourceChanged(name));
+  }
   ensureButton();inject();
   // Only rescan the button if the host replaces its quick reply strip.
   let observer=null;

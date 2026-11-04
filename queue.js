@@ -1,6 +1,6 @@
 import {ApiFault} from './api.js';
 import {summarizeFloor,summarizeChapter} from './summary-workflow.js';
-import {readMemory,writeMemory,messageFingerprint,userFingerprint,leafValid,commitLeaf,pendingFloors,automaticFloorIndices,hideReadyIndices,staleHiddenIndices,nextCompression,commitCompression} from './core.js';
+import {peekMemory,readMemory,writeMemory,messageFingerprint,userFingerprint,leafValid,commitLeaf,pendingFloors,automaticFloorIndices,hideReadyIndices,staleHiddenIndices,nextCompression,commitCompression} from './core.js';
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 export class SummaryQueue{
   constructor(getContext,getSettings,onChange){
@@ -21,18 +21,18 @@ export class SummaryQueue{
   }
   enqueueMissing(limit=100){
     const ctx=this.getContext();if(!ctx)return;
-    this.enqueue(pendingFloors(readMemory(ctx),ctx.chat).slice(0,Math.max(1,limit)));
+    this.enqueue(pendingFloors(peekMemory(ctx),ctx.chat).slice(0,Math.max(1,limit)));
   }
   enqueueAutomatic(limit=100){
     const ctx=this.getContext();if(!ctx||!this.getSettings().autoSummary)return;
-    this.enqueue(automaticFloorIndices(readMemory(ctx),ctx.chat,this.getSettings().summary?.delayFloors??3).slice(0,Math.max(1,limit)));
+    this.enqueue(automaticFloorIndices(peekMemory(ctx),ctx.chat,this.getSettings().summary?.delayFloors??3).slice(0,Math.max(1,limit)));
   }
   async restoreStale(key=this.currentKey()){
     if(this.restoring)return this.restoring;
     const task=async()=>{
       const ctx=this.getContext();
       if(!ctx||key!==this.currentKey()||typeof ctx.saveChat!=='function')return 0;
-      const indices=staleHiddenIndices(readMemory(ctx),ctx.chat||[]);
+      const indices=staleHiddenIndices(peekMemory(ctx),ctx.chat||[]);
       if(!indices.length)return 0;
       const changed=[];
       try{
@@ -73,7 +73,7 @@ export class SummaryQueue{
       const ctx=this.getContext();
       if(!ctx||key!==this.currentKey()||!this.getSettings().enabled||!this.getSettings().summary?.autoHide)return 0;
       if(typeof ctx.saveChat!=='function')return 0;
-      const indices=hideReadyIndices(readMemory(ctx),ctx.chat||[],this.getSettings());
+      const indices=hideReadyIndices(peekMemory(ctx),ctx.chat||[],this.getSettings());
       if(!indices.length)return 0;
       const changed=[];
       try{
@@ -133,7 +133,7 @@ export class SummaryQueue{
     const fingerprint=messageFingerprint(ctx.chat?.[index]);
     const userFp=userFingerprint(ctx.chat,index);
     if(!fingerprint)return;
-    let memory=readMemory(ctx);
+    let memory=peekMemory(ctx);
     if(leafValid(memory,ctx.chat,index))return;
     const settings=this.getSettings();
     const controller=new AbortController();this.abort=controller;
@@ -148,7 +148,7 @@ export class SummaryQueue{
         if(key!==this.currentKey()||controller.signal.aborted)return;
         ctx=this.getContext();
         if(messageFingerprint(ctx?.chat?.[index])!==fingerprint||userFingerprint(ctx.chat,index)!==userFp)return;
-        memory=commitLeaf(readMemory(ctx),index,fingerprint,parsed,userFp,true);
+        memory=commitLeaf(peekMemory(ctx),index,fingerprint,parsed,userFp,true);
         writeMemory(ctx,memory);this.onChange?.();
         await this.hideCompleted(key);
         await this.maybeChapter(key);
@@ -168,12 +168,12 @@ export class SummaryQueue{
     // Retain the former method name for existing callers, now handles all levels.
     const ctx=this.getContext(),cfg=this.getSettings();
     if(!ctx||key!==this.currentKey())return;
-    let memory=readMemory(ctx);
+    let memory=peekMemory(ctx);
     if((memory.chapterPauseUntil||0)>Date.now())return;
     for(let count=0;count<5;count++){
       if(key!==this.currentKey())return;
       const current=this.getContext();
-      const plan=nextCompression(readMemory(current),current.chat,cfg);
+      const plan=nextCompression(peekMemory(current),current.chat,cfg);
       if(!plan)return;
       const controller=new AbortController();this.abort=controller;
       try{
@@ -181,7 +181,7 @@ export class SummaryQueue{
         const content=await summarizeChapter(plan.rows,cfg,kind,current,controller.signal);
         if(key!==this.currentKey()||controller.signal.aborted)return;
         const latest=this.getContext();
-        memory=commitCompression(readMemory(latest),latest.chat,plan,content);
+        memory=commitCompression(peekMemory(latest),latest.chat,plan,content);
         writeMemory(latest,memory);this.onChange?.();
       }catch{
         if(key!==this.currentKey()||controller.signal.aborted)return;

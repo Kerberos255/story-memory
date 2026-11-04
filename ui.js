@@ -80,6 +80,13 @@ export function mountUI(api){
   const layout=el('div','sm-layout'),nav=el('nav','sm-nav'),body=el('main','sm-content');
   layout.append(nav,body);dialog.append(top,layout);
   let active=false,page='summaries',notice='',settingsOpen=new Set();
+  let dirtyEditor=false;
+  let timelineLimit=50,chapterLimit=40,timelineQuery='';
+  // Queue progress must not replace an in-progress form or destroy nested dialogs.
+  body.addEventListener('input',e=>{
+    const tag=String(e.target?.tagName||e.target?.tag||'').toLowerCase();
+    if(['textarea','input','select'].includes(tag))dirtyEditor=true;
+  });
   let saveToast=null,saveToastTimer=null;
   let theme='dark';
   try{theme=localStorage.getItem('story-memory-theme')==='light'?'light':'dark';}catch{}
@@ -128,10 +135,10 @@ export function mountUI(api){
   function open(value=true){
     if(value){
       active=true;if(!dialog.open)dialog.showModal();
-      render();close.focus();
+      dirtyEditor=false;render();close.focus();
     }else{
       clearSaveToast();closeRecordModal(false);
-      active=false;if(dialog.open)dialog.close();
+      active=false;dirtyEditor=false;if(dialog.open)dialog.close();
       body.replaceChildren();nav.replaceChildren();
       api.onClose?.();
     }
@@ -365,9 +372,23 @@ export function mountUI(api){
       pendingBox.append(heading,strip);body.append(pendingBox);
     }
     const valid=validChapters(mem,ctx?.chat||[]);
-    recordCards('分层剧情回顾',valid.slice().reverse(),c=>({title:'L'+c.level+' · '+(c.level===1?'阶段总结':c.level===2?'二次总结':'高层总结'),subtitle:c.children.length+' 段剧情',description:c.summary}),'chapter');
+    recordCards('分层剧情回顾',valid.slice(-chapterLimit).reverse(),c=>({title:'L'+c.level+' · '+(c.level===1?'阶段总结':c.level===2?'二次总结':'高层总结'),subtitle:c.children.length+' 段剧情',description:c.summary}),'chapter');
+    if(valid.length>chapterLimit)body.append(button('加载更早的分层总结',()=>{
+      chapterLimit+=40;render();
+    },'sm-btn sm-btn-text'));
     const state=deriveState(mem,ctx?.chat||[]);
-    recordCards('剧情时间线',state.timeline.slice(-50).reverse(),e=>({
+    const queryRow=el('div','sm-timeline-search');
+    const query=el('input','sm-input');query.type='search';query.placeholder='搜索楼层、故事时间、地点或剧情';
+    query.value=timelineQuery;query.setAttribute('aria-label','搜索剧情时间线');
+    const applyQuery=()=>{timelineQuery=query.value.trim();timelineLimit=50;render();};
+    query.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyQuery();}});
+    queryRow.append(query,button('搜索',applyQuery,'sm-btn'));
+    body.append(queryRow);
+    const term=timelineQuery.toLocaleLowerCase();
+    const filtered=term?state.timeline.filter(e=>
+      ['#'+e.sourceIndex,e.summary,e.time,e.location].some(x=>String(x||'').toLocaleLowerCase().includes(term))
+    ):state.timeline;
+    recordCards('剧情时间线',filtered.slice(-timelineLimit).reverse(),e=>({
       title:'#'+e.sourceIndex,
       subtitle:[
         ['时间',formatStoryTime(e.time)||leadingStoryTime(e.summary)],
@@ -377,6 +398,10 @@ export function mountUI(api){
       meta:'本楼层更新：物品 '+(e.delta?.items?.length||0)+' · 场景 '+(e.delta?.scenes?.length||0)+
         ' · 角色 '+(e.delta?.characters?.length||0)+' · 计划 '+(e.delta?.plans?.length||0)
     }),'floor');
+    if(filtered.length>timelineLimit)body.append(button('加载更早的楼层摘要',()=>{
+      timelineLimit+=50;render();
+    },'sm-btn sm-btn-text'));
+    if(term&&!filtered.length)body.append(el('p','sm-help','未找到匹配的剧情摘要。'));
     const skipped=Object.keys(mem.skippedFloors||{}).map(Number).filter(i=>
       mem.skippedFloors[i]?.fingerprint===messageFingerprint(ctx?.chat?.[i])&&
       mem.skippedFloors[i]?.userFingerprint===userFingerprint(ctx.chat,i)).sort((a,b)=>a-b);
@@ -432,18 +457,110 @@ export function mountUI(api){
     }
     return panel;
   }
+  function entityHistoryDetails(entry){
+    const history=entry.history||[];
+    if(!history.length)return el('span');
+    const wrap=el('details','sm-entity-history');
+    wrap.append(el('summary','sm-entity-history-heading','变更记录 · '+history.length+' 条'));
+    const list=el('div','sm-entity-history-list');
+    for(const event of history.slice(-12).reverse()){
+      const row=el('div','sm-entity-history-row');
+      const operation=event.op==='add'?'登记':event.op==='remove'?'移除':'更新';
+      row.append(el('strong','', '#'+event.floor+' · '+operation+
+        (event.fields?.length?' · '+event.fields.join('、'):'')));
+      if(event.evidence)row.append(el('small','', '原文依据：'+event.evidence));
+      else if(event.op!=='remove')row.append(el('small','','无可核对引文 · 建议人工确认'));
+      list.append(row);
+    }
+    wrap.append(list);
+    const versions=Object.entries(entry.fieldVersions||{});
+    if(versions.length){
+      const window=el('div','sm-entity-version-list');
+      for(const [field,items] of versions){
+        const last=items.at(-1);if(!last)continue;
+        window.append(el('small','',field+'：#'+last.validFromFloor+' → '+
+          (last.validToFloor===null?'当前':'#'+last.validToFloor)+
+          (last.evidenceStatus==='verified'?' · 有原文依据':' · 待核对')));
+      }
+      wrap.append(window);
+    }
+    return wrap;
+  }
+  function entityCorrection(kind,entry){
+    const fields={items:['description','location','owner','status','quantity'],
+      scenes:['description','location','status'],
+      characters:['description','location','status','relationship','presence'],
+      plans:['description','location','status','time']}[kind]||[];
+    const labels={description:'说明',location:'位置',owner:'归属',status:'状态',
+      quantity:'数量',relationship:'关系',presence:'在场状态',time:'故事时间'};
+    const panel=el('details','sm-entity-history sm-entity-correction');
+    panel.append(el('summary','sm-entity-history-heading',entry.correctionStale?'人工纠错 · 部分待核对':entry.manualCorrection?'人工纠错 · 已生效':'人工纠错'));
+    const content=el('div','sm-entity-correction-content');
+    content.append(el('p','sm-help','优先采用此处人工确认的当前状态，不修改来源摘要；可随时恢复提取值。'));
+    const grid=el('div','sm-entity-correction-fields'),inputs={};
+    for(const fieldName of fields){
+      const row=el('label','sm-field');row.append(el('span','sm-field-label',labels[fieldName]));
+      let input;
+      if(fieldName==='presence'){
+        input=el('select','sm-input sm-select');
+        for(const [value,label] of [['unknown','未确认'],['present','在场'],['absent','不在场']]){
+          const option=el('option','',label);option.value=value;input.append(option);
+        }
+        input.value=entry[fieldName]||'unknown';
+      }else{
+        input=el('input','sm-input');input.type=fieldName==='quantity'?'number':'text';
+        input.value=String(entry[fieldName]??'');
+        if(fieldName==='quantity')input.min='0';
+      }
+      input.setAttribute('aria-label',entry.name+' · '+labels[fieldName]);
+      inputs[fieldName]=input;row.append(input);grid.append(row);
+    }
+    const actions=el('div','sm-row-actions');
+    actions.append(button('保存纠错',()=>{
+      try{api.correctEntity(kind,entry.entity_id,Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,v.value])));
+        showNotice('已更新当前状态');}
+      catch(e){showNotice(e.message||'保存失败');}
+    },'sm-btn sm-btn-primary'));
+    if(entry.manualCorrection||entry.correctionStale)actions.append(button('恢复提取值',()=>{
+      try{api.clearEntityCorrection(kind,entry.entity_id);showNotice('已恢复提取值');}
+      catch(e){showNotice(e.message||'恢复失败');}
+    },'sm-btn'));
+    content.append(grid,actions);panel.append(content);
+    return panel;
+  }
   function renderCollection(kind,heading,caption){
     const ctx=api.context(),mem=api.memory(),state=deriveState(mem,ctx?.chat||[]);
     title(heading,caption);
     const entries=(state[kind]||[]).filter(x=>!x.manual);
     const rules=Object.entries(mem.entityAliases?.[kind]||{});
-    recordCards('当前'+heading,entries,x=>({title:x.name,description:[
+    recordCards('当前'+heading,entries,x=>({title:x.name,
+      subtitle:x.correctionStale?'新剧情已更新部分人工纠错':x.manualCorrection?'当前状态 · 人工确认':'',description:[
       x.description,x.location&&'位置：'+x.location,x.owner&&'归属：'+x.owner,
-      x.relationship&&'关系：'+x.relationship,x.status,x.quantity!==undefined&&'数量：'+x.quantity,
-      kind==='characters'&&x.knowledge?.length&&('知情：'+x.knowledge.map(k=>({knows:'知道',suspects:'怀疑',believes:'误信',hides:'隐瞒'}[k.stance]||k.stance)+'「'+k.fact+'」').join('；'))
-    ].filter(Boolean).join(' · ')}),null,x=>entityMergeControl(kind,x,entries,
-      rules.filter(([,rule])=>entityNameKey(rule.to)===entityNameKey(x.name))
-        .map(([,rule])=>rule)));
+      x.relationship&&'关系：'+x.relationship,x.status,Number.isFinite(x.quantity)&&'数量：'+x.quantity,
+      kind==='characters'&&x.presence==='present'&&'当前在场',kind==='characters'&&x.presence==='absent'&&'当前不在场',
+      kind==='characters'&&x.knowledge?.length&&('知情：'+x.knowledge.map(k=>({knows:'知道',suspects:'怀疑',believes:'误信',hides:'隐瞒'}[k.stance]||k.stance)+'「'+k.fact+'」'+(k.provenance==='secondhand'?'（转述）':'')).join('；'))
+    ].filter(Boolean).join(' · ')}),null,x=>{
+      const wrap=el('div','sm-entity-details');
+      wrap.append(entityHistoryDetails(x));
+      wrap.append(entityCorrection(kind,x));
+      wrap.append(entityMergeControl(kind,x,entries,
+        rules.filter(([,rule])=>entityNameKey(rule.to)===entityNameKey(x.name))
+          .map(([,rule])=>rule)));
+      return wrap;
+    });
+    const warnings=state.ambiguities?.[kind]||[];
+    if(warnings.length){
+      const notice=el('details','sm-entity-history sm-entity-ambiguity');
+      notice.append(el('summary','sm-entity-history-heading','待核对的同名身份 · '+warnings.length+' 条'));
+      for(const issue of warnings.slice(-15))notice.append(el('p','sm-help',
+        '#'+issue.sourceIndex+' · '+issue.name+'：'+issue.reason));
+      body.append(notice);
+    }
+    const archived=(state.archived?.[kind]||[]).slice(-30).reverse();
+    recordCards('已归档'+heading,archived,x=>({title:x.name,
+      subtitle:'归档于 #'+x.retiredAtFloor,
+      description:x.description||'这条状态已被后续剧情移除；完整来源仍保存在楼层摘要中。'
+    }),null,entityHistoryDetails);
 
     const aliases=Object.values(mem.entityAliases?.[kind]||{});
     if(entries.length>=2||aliases.length){
@@ -856,7 +973,10 @@ export function mountUI(api){
     recordReturnFocus=trigger||null;
     const ctx=api.context(),memory=api.memory(),cfg=previewSettings||api.settings();
     const recalled=cfg.retrieval?.enabled!==false?api.previewHistory?.(ctx,memory,cfg)||[]:[];
-    const result=injectionText(memory,ctx?.chat||[],cfg,[],recalled);
+    const usage={};
+    const result=injectionText(memory,ctx?.chat||[],cfg,[],recalled,usage);
+    const snapshot=api.lastInjection?.();
+    const hasSnapshot=Boolean(snapshot?.chatId&&snapshot.chatId===ctx?.getCurrentChatId?.());
     const overlay=el('div','sm-record-modal-overlay');
     const panel=el('section','sm-record-modal sm-preview-modal');
     recordOverlay=overlay;
@@ -869,10 +989,40 @@ export function mountUI(api){
     close.append(svg('x'));close.setAttribute('aria-label','关闭弹窗');
     header.append(heading,close);
     const content=el('div','sm-record-modal-body');
+    const explanation=el('p','sm-help','模拟预览使用当前设置草稿与本地历史检索；不发送向量请求。历史快照仅为本扩展写给酒馆的内容，不包含其他预设与插件。Token 数为估算。');
+    const counter=el('p','sm-preview-counter');
     const textarea=textArea(result||'当前没有需要注入的记忆。',15);
     textarea.readOnly=true;textarea.setAttribute('aria-label','注入预览内容');
-    content.append(textarea);
+    let showSnapshot=false;
+    const update=()=>{
+      const value=String(showSnapshot?(snapshot?.text||''):result||'');
+      textarea.value=value||'当前没有需要注入的记忆。';
+      counter.textContent=(showSnapshot?'上轮生成时提交':'当前草稿模拟')+' · 约 '+Math.ceil(value.length/3)+' Tokens · '+value.length+' 字符';
+    };
+    update();
+    content.append(explanation,counter,textarea);
+    const breakdown=el('details','sm-injection-breakdown');
+    breakdown.append(el('summary','sm-entity-history-heading',
+      '注入预算 · 约 '+usage.usedTokens+' / '+usage.budgetTokens+' Tokens'));
+    const breakdownList=el('div','sm-injection-breakdown-list');
+    for(const section of usage.sections||[]){
+      const row=el('div','sm-injection-breakdown-row');
+      row.append(el('span','',section.title.replace(/[【】]/g,'')),
+        el('span','',Math.ceil(section.chars/3)+'t · '+section.selected+' 条'+
+          (section.omitted?' · 跳过 '+section.omitted+' 条':'')));
+      breakdownList.append(row);
+    }
+    breakdown.append(breakdownList);
+    content.append(breakdown);
     const footer=el('div','sm-record-modal-footer');
+    if(hasSnapshot){
+      const toggle=button('查看上轮扩展注入',()=>{
+        showSnapshot=!showSnapshot;
+        toggle.textContent=showSnapshot?'返回模拟预览':'查看上轮扩展注入';
+        update();
+      },'sm-btn');
+      footer.append(toggle);
+    }
     const done=button('关闭',()=>closeRecordModal(),'sm-btn sm-btn-primary');
     footer.append(done);
     panel.append(header,content,footer);overlay.append(panel);dialog.append(overlay);
@@ -890,7 +1040,7 @@ export function mountUI(api){
   function render(){
     if(!active)return;
     clearSaveToast();closeRecordModal(false);
-    body.replaceChildren();nav.replaceChildren();
+    body.replaceChildren();nav.replaceChildren();dirtyEditor=false;
     for(const [name,label,icon] of NAV){
       const item=button('',()=>{if(page===name)return;page=name;notice='';render();body.scrollTop=0;},'sm-nav-item'+(page===name?' is-current':''));
       item.append(svg(icon),el('span','',label));item.setAttribute('aria-current',page===name?'page':'false');nav.append(item);
@@ -903,8 +1053,10 @@ export function mountUI(api){
     else if(page==='settings')renderSettings();
     if(notice)showNotice(notice);
   }
-  return {open,refresh(){
-    // Refreshing while editing settings would discard unsaved form input.
-    if(active&&page!=='settings')render();
+  return {open,resetChatView(){
+    timelineLimit=50;chapterLimit=40;timelineQuery='';dirtyEditor=false;
+  },refresh(force=false){
+    // Preserve drafts and editing dialogs during async queue updates.
+    if(active&&page!=='settings'&&(force||(!recordOverlay&&!dirtyEditor)))render();
   },report:showNotice};
 }

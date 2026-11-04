@@ -13,7 +13,7 @@ export function defaultSettings() {
   };
 }
 export function freshMemory() {
-  return {version:1,leaves:{},chapters:[],skippedFloors:{},skippedPlans:[],entityAliases:{},manual:{summaries:[],items:[],scenes:[],characters:[],plans:[]},tasks:{},revision:0};
+  return {version:1,leaves:{},chapters:[],skippedFloors:{},skippedPlans:[],entityAliases:{},entityCorrections:{},manual:{summaries:[],items:[],scenes:[],characters:[],plans:[]},tasks:{},revision:0};
 }
 /** Read-only access to canonical data. Never mutate the returned object. */
 export function peekMemory(ctx) {
@@ -36,9 +36,15 @@ export function hashText(text) {
   for(let i=0;i<text.length;i++){h^=text.charCodeAt(i);h=Math.imul(h,16777619);}
   return (h>>>0).toString(16).padStart(8,'0');
 }
+const messageFingerprints=new WeakMap();
 export function messageFingerprint(message) {
   if(!message || message.is_user || (message.is_system&&!message.extra?.story_memory_hidden)) return '';
-  return hashText(String(message.mes||'')+'|swipe='+String(message.swipe_id??0));
+  const text=String(message.mes||''),swipe=String(message.swipe_id??0);
+  const cached=messageFingerprints.get(message);
+  if(cached?.text===text&&cached.swipe===swipe)return cached.fingerprint;
+  const fingerprint=hashText(text+'|swipe='+swipe);
+  messageFingerprints.set(message,{text,swipe,fingerprint});
+  return fingerprint;
 }
 export function floorUserMessages(chat,index){
   const users=[];
@@ -69,6 +75,43 @@ export function pendingFloors(memory,chat) {
   }
   return pending;
 }
+/** Rebind metadata after a chat splice using message object identity, not text hashes.
+ * Ambiguous or reconstructed source objects are dropped conservatively.
+ */
+export function rebaseDeletedMessages(memory,previousChat,chat){
+  if(!Array.isArray(previousChat)||!Array.isArray(chat)||previousChat.length<=chat.length)return memory;
+  const at=new Map();
+  for(let i=0;i<chat.length;i++)if(chat[i]&&typeof chat[i]==='object')at.set(chat[i],i);
+  const next={...memory,leaves:{},skippedFloors:{},chapters:[],tasks:{},skippedPlans:[],
+    revision:(Number(memory.revision)||0)+1};
+  const ids=new Map();
+  for(const [key,leaf] of Object.entries(memory.leaves||{})){
+    const old=Number(key),index=at.get(previousChat[old]);
+    if(!Number.isInteger(old)||!Number.isInteger(index)||!leaf||next.leaves[index])continue;
+    if(leaf.fingerprint!==messageFingerprint(chat[index]))continue;
+    if(leaf.userFingerprint&&leaf.userFingerprint!==userFingerprint(chat,index))continue;
+    const oldId='floor:'+old,newId='floor:'+index;
+    ids.set(oldId,newId);
+    next.leaves[index]={...leaf,id:newId,sourceIndex:index};
+  }
+  for(const [key,skip] of Object.entries(memory.skippedFloors||{})){
+    const old=Number(key),index=at.get(previousChat[old]);
+    if(!Number.isInteger(index)||!skip||next.skippedFloors[index])continue;
+    if(skip.fingerprint!==messageFingerprint(chat[index])||
+      skip.userFingerprint!==userFingerprint(chat,index))continue;
+    next.skippedFloors[index]={...skip};
+  }
+  const kept=new Set();
+  for(const chapter of memory.chapters||[]){
+    if(!Array.isArray(chapter.children)||!chapter.children.length)continue;
+    const children=chapter.children.map(id=>id.startsWith('floor:')?ids.get(id):id);
+    if(children.some(id=>!id))continue;
+    if(chapter.children.some((old,i)=>!old.startsWith('floor:')&&!kept.has(children[i])))continue;
+    next.chapters.push({...chapter,children});kept.add(chapter.id);
+  }
+  return next;
+}
+
 const cleanString=(value,limit=3000)=>typeof value==='string'?value.trim().slice(0,limit):'';
 
 /** Normalize explicit story timestamps without inventing an unknown date or time.
@@ -135,6 +178,12 @@ export function normalizeDelta(raw,sourceText='') {
       const evidence=cleanString(item.evidence,160);
       if(evidence&&sourceText&&!sourceText.includes(evidence))continue;
       if(evidence)out.evidence=evidence;
+      // Explicit field retirement must cite this turn; omission never means deletion.
+      const removable=['description','location','owner','status','relationship','time','kind','presence'];
+      if(evidence&&Array.isArray(item.clear_fields)){
+        const cleared=[...new Set(item.clear_fields.filter(field=>removable.includes(field)))];
+        if(cleared.length)out.clear_fields=cleared;
+      }
       if(kind==='characters'&&Array.isArray(item.knowledge)){
         const entries=[];
         for(const note of item.knowledge.slice(0,12)){
@@ -144,10 +193,12 @@ export function normalizeDelta(raw,sourceText='') {
           const knowledgeOp=note.op==='remove'?'remove':'upsert';
           if(!fact||!['knows','suspects','believes','hides'].includes(stance))continue;
           if(!quote||(sourceText&&!sourceText.includes(quote)))continue;
-          entries.push({fact,stance,op:knowledgeOp,...(quote?{evidence:quote}:{})});
+          const provenance=['firsthand','secondhand','unknown'].includes(note.provenance)?note.provenance:'unknown';
+          entries.push({fact,stance,provenance,op:knowledgeOp,...(quote?{evidence:quote}:{})});
         }
         if(entries.length)out.knowledge=entries;
       }
+      if(kind==='characters'&&['present','absent','unknown'].includes(item.presence))out.presence=item.presence;
       if(Number.isFinite(item.quantity)&&item.quantity>=0&&item.quantity<=1000000)out.quantity=item.quantity;
       delta[kind].push(out);
     }
@@ -156,7 +207,9 @@ export function normalizeDelta(raw,sourceText='') {
 }
 export function commitLeaf(memory,index,fingerprint,data,userFp='',complete=false) {
   if(!Number.isInteger(index)||index<0||!fingerprint)throw Error('楼层标识无效');
-  const next=structuredClone(memory);
+  // Copy only touched containers: old event records are immutable once committed.
+  const next={...memory,leaves:{...(memory.leaves||{})},tasks:{...(memory.tasks||{})},
+    skippedFloors:{...(memory.skippedFloors||{})}};
   next.leaves[index]={id:'floor:'+index,sourceIndex:index,fingerprint,userFingerprint:userFp,summary:data.summary,
     time:data.time,location:data.location,delta:data.delta,sourceComplete:complete,
     ...(Array.isArray(data.sourceParts)&&data.sourceParts.length>1?{sourceParts:data.sourceParts}:{}),updatedAt:Date.now()};
@@ -193,7 +246,9 @@ export function editGeneratedLeaf(memory,chat,index,changes){
 }
 export function deleteGeneratedLeaf(memory,chat,index){
   if(!leafValid(memory,chat,index))throw Error('楼层摘要已经失效');
-  const next=structuredClone(memory),previous=next.leaves[index];
+  const next={...memory,leaves:{...(memory.leaves||{})},
+    skippedFloors:{...(memory.skippedFloors||{})}};
+  const previous=next.leaves[index];
   delete next.leaves[index];
   pruneDependentChapters(next,'floor:'+index);
   next.skippedFloors??={};
@@ -201,7 +256,7 @@ export function deleteGeneratedLeaf(memory,chat,index){
   next.revision++;return next;
 }
 export function resumeGeneratedFloor(memory,index){
-  const next=structuredClone(memory);
+  const next={...memory,skippedFloors:{...(memory.skippedFloors||{})}};
   if(!next.skippedFloors?.[index])throw Error('楼层未标记为跳过');
   delete next.skippedFloors[index];
   next.revision++;return next;
@@ -314,8 +369,51 @@ export function unmergeEntity(memory,kind,fromName){
   delete next.entityAliases[kind][key];
   next.revision++;return next;
 }
+const editableFields={
+  items:['description','location','owner','status','quantity'],
+  scenes:['description','location','status'],
+  characters:['description','location','status','relationship','presence'],
+  plans:['description','location','status','time']
+};
+/** User-confirmed field overrides belong to the same chat; source Delta remains immutable. */
+export function correctEntity(memory,chat,kind,id,values){
+  if(!editableFields[kind]?.length)throw Error('未知实体类型');
+  const entity=deriveState(memory,chat)[kind].find(x=>!x.manual&&x.entity_id===id);
+  if(!entity)throw Error('实体已失效，请重新打开');
+  const cleaned={};
+  for(const field of editableFields[kind]){
+    if(!Object.hasOwn(values||{},field))continue;
+    const value=values[field];
+    if(field==='quantity'){
+      if(value!==null&&value!==''){
+        const n=Number(value);if(!Number.isInteger(n)||n<0||n>1e6)throw Error('数量应为非负整数');
+        cleaned[field]=n;
+      }else cleaned[field]=null;
+    }else if(field==='presence'){
+      if(!['present','absent','unknown'].includes(String(value)))throw Error('在场状态不合法');
+      cleaned[field]=value;
+    }else{
+      if(typeof value!=='string'||value.length>600)throw Error('字段内容过长或不合法');
+      cleaned[field]=value.trim();
+    }
+  }
+  const sources=Object.fromEntries(Object.keys(cleaned).map(field=>
+    [field,entity.fieldVersions?.[field]?.at(-1)?.validFromFloor??-1]));
+  const old=memory.entityCorrections||{};
+  const next={...memory,entityCorrections:{...old,[kind]:{...(old[kind]||{}),
+    [id]:{values:cleaned,sources,updatedAt:Date.now()}}},revision:(Number(memory.revision)||0)+1};
+  return next;
+}
+export function clearEntityCorrection(memory,kind,id){
+  if(!editableFields[kind])throw Error('未知实体类型');
+  if(!memory.entityCorrections?.[kind]?.[id])return memory;
+  const values={...memory.entityCorrections[kind]};delete values[id];
+  return {...memory,entityCorrections:{...memory.entityCorrections,[kind]:values},revision:(Number(memory.revision)||0)+1};
+}
 export function deriveState(memory,chat) {
   const sections={items:new Map(),scenes:new Map(),characters:new Map(),plans:new Map()};
+  const archived={items:[],scenes:[],characters:[],plans:[]};
+  const ambiguities={items:[],scenes:[],characters:[],plans:[]};
   const byId=Object.fromEntries(entityKinds.map(kind=>[kind,new Map()]));
   const knownAliases=Object.fromEntries(entityKinds.map(kind=>[kind,new Map()]));
   const floors=Object.keys(memory.leaves||{}).map(Number).sort((a,b)=>a-b);
@@ -332,14 +430,32 @@ export function deriveState(memory,chat) {
         // Model-supplied IDs only resolve already established entities in this
         // category; unknown IDs never create new identity associations.
         const linked=change.entity_id&&byId[kind].get(change.entity_id);
+        const named=map.get(canonical.key);
+        if(change.entity_id&&!linked&&named&&named.entity_id!==change.entity_id){
+          ambiguities[kind].push({name:change.name,sourceIndex:i,
+            reason:'模型引用的实体 ID 与已有同名对象不同；未自动覆盖旧状态'});
+          continue;
+        }
         const key=linked||(map.has(canonical.key)?canonical.key:null)||knownAliases[kind].get(raw)||canonical.key;
         if(change.op==='remove'){
           const old=map.get(key);
-          if(old)byId[kind].delete(old.entity_id);
+          if(old){
+            byId[kind].delete(old.entity_id);
+            const history=[...(old.history||[]),{floor:i,op:'remove',evidence:change.evidence||'',fields:[]}];
+            const fieldVersions=Object.fromEntries(Object.entries(old.fieldVersions||{}).map(([field,versions])=>
+              [field,versions.map((version,n)=>n===versions.length-1&&version.validToFloor===null?
+                {...version,validToFloor:i}:version)]));
+            archived[kind].push({...old,history,fieldVersions,retiredAtFloor:i});
+          }
           map.delete(key);
           continue;
         }
         const old=map.get(key);
+        if(old&&change.op==='add'&&!linked){
+          ambiguities[kind].push({name:change.name,sourceIndex:i,
+            reason:'已有同名实体却再次声明新增；无法确定是新对象还是重复提取，已保留原状态'});
+          continue;
+        }
         const entity_id=old?.entity_id||(kind+':'+i+':'+hashText(kind+'|'+key));
         const display=old?.name||canonical.name;
         const aliases=[...(old?.aliases||[])];
@@ -350,34 +466,99 @@ export function deriveState(memory,chat) {
         if(kind==='characters')for(const update of change.knowledge||[]){
           const id=entityNameKey(update.fact);
           if(update.op==='remove')knowledge.delete(id);
-          else knowledge.set(id,{fact:update.fact,stance:update.stance,evidence:update.evidence||'',sourceIndex:i});
+          else knowledge.set(id,{fact:update.fact,stance:update.stance,provenance:update.provenance||'unknown',evidence:update.evidence||'',sourceIndex:i});
         }
-        map.set(key,{...old,...change,name:display,entity_id,aliases,op:undefined,sourceIndex:i,
-          ...(kind==='characters'?{knowledge:[...knowledge.values()]}:{})});
+        const retire=change.clear_fields||[];
+        const changedFields=Object.keys(change).filter(field=>
+          !['op','name','entity_id','evidence','knowledge','clear_fields'].includes(field)&&old?.[field]!==change[field]);
+        for(const field of retire)if(!changedFields.includes(field))changedFields.push(field);
+        if(Array.isArray(change.knowledge)&&change.knowledge.length)changedFields.push('knowledge');
+        const source=[String(chat?.[i]?.mes||''),...floorUserMessages(chat,i).map(m=>String(m.mes||''))].join('\n');
+        const evidenceStatus=!change.evidence?'missing':source.includes(change.evidence)?'verified':'mismatch';
+        const fieldVersions={...(old?.fieldVersions||{})};
+        for(const field of changedFields){
+          const existing=fieldVersions[field]||[];
+          const previous=existing.map((version,n)=>n===existing.length-1&&version.validToFloor===null?
+            {...version,validToFloor:i}:version);
+          fieldVersions[field]=retire.includes(field)?previous:[...previous,{
+            value:field==='knowledge'?'已更新知情记录':change[field],
+            validFromFloor:i,validToFloor:null,evidence:change.evidence||'',evidenceStatus}];
+        }
+        const history=old?.history||[];
+        if(!old||changedFields.length)history.push({floor:i,op:old?'update':'add',
+          evidence:change.evidence||'',fields:changedFields});
+        const updated={...old,...change,name:display,entity_id,aliases,op:undefined,sourceIndex:i,history,fieldVersions,evidenceStatus,
+          ...(kind==='characters'?{knowledge:[...knowledge.values()]}:{})};
+        for(const field of retire)delete updated[field];
+        delete updated.clear_fields;
+        map.set(key,updated);
         byId[kind].set(entity_id,key);
         if(raw!==key&&!map.has(raw))knownAliases[kind].set(raw,key);
       }
     }
   }
   for(const kind of ['items','scenes','characters','plans']){
+    for(const entity of sections[kind].values()){
+      const correction=memory.entityCorrections?.[kind]?.[entity.entity_id];
+      if(correction?.values&&typeof correction.values==='object'){
+        let applied=0,stale=0;
+        for(const [field,value] of Object.entries(correction.values)){
+          const sourceVersion=entity.fieldVersions?.[field]?.at(-1)?.validFromFloor??-1;
+          const recorded=correction.sources?.[field];
+          // New generated evidence wins over an older user override for this field.
+          if(Number.isInteger(recorded)&&sourceVersion>recorded){stale++;continue;}
+          entity[field]=value;applied++;
+        }
+        entity.manualCorrection=Boolean(applied);
+        entity.correctionStale=Boolean(stale);
+      }
+    }
     for(const m of memory.manual?.[kind]||[]){
       // Manual notes do not silently overwrite AI-generated structured facts.
       sections[kind].set(m.id,{name:m.text,manual:true});
     }
   }
   const state=Object.fromEntries(Object.entries(sections).map(([k,v])=>[k,[...v.values()]]));
-  return {timeline,...state};
+  return {timeline,...state,archived,ambiguities};
 }
-export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[]) {
-  const state=deriveState(memory,chat),cfg=settings.injection||{},sections=[];
+// Cache only derived injection state. Canonical chat metadata stays the source of truth.
+// Every reuse rechecks current swipe/user fingerprints, so source edits invalidate it.
+const injectionStateCache=new WeakMap();
+function injectionState(memory,chat){
+  const keys=Object.keys(memory.leaves||{}),old=injectionStateCache.get(memory);
+  const manualKey=hashText(JSON.stringify(memory.manual||{})+'|'+JSON.stringify(memory.entityAliases||{}));
+  if(old&&old.chat===chat&&old.revision===memory.revision&&old.keys.length===keys.length&&old.manualKey===manualKey){
+    let same=true;
+    for(let i=0;i<keys.length;i++){
+      const key=keys[i];
+      if(old.keys[i]!==key||old.refs[i]!==memory.leaves[key]||old.valid[i]!==leafValid(memory,chat,Number(key))){same=false;break;}
+    }
+    if(same)return old.state;
+  }
+  const state=deriveState(memory,chat);
+  injectionStateCache.set(memory,{chat,revision:memory.revision,manualKey,keys,
+    refs:keys.map(x=>memory.leaves[x]),valid:keys.map(x=>leafValid(memory,chat,Number(x))),state});
+  return state;
+}
+export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],diagnostics=null) {
+  const state=injectionState(memory,chat),cfg=settings.injection||{},sections=[];
   const add=(title,entries)=>{if(entries.length)sections.push({title,entries});};
   const note=text=>({text:String(text||'').trim(),identity:String(text||'').trim()});
   const entityLine=(entity,historical=false)=>{
     if(entity.manual)return note(entity.name);
     // Keep each JSON record intact. Internal source/identity IDs are not RP facts.
-    const {entity_id,aliases,sourceIndex,op,evidence,knowledge,...publicState}=entity;
+    const {entity_id,aliases,sourceIndex,op,evidence,knowledge,history,fieldVersions,evidenceStatus,identityStatus,manualCorrection,correctionStale,retiredAtFloor,...publicState}=entity;
     if(Array.isArray(knowledge)&&knowledge.length)
-      publicState.knowledge=knowledge.map(x=>({stance:x.stance,fact:x.fact}));
+      publicState.knowledge=knowledge.map(x=>({stance:x.stance,fact:x.fact,
+        ...(x.provenance==='secondhand'?{来源:'转述信息，角色并非亲历'}:{})}));
+    if(publicState.presence==='absent'&&!historical){
+      // Preserve identity and relationships but avoid leaking off-stage details as live state.
+      delete publicState.description;
+      delete publicState.location;
+      publicState.在场='当前不在场；不能让此角色直接感知当前场景';
+    }
+    if(publicState.quantity===null)delete publicState.quantity;
+    if(publicState.presence==='unknown')delete publicState.presence;
     if(historical){
       if(publicState.status!==undefined){
         publicState.记录时状态=publicState.status;
@@ -426,25 +607,39 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[])
   if(cfg.vector)add('【相关旧记忆】',vectorHits.map(x=>note(x.text)));
   const budget=Math.max(400,Math.min(18000,Number(cfg.budget)||4500))*3;
   let remaining=budget;
-  const result=[],seen=new Set();
+  const result=[],seen=new Set(),breakdown=[];
   // Select entire entries by priority, newest within a section; never slice JSON
   // or prose in the middle. Preserve chronology when presenting chosen entries.
-  for(const {title,entries} of sections){
+  // Story continuity must not be displaced by a large entity catalog or retrieval dump.
+  // Keep the existing per-section newest-first and full-entry budget semantics.
+  const priority=new Map([
+    ['【剧情摘要】',0],['【分层剧情记忆】',1],['【人工补充记忆】',2],
+    ['【计划与伏笔】',3],['【人物】',4],['【历史计划（状态待核对，不代表当前待办；请以最新剧情为准）】',5],
+    ['【相关历史】',6],['【物品】',7],['【场景】',8],['【相关旧记忆】',9]
+  ]);
+  for(const {title,entries} of sections.sort((a,b)=>(priority.get(a.title)??99)-(priority.get(b.title)??99))){
     const extra=(result.length?2:0)+title.length+1;
-    if(remaining<=extra)continue;
+    if(remaining<=extra){breakdown.push({title,selected:0,omitted:entries.length,chars:0});continue;}
     let available=remaining-extra;
-    const chosen=[];
+    const chosen=[];let omitted=0;
     for(const item of entries.slice().reverse()){
       const text=item.text.trim(),identity=item.identity||text;
-      if(!text||seen.has(identity)||text.length+1>available)continue;
+      if(!text||seen.has(identity)||text.length+1>available){omitted++;continue;}
       chosen.push(text);seen.add(identity);available-=text.length+1;
     }
-    if(!chosen.length)continue;
+    if(!chosen.length){breakdown.push({title,selected:0,omitted,chars:0});continue;}
     const section=title+'\n'+chosen.reverse().join('\n');
     result.push(section);
     remaining-=section.length+(result.length>1?2:0);
+    breakdown.push({title,selected:chosen.length,omitted,chars:section.length});
   }
-  return result.join('\n\n');
+  const text=result.join('\n\n');
+  if(diagnostics&&typeof diagnostics==='object'){
+    diagnostics.budgetTokens=Math.floor(budget/3);
+    diagnostics.usedTokens=Math.ceil(text.length/3);
+    diagnostics.sections=breakdown;
+  }
+  return text;
 }
 
 /** Resolve AI-message-only keep boundary. User messages are not counted. */
@@ -510,10 +705,10 @@ export function commitCompression(memory,chat,plan,summary){
   const roots=compressionRoots(memory,chat,plan.level-1);
   const live=new Set(roots.map(x=>x.id));
   if(plan.children.some(id=>!live.has(id)))throw Error('压缩源已变化');
-  const next=structuredClone(memory);
+  const next={...memory,chapters:[...(memory.chapters||[])]};
   next.chapters.push({
     id:'comp:'+Date.now()+':'+Math.random().toString(36).slice(2,8),
-    level:plan.level,children:plan.children,summary:text,updatedAt:Date.now(),
+    level:plan.level,children:[...plan.children],summary:text,updatedAt:Date.now(),
     time:plan.rows.find(x=>x.time)?.time||''
   });
   next.revision++;
@@ -562,7 +757,14 @@ export function staleHiddenIndices(memory,chat){
   const result=new Set();
   for(let i=0;i<(chat?.length||0);i++){
     const m=chat[i];
-    if(!m?.is_system||m.is_user||!m.extra?.story_memory_hidden)continue;
+    if(!m?.is_system||!m.extra?.story_memory_hidden)continue;
+    if(m.is_user){
+      // Deleting its paired AI turn can otherwise strand a user message invisible.
+      let j=i+1;
+      while(chat[j]?.is_user)j++;
+      if(!chat[j]?.extra?.story_memory_hidden||!leafValid(memory,chat,j))result.add(i);
+      continue;
+    }
     if(leafValid(memory,chat,i))continue;
     result.add(i);
     for(let j=i-1;j>=0;j--){
