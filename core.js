@@ -1,4 +1,4 @@
-// Independent, dependency-free story memory model. No BaiBai code is reused.
+// Independent, dependency-free story memory model.
 export const META_KEY = 'story_memory_v1';
 export const SETTINGS_KEY = 'story_memory_settings_v1';
 

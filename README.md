@@ -63,10 +63,10 @@ presence_penalty
 附加参数 → 包含请求标头：
 
 ```text
-x-opencode-session: sillytavern
+x-example-session: demo
 ```
 
-以上标头只是普通格式示例，不会自动填写。Authorization、Cookie 等认证标头不能手动添加；独立摘要 API 自动使用该渠道填写的 Key。为了与柏宝书一样便捷，**独立摘要 Key 会保存在 SillyTavern 扩展设置中**，请勿公开导出包含扩展设置的备份。
+以上标头只是普通格式示例，不会自动填写。Authorization、Cookie 等认证标头不能手动添加；独立摘要 API 自动使用该渠道填写的 Key。**独立摘要 Key 会保存在 SillyTavern 扩展设置中**，请勿公开导出包含扩展设置的备份。
 
 ## 使用提示
 

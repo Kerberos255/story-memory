@@ -21,7 +21,7 @@ test('custom headers and body parameters pass through ST Custom route',()=>{
  assert.equal(JSON.parse(body.custom_include_body).reasoning_effort,'low');
 });
 test('invalid headers and URL credentials are rejected',()=>{
- assert.deepEqual(normalizeHeaders({'Bad\r\nHeader':'x','Authorization':'Bearer demo','Cookie':'hi','x-opencode-session':'manual-session'}),{'x-opencode-session':'manual-session'});
+ assert.deepEqual(normalizeHeaders({'Bad\r\nHeader':'x','Authorization':'Bearer demo','Cookie':'hi','x-example-session':'manual-session'}),{'x-example-session':'manual-session'});
  assert.throws(()=>normalizeChannelUrl('https://person:pass@some.invalid/v1'),ApiFault);
  assert.throws(()=>normalizeChannelUrl('javascript:alert(1)'),ApiFault);
 });
@@ -53,8 +53,8 @@ test('additional request parameters accept concise ST-style lines and JSON',()=>
  assert.deepEqual(params,{prefix:true,reasoning_effort:'low',max_tokens:8192});
  assert.deepEqual(parseExtraBody('{"prefix":false}'),{prefix:false});
  assert.deepEqual(parseExcluded('- frequency_penalty\n- presence_penalty\ntop_p'),['frequency_penalty','presence_penalty','top_p']);
- assert.deepEqual(parseHeaderLines('x-opencode-session: sillytavern\nX-Source: manual'),
-   {'x-opencode-session':'sillytavern','X-Source':'manual'});
+ assert.deepEqual(parseHeaderLines('x-example-session: demo\nX-Source: manual'),
+   {'x-example-session':'demo','X-Source':'manual'});
  assert.throws(()=>parseHeaderLines('Authorization: Bearer synthetic'),/不允许/);
  assert.throws(()=>parseHeaderLines('x-demo: abc\nX-DEMO: def'),/重复/);
 });
@@ -96,7 +96,7 @@ test('model refresh uses only standalone key and leaves main API untouched',asyn
    const models=await listSummaryModels(ctx,{
      url:'https://summary.example.invalid/v1',
      key:'synthetic-summary-key',
-     headers:{'x-opencode-session':'custom-session'}
+     headers:{'x-example-session':'custom-session'}
    });
    assert.deepEqual(models,['model-a','model-b']);
    assert.equal(request.url,'/api/backends/chat-completions/status');
@@ -105,7 +105,7 @@ test('model refresh uses only standalone key and leaves main API untouched',asyn
    assert.equal(request.body.secret_id,undefined);
    const h=JSON.parse(request.body.custom_include_headers);
    assert.equal(h.Authorization,'Bearer synthetic-summary-key');
-   assert.equal(h['x-opencode-session'],'custom-session');
+   assert.equal(h['x-example-session'],'custom-session');
  }finally{globalThis.fetch=oldFetch;}
 });
 test('standalone channel refuses missing keys, and defaults to main API',()=>{

@@ -706,7 +706,7 @@ export function mountUI(api){
     const included=textArea(Object.keys(cfg.api.include||{}).length?JSON.stringify(cfg.api.include,null,2):'',4,'prefix: true');
     const excluded=textArea((cfg.api.exclude||[]).join('\n'),3,'frequency_penalty\npresence_penalty');
     const headerLines=Object.entries(cfg.api.headers||{}).map(([k,v])=>k+': '+v).join('\n');
-    const headers=textArea(headerLines,3,'x-opencode-session: sillytavern');
+    const headers=textArea(headerLines,3,'x-example-session: demo');
     const extras=[
       ['包含主体参数','每行一个 名称: 值，也支持 JSON 对象',included],
       ['排除主体参数','每行填写一个参数名',excluded],
