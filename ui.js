@@ -668,7 +668,7 @@ export function mountUI(api){
     const cfg=api.settings();
     title('设置','管理摘要渠道、记忆整理和召回方式');
     const box=el('section','sm-settings'),main=el('div','sm-setting-global');
-    const enabled=switchRow('启用记忆引擎',cfg.enabled,'控制记忆整理、注入与检索');
+    const enabled=switchRow('启用剧情记忆',cfg.enabled,'控制剧情整理、记忆检索和发送');
     main.append(enabled.wrapper);box.append(main);
 
     const modeWrap=el('label','sm-field'),modeLabel=el('span','sm-field-label','摘要使用的 API');
@@ -837,9 +837,9 @@ export function mountUI(api){
       .map(([key,label])=>[key,switchRow(label,cfg.injection[key]??(key==='plans'))]);
     const flagGroup=el('div','sm-switch-grid');
     flagGroup.append(...flags.map(([,x])=>x.wrapper));
-    const budget=field('RP 记忆预算（近似 Tokens）',cfg.injection.budget,'number',
+    const budget=field('记忆长度上限（约 Tokens）',cfg.injection.budget,'number',
       '控制每轮交给主模型的记忆长度，和摘要 API 输出无关。');
-    const previewButton=button('查看注入预览',()=>{
+    const previewButton=button('预览发送内容',()=>{
       const previewCfg=structuredClone(cfg);
       for(const [key,value] of flags)previewCfg.injection[key]=value.input.checked;
       previewCfg.injection.budget=Number(budget.input.value)||4500;
@@ -848,7 +848,7 @@ export function mountUI(api){
         maxSources:Math.max(0,Math.min(5,Number(sourceCount.input.value)||0))};
       openInjectionPreview(previewButton,previewCfg);
     },'sm-btn');
-    const injectionPanel=accordion('inject','注入设置','选择发送给主模型的实体记忆',[
+    const injectionPanel=accordion('inject','记忆发送','选择发送给主模型的实体记忆',[
       flagGroup,budget.wrapper,previewButton
     ]);
 
@@ -932,7 +932,7 @@ export function mountUI(api){
       group.append(head,content);promptSections.push(group);
       promptEditors.set(spec.key,promptArea);
     }
-    box.append(accordion('prompts','自定义提示词','查看完整默认提示词、修改或恢复默认',promptSections));
+    box.append(accordion('prompts','提示配置','自定义楼层摘要与分层总结提示词',promptSections));
 
     const saveBar=el('div','sm-settings-save'),save=button('保存设置',()=>{
       try{
@@ -1033,7 +1033,7 @@ export function mountUI(api){
     const panel=el('section','sm-record-modal sm-preview-modal');
     recordOverlay=overlay;
     panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');
-    const heading=el('h3','sm-record-modal-title','注入预览');
+    const heading=el('h3','sm-record-modal-title','发送预览');
     heading.id='sm-injection-preview-heading';
     panel.setAttribute('aria-labelledby',heading.id);
     const header=el('div','sm-record-modal-head');
@@ -1043,19 +1043,19 @@ export function mountUI(api){
     const content=el('div','sm-record-modal-body');
     const explanation=el('p','sm-help','模拟预览使用当前设置草稿与本地历史检索；不发送向量请求。历史快照仅为本扩展写给酒馆的内容，不包含其他预设与插件。Token 数为估算。');
     const counter=el('p','sm-preview-counter');
-    const textarea=textArea(result||'当前没有需要注入的记忆。',15);
-    textarea.readOnly=true;textarea.setAttribute('aria-label','注入预览内容');
+    const textarea=textArea(result||'当前没有需要发送的记忆。',15);
+    textarea.readOnly=true;textarea.setAttribute('aria-label','发送预览内容');
     let showSnapshot=false;
     const update=()=>{
       const value=String(showSnapshot?(snapshot?.text||''):result||'');
-      textarea.value=value||'当前没有需要注入的记忆。';
+      textarea.value=value||'当前没有需要发送的记忆。';
       counter.textContent=(showSnapshot?'上轮生成时提交':'当前草稿模拟')+' · 约 '+Math.ceil(value.length/3)+' Tokens · '+value.length+' 字符';
     };
     update();
     content.append(explanation,counter,textarea);
     const breakdown=el('details','sm-injection-breakdown');
     breakdown.append(el('summary','sm-entity-history-heading',
-      '注入预算 · 约 '+usage.usedTokens+' / '+usage.budgetTokens+' Tokens'));
+      '记忆用量 · 约 '+usage.usedTokens+' / '+usage.budgetTokens+' Tokens'));
     const breakdownList=el('div','sm-injection-breakdown-list');
     for(const section of usage.sections||[]){
       const row=el('div','sm-injection-breakdown-row');
@@ -1068,9 +1068,9 @@ export function mountUI(api){
     content.append(breakdown);
     const footer=el('div','sm-record-modal-footer');
     if(hasSnapshot){
-      const toggle=button('查看上轮扩展注入',()=>{
+      const toggle=button('查看上轮扩展发送',()=>{
         showSnapshot=!showSnapshot;
-        toggle.textContent=showSnapshot?'返回模拟预览':'查看上轮扩展注入';
+        toggle.textContent=showSnapshot?'返回模拟预览':'查看上轮扩展发送';
         update();
       },'sm-btn');
       footer.append(toggle);

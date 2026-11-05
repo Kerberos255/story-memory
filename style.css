@@ -131,9 +131,9 @@
 .sm-accordion-head{display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;
   padding:15px 19px;cursor:pointer;min-height:62px}
 .sm-accordion-head:hover{background:var(--hover)}
-.sm-accordion-copy{display:flex;flex-direction:column;gap:2px}
+.sm-accordion-copy{display:flex;flex-direction:column;gap:2px;min-width:0}
 .sm-accordion-copy strong{font-weight:660;font-size:14px}
-.sm-accordion-copy small{color:var(--muted);font-size:12px}
+.sm-accordion-copy small{color:var(--muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
 .sm-accordion-head svg{width:16px;color:var(--muted);transition:transform .2s}
 .sm-accordion[open] .sm-accordion-head svg{transform:rotate(180deg)}
 .sm-accordion-body{border-top:1px solid var(--edge);padding:19px;display:grid;gap:16px}

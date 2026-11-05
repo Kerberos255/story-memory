@@ -563,7 +563,7 @@ test('memory retrieval groups historical and semantic search while hiding vector
  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
  const groups=walk(dialog).filter(x=>x.className==='sm-accordion');
  assert.deepEqual(groups.map(g=>walk(g).find(x=>x.tag==='strong')?.textContent),[
-   '摘要 API','摘要设置','记忆检索','注入设置','自定义提示词'
+   '摘要 API','摘要设置','记忆检索','记忆发送','提示配置'
  ]);
  const retrieval=groups[2],inject=groups[3];
  assert.equal(retrieval.tag,'details');
@@ -854,7 +854,7 @@ test('injection preview opens a centered dialog without navigating away or losin
   find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
   const form=find(dialog,x=>x.tag==='main'),input=find(form,x=>x.tag==='input'&&x.placeholder==='自动');
   assert.ok(input);input.value='7777';form.scrollTop=156;
-  const button=find(form,x=>x.tag==='button'&&x.textContent==='查看注入预览');
+  const button=find(form,x=>x.tag==='button'&&x.textContent==='预览发送内容');
   assert.ok(button);button.fire('click');
   const overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
   assert.ok(overlay);
@@ -918,15 +918,15 @@ test('plans injection is independent from narrative and character toggles',()=>w
   const planSwitch=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='计划与伏笔'));
   assert.ok(planSwitch);
   assert.equal(find(planSwitch,x=>x.tag==='input').checked,true);
-  const preview=find(dialog,x=>x.tag==='button'&&x.textContent==='查看注入预览');
+  const preview=find(dialog,x=>x.tag==='button'&&x.textContent==='预览发送内容');
   preview.fire('click');
-  let value=find(dialog,x=>x.tag==='textarea'&&x.attrs['aria-label']==='注入预览内容').value;
+  let value=find(dialog,x=>x.tag==='textarea'&&x.attrs['aria-label']==='发送预览内容').value;
   assert.match(value,/计划与伏笔/);assert.match(value,/【剧情摘要】/);
   find(dialog,x=>x.className==='sm-record-modal-overlay').fire('click',{target:find(dialog,x=>x.className==='sm-record-modal-overlay')});
   find(planSwitch,x=>x.tag==='input').checked=false;
   find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
   preview.fire('click');
-  value=find(dialog,x=>x.tag==='textarea'&&x.attrs['aria-label']==='注入预览内容').value;
+  value=find(dialog,x=>x.tag==='textarea'&&x.attrs['aria-label']==='发送预览内容').value;
   assert.doesNotMatch(value,/【计划与伏笔】/);
 }));
 
@@ -940,7 +940,7 @@ test('preview honors unsaved history retrieval changes without saving unrelated 
   const view=mountUI(api);view.open();
   const dialog=body.children[0].shadow.children[1];
   find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
-  const button=find(dialog,x=>x.tag==='button'&&x.textContent==='查看注入预览');
+  const button=find(dialog,x=>x.tag==='button'&&x.textContent==='预览发送内容');
   button.fire('click');
   let overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
   assert.ok(walk(overlay).some(x=>x.tag==='textarea'&&x.value.includes('遥远的记忆片段')));
@@ -1042,11 +1042,11 @@ test('injection viewer distinguishes simulated content from last generation subm
     queue:{busy:false,enqueueMissing(){}},previewHistory:()=>[]});
   view.open();const dialog=body.children[0].shadow.children[1];
   find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
-  find(dialog,x=>x.tag==='button'&&x.textContent==='查看注入预览').fire('click');
+  find(dialog,x=>x.tag==='button'&&x.textContent==='预览发送内容').fire('click');
   const overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
   const text=find(overlay,x=>x.tag==='textarea');
   assert.ok(!text.value.includes('实际提交'));
-  const toggle=find(overlay,x=>x.tag==='button'&&x.textContent==='查看上轮扩展注入');
+  const toggle=find(overlay,x=>x.tag==='button'&&x.textContent==='查看上轮扩展发送');
   assert.ok(toggle);toggle.fire('click');
   assert.equal(text.value,'【实际提交】\n过去的剧情摘要');
   assert.ok(walk(overlay).some(x=>x.className==='sm-preview-counter'&&x.textContent.includes('上轮生成时提交')));
@@ -1131,11 +1131,11 @@ test('injection preview reveals per-section budget in a collapsed drawer',()=>wi
     queue:{busy:false,enqueueMissing(){}},previewHistory:()=>[]});
   view.open();const dialog=body.children[0].shadow.children[1];
   find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
-  find(dialog,x=>x.tag==='button'&&x.textContent==='查看注入预览').fire('click');
+  find(dialog,x=>x.tag==='button'&&x.textContent==='预览发送内容').fire('click');
   const drawer=find(dialog,x=>x.className==='sm-injection-breakdown');
   assert.ok(drawer);
   assert.equal(drawer.open,false);
-  assert.ok(walk(drawer).some(x=>String(x.textContent||'').includes('注入预算')));
+  assert.ok(walk(drawer).some(x=>String(x.textContent||'').includes('记忆用量')));
 }));
 
 test('plans, items, scenes and characters share tidy metadata and closed utility rows',()=>withUI(body=>{
@@ -1184,4 +1184,39 @@ test('plans, items, scenes and characters share tidy metadata and closed utility
   assert.match(css,/\.sm-entity-facts\{display:flex;flex-wrap:wrap/);
   assert.match(css,/\.sm-entity-fact-value\{min-width:0;overflow-wrap:anywhere/);
   assert.match(css,/\.sm-record-status\{flex-shrink:0;max-width/);
+}));
+
+test('settings show consistent concise Chinese labels and readable preview naming',()=>withUI(body=>{
+  const view=mountUI({context:()=>({chat:[],chatMetadata:{},getCurrentChatId:()=>''}),
+    memory:freshMemory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},previewHistory:()=>[]});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  const headings=walk(dialog).filter(x=>x.className==='sm-accordion')
+    .map(group=>walk(group).find(x=>x.tag==='strong')?.textContent);
+  assert.deepEqual(headings,['摘要 API','摘要设置','记忆检索','记忆发送','提示配置']);
+  assert.ok(headings.slice(1).every(x=>x.length===4),
+    'non-API settings headings should share the same visual width');
+  assert.ok(walk(dialog).some(x=>x.textContent==='启用剧情记忆'));
+  assert.ok(walk(dialog).some(x=>x.textContent==='自定义楼层摘要与分层总结提示词'));
+  assert.ok(walk(dialog).some(x=>x.textContent==='记忆长度上限（约 Tokens）'));
+  const send=walk(dialog).find(x=>x.className==='sm-accordion'&&
+    walk(x).some(y=>y.tag==='strong'&&y.textContent==='记忆发送'));
+  assert.equal(walk(send).filter(x=>x.className==='sm-switch-row').length,4);
+  const preview=find(send,x=>x.tag==='button'&&x.textContent==='预览发送内容');
+  assert.ok(preview);
+  assert.ok(!walk(dialog).some(x=>['启用记忆引擎','注入设置','自定义提示词',
+    'RP 记忆预算（近似 Tokens）','查看注入预览'].includes(x.textContent)));
+  preview.fire('click');
+  const modal=find(dialog,x=>x.className==='sm-record-modal sm-preview-modal');
+  assert.ok(modal);
+  assert.ok(walk(modal).some(x=>x.className==='sm-record-modal-title'&&x.textContent==='发送预览'));
+  assert.ok(walk(modal).some(x=>x.tag==='textarea'&&x.attrs['aria-label']==='发送预览内容'));
+  assert.ok(walk(modal).some(x=>String(x.textContent||'').includes('记忆用量 · 约')));
+  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+  assert.match(css,/\.sm-accordion-head\{display:flex;align-items:center;justify-content:space-between;gap:12px/);
+  assert.match(css,/\.sm-accordion-copy\{display:flex;flex-direction:column;gap:2px/);
+  assert.match(css,/\.sm-accordion-copy\{[^}]*min-width:0/);
+  assert.match(css,/\.sm-accordion-copy small\{[^}]*overflow-wrap:anywhere/);
+  assert.match(css,/@media\(max-width:700px\)[\s\S]*\.sm-fields-grid,\.sm-switch-grid\{grid-template-columns:1fr\}/);
 }));
