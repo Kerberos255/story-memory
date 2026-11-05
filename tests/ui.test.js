@@ -46,7 +46,7 @@ test('dark mode is default; sun and moon toggle persist without rebuilding form'
   const settings=find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置'));
   assert.ok(settings);settings.fire('click');
   const groups=walk(dialog).filter(x=>x.className==='sm-accordion');
-  assert.equal(groups.length,6,'settings must have 6 collapsible groups');
+  assert.equal(groups.length,5,'unified retrieval keeps settings at five top-level groups');
   const formInput=find(dialog,x=>x.tag==='input'&&x.value==='');
   assert.ok(formInput);
   formInput.value='custom-draft';
@@ -555,7 +555,7 @@ test('source button opens original message details without mutating archived mem
   assert.equal(memory.leaves[0].summary,'剧情摘要');
 }));
 
-test('settings cards stay in one consistent workflow and rerank options reveal only when enabled',()=>withUI(body=>{
+test('memory retrieval groups historical and semantic search while hiding vector setup by default',()=>withUI(body=>{
  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};let saved;
  const view=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
    queue:{busy:false,enqueueMissing(){}},saveSettings:s=>{saved=s;}});
@@ -563,29 +563,81 @@ test('settings cards stay in one consistent workflow and rerank options reveal o
  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
  const groups=walk(dialog).filter(x=>x.className==='sm-accordion');
  assert.deepEqual(groups.map(g=>walk(g).find(x=>x.tag==='strong')?.textContent),[
-   '摘要 API','摘要设置','历史检索','向量记忆','注入设置','自定义提示词'
+   '摘要 API','摘要设置','记忆检索','注入设置','自定义提示词'
  ]);
- const inject=groups[4],switches=walk(inject).filter(x=>x.className==='sm-switch-row');
+ const retrieval=groups[2],inject=groups[3];
+ assert.equal(retrieval.tag,'details');
+ const sections=walk(retrieval).filter(x=>x.className==='sm-memory-search-section');
+ assert.equal(sections.length,2);
+ assert.deepEqual(sections.map(x=>walk(x).find(y=>y.tag==='strong')?.textContent),
+   ['历史检索','语义检索']);
+ const historyToggle=find(sections[0],x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='自动查找历史'));
+ const semanticToggle=find(sections[1],x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='启用语义检索'));
+ assert.ok(historyToggle&&semanticToggle,'each search mode has an independent toggle');
+ assert.equal(find(historyToggle,x=>x.tag==='input').checked,true);
+ assert.equal(find(semanticToggle,x=>x.tag==='input').checked,false);
+ const config=find(retrieval,x=>x.className==='sm-memory-vector-config');
+ assert.ok(config,'vector API settings are inside memory retrieval');
+ assert.equal(config.tag,'details');
+ assert.equal(config.open,false,'technical settings are collapsed by default');
+ assert.equal(config.parent,sections[1]);
+ assert.equal(config.children[0].tag,'summary');
+ assert.ok(walk(config).some(x=>x.textContent==='向量模型配置'));
+ assert.ok(walk(config).some(x=>x.textContent==='Embedding API 密钥'));
+ assert.ok(walk(config).some(x=>x.textContent==='重排模型'));
+ const switches=walk(inject).filter(x=>x.className==='sm-switch-row');
  assert.equal(switches.length,6,'three balanced rows of optional injection switches');
-  assert.ok(!walk(inject).some(x=>x.textContent==='剧情摘要'),
-    'story summaries have no separate injection switch');
-  assert.equal(walk(inject).filter(x=>x.className==='sm-switch-grid').length,1);
+ assert.ok(!walk(inject).some(x=>x.textContent==='剧情摘要'),
+   'story summaries have no separate injection switch');
+ assert.equal(walk(inject).filter(x=>x.className==='sm-switch-grid').length,1);
  assert.ok(walk(inject).some(x=>x.textContent==='相关历史'));
-  assert.ok(walk(inject).some(x=>x.textContent==='计划与伏笔'));
- const rerank=walk(groups[3]).find(x=>x.className==='sm-vector-rerank');
- assert.ok(rerank,'reranking is visually separated from embeddings');
+ assert.ok(walk(inject).some(x=>x.textContent==='计划与伏笔'));
+ const rerank=find(config,x=>x.className==='sm-vector-rerank');
+ assert.ok(rerank);
  const fields=walk(rerank).find(x=>x.className==='sm-fields-grid');
- assert.equal(fields.hidden,true,'default-off reranker does not clutter the form');
+ assert.equal(fields.hidden,true,'rerank fields remain hidden when disabled');
  const toggle=walk(rerank).find(x=>x.tag==='input'&&x.type==='checkbox');
  toggle.checked=true;toggle.fire('change');
- assert.equal(fields.hidden,false,'enabling reranking reveals its inputs');
+ assert.equal(fields.hidden,false,'enabling rerank reveals its inputs');
  find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
  assert.equal(saved.vector.rerankEnabled,true);
+ assert.equal(saved.retrieval.enabled,true);
+ assert.equal(saved.vector.enabled,false);
  assert.equal(saved.injection.retrieval,true);
  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
- assert.match(css,/sm-vector-rerank\{border-top/);
+ assert.match(css,/\.sm-memory-search-section\{display:grid;gap:12px/);
+ assert.match(css,/\.sm-memory-vector-config\{min-width:0;/);
+ assert.match(css,/\.sm-memory-vector-config-body\{display:grid;gap:14px/);
  assert.match(css,/@media\(max-width:700px\)/);
  assert.match(css,/\.sm-fields-grid,\.sm-switch-grid\{grid-template-columns:1fr\}/);
+}));
+
+test('memory retrieval keeps old saved retrieval and vector settings independent',()=>withUI(body=>{
+ const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=> 'saved-search'};let saved;
+ const original=defaultSettings();original.retrieval={enabled:false,maxHits:7,maxSources:2};
+ original.vector={...original.vector,enabled:true,model:'custom-embedding-model',
+   key:'synthetic-vector-key',topK:3,rerankEnabled:true};
+ const view=mountUI({context:()=>ctx,memory:freshMemory,settings:()=>original,
+   queue:{busy:false,enqueueMissing(){}},saveSettings:s=>{saved=s;}});
+ view.open();const dialog=body.children[0].shadow.children[1];
+ find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+ const retrieval=find(dialog,x=>x.className==='sm-accordion'&&
+   walk(x).some(y=>y.tag==='strong'&&y.textContent==='记忆检索'));
+ const history=find(retrieval,x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='自动查找历史'));
+ const semantic=find(retrieval,x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='启用语义检索'));
+ assert.equal(find(history,x=>x.tag==='input').checked,false);
+ assert.equal(find(semantic,x=>x.tag==='input').checked,true);
+ const model=find(retrieval,x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='Embedding 模型'));
+ assert.equal(find(model,x=>x.tag==='input').value,'custom-embedding-model');
+ find(history,x=>x.tag==='input').checked=true;
+ find(semantic,x=>x.tag==='input').checked=false;
+ find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+ assert.deepEqual(saved.retrieval,{enabled:true,maxHits:7,maxSources:2});
+ assert.equal(saved.vector.enabled,false);
+ assert.equal(saved.vector.model,'custom-embedding-model');
+ assert.equal(saved.vector.key,'synthetic-vector-key');
+ assert.equal(saved.vector.topK,3);
+ assert.equal(saved.vector.rerankEnabled,true,'collapsing the technical panel must not reset its data');
 }));
 
 test('settings save shows a centered transient success card and keeps the form in place',()=>withUI(body=>{

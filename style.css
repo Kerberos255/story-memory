@@ -440,3 +440,32 @@
   .sm-entity-facts{gap:6px}
   .sm-entity-fact{font-size:11px}
 }
+
+/* Unified memory retrieval: independent search modes with optional vector setup. */
+.sm-memory-search-section{display:grid;gap:12px;min-width:0}
+.sm-memory-search-section+.sm-memory-search-section{padding-top:16px;border-top:1px solid var(--edge)}
+.sm-memory-search-heading{display:grid;gap:3px;min-width:0}
+.sm-memory-search-heading strong{font-size:13px;font-weight:680;color:var(--fg)}
+.sm-memory-search-heading small{font-size:11px;line-height:1.55;color:var(--muted);overflow-wrap:anywhere}
+.sm-memory-search-section>.sm-switch-row{padding:2px 0;min-width:0}
+.sm-memory-search-section>.sm-fields-grid{min-width:0}
+.sm-memory-vector-config{min-width:0;border:1px solid var(--edge);background:var(--surface-alt);border-radius:9px;overflow:hidden}
+.sm-memory-vector-config-head{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:12px 14px;cursor:pointer;list-style:none;min-width:0}
+.sm-memory-vector-config-head::-webkit-details-marker{display:none}
+.sm-memory-vector-config-head:hover{background:var(--hover)}
+.sm-memory-vector-config-head:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.sm-memory-vector-config-copy{display:grid;gap:2px;min-width:0}
+.sm-memory-vector-config-copy strong{font-size:12px;font-weight:650;color:var(--fg-weak)}
+.sm-memory-vector-config-copy small{font-size:11px;color:var(--muted);line-height:1.5;overflow-wrap:anywhere}
+.sm-memory-vector-config-head>svg{width:16px;flex-shrink:0;color:var(--muted);transition:transform .2s}
+.sm-memory-vector-config[open] .sm-memory-vector-config-head>svg{transform:rotate(180deg)}
+.sm-memory-vector-config-body{display:grid;gap:14px;min-width:0;padding:15px 14px;
+  border-top:1px solid var(--edge);background:var(--surface)}
+.sm-memory-vector-config-body>.sm-fields-grid{min-width:0}
+.sm-memory-vector-config-body>.sm-help{margin:0}
+.sm-memory-vector-config-body>.sm-row-actions{margin-top:0}
+@media(max-width:560px){
+  .sm-memory-vector-config-head{padding:11px 12px}
+  .sm-memory-vector-config-body{padding:13px 12px}
+}

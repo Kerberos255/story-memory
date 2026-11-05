@@ -858,11 +858,7 @@ export function mountUI(api){
     recallCount.input.min='1';recallCount.input.max='10';
     const sourceCount=field('最多补充原文',cfg.retrieval?.maxSources??3,'number');
     sourceCount.input.min='0';sourceCount.input.max='5';
-    box.append(accordion('retrieval','历史检索','找回相关剧情和原文细节',[
-      retrievalEnabled.wrapper,grid(recallCount.wrapper,sourceCount.wrapper)
-    ]));
-
-    const vector=switchRow('启用向量检索',cfg.vector.enabled);
+    const vector=switchRow('启用语义检索',cfg.vector.enabled);
     const vectorUrl=field('Embedding API 地址',cfg.vector.url||'https://api.siliconflow.cn/v1','url');
     const vectorKey=field('Embedding API 密钥',cfg.vector.key||'','password');
     vectorKey.input.autocomplete='new-password';
@@ -886,9 +882,33 @@ export function mountUI(api){
     rerank.input.addEventListener('change',()=>{rerankFields.hidden=!rerank.input.checked;});
     const rerankSection=el('div','sm-vector-rerank');
     rerankSection.append(rerank.wrapper,rerankFields);
-    box.append(accordion('vector','向量记忆','语义检索与重排',[
-      vector.wrapper,vectorUrl.wrapper,vectorKey.wrapper,vectorModel.wrapper,
-      grid(topK.wrapper,threshold.wrapper),rerankSection,vectorHelp,vectorActions
+    const historySection=el('section','sm-memory-search-section');
+    const historyHeading=el('div','sm-memory-search-heading');
+    historyHeading.append(el('strong','','历史检索'),
+      el('small','','按关键词与剧情关联找回旧记录，无需额外 API。'));
+    historySection.append(historyHeading,retrievalEnabled.wrapper,
+      grid(recallCount.wrapper,sourceCount.wrapper));
+
+    const semanticSection=el('section','sm-memory-search-section');
+    const semanticHeading=el('div','sm-memory-search-heading');
+    semanticHeading.append(el('strong','','语义检索'),
+      el('small','','可选增强：用向量模型找回语义相近的历史记忆。'));
+    semanticSection.append(semanticHeading,vector.wrapper);
+
+    const vectorConfig=el('details','sm-memory-vector-config');
+    const vectorConfigHead=el('summary','sm-memory-vector-config-head');
+    const vectorConfigCopy=el('span','sm-memory-vector-config-copy');
+    vectorConfigCopy.append(el('strong','','向量模型配置'),
+      el('small','','Embedding API、模型与重排参数'));
+    vectorConfigHead.append(vectorConfigCopy,svg('chevron'));
+    const vectorConfigBody=el('div','sm-memory-vector-config-body');
+    vectorConfigBody.append(vectorUrl.wrapper,vectorKey.wrapper,vectorModel.wrapper,
+      grid(topK.wrapper,threshold.wrapper),rerankSection,vectorHelp,vectorActions);
+    vectorConfig.append(vectorConfigHead,vectorConfigBody);
+    semanticSection.append(vectorConfig);
+
+    box.append(accordion('retrieval','记忆检索','找回与当前剧情相关的旧信息',[
+      historySection,semanticSection
     ]));
     box.append(injectionPanel);
 
