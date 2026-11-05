@@ -289,10 +289,26 @@ export function mountUI(api){
       const headingCopy=el('span','sm-record-heading');
       headingCopy.append(el('span','sm-record-label',value.title));
       if(value.subtitle)headingCopy.append(el('small','sm-record-subtitle',value.subtitle));
-      head.append(headingCopy,svg('chevron'));
-      details.append(head,el('p','sm-record-text',value.description||'暂无详情'));
+      head.append(headingCopy);
+      if(value.status){
+        const done=/^(?:已完成|完成|已解决|已关闭|已取消|已放弃|done|completed|resolved|closed|cancelled)$/i.test(String(value.status).trim());
+        head.append(el('span','sm-record-status'+(done?' is-complete':''),value.status));
+      }
+      head.append(svg('chevron'));
+      details.append(head);
+      if(value.description||!value.facts?.length)details.append(el('p','sm-record-text',value.description||'暂无详情'));
+      if(value.facts?.length){
+        const facts=el('div','sm-entity-facts');
+        for(const [label,content] of value.facts){
+          if(content===undefined||content===null||content==='')continue;
+          const fact=el('span','sm-entity-fact');
+          fact.append(el('span','sm-entity-fact-label',label+'：'),el('span','sm-entity-fact-value',content));
+          facts.append(fact);
+        }
+        if(facts.children.length)details.append(facts);
+      }
       if(value.meta)details.append(el('p','sm-record-state',value.meta));
-      if(detailFactory)details.append(detailFactory(entry));
+      if(detailFactory){const extra=detailFactory(entry);if(extra)details.append(extra);}
       if(type){
         const actions=el('div','sm-record-actions');
         const edit=button('编辑',()=>openRecordModal(entry,type,'edit',edit),'sm-btn sm-record-edit-button');
@@ -420,9 +436,13 @@ export function mountUI(api){
     manualInput('summaries');
   }
   function entityMergeControl(kind,entry,entries,aliases){
-    const panel=el('div','sm-entity-merge');
+    if(entries.length<2&&!aliases.length)return null;
+    const panel=el('details','sm-entity-history sm-entity-merge');
+    const heading=aliases.length?'合并称呼 · 已合并 '+aliases.length+' 个':'合并称呼';
+    panel.append(el('summary','sm-entity-history-heading',heading));
+    const inside=el('div','sm-entity-merge-content');
     if(entries.length>1){
-      const caption=el('div','sm-entity-hint','若另一条记录确实是同一实体，可以合并称呼；不会改写原始摘要。');
+      inside.append(el('p','sm-entity-hint','确认两条记录属于同一实体后再合并；不会修改原始摘要。'));
       const controls=el('div','sm-entity-controls');
       const picker=el('select','sm-input sm-select');
       picker.setAttribute('aria-label','合并到哪条记录');
@@ -439,7 +459,7 @@ export function mountUI(api){
         try{api.mergeEntity(kind,entry.entity_id,target.entity_id);showNotice('已合并同一实体');}
         catch(e){showNotice(e?.message||'合并失败');}
       },'sm-btn');
-      controls.append(picker,merge);panel.append(caption,controls);
+      controls.append(picker,merge);inside.append(controls);
     }
     if(aliases.length){
       const aliasBox=el('div','sm-entity-aliases');
@@ -453,8 +473,9 @@ export function mountUI(api){
         },'sm-btn'));
         aliasBox.append(row);
       }
-      panel.append(aliasBox);
+      inside.append(aliasBox);
     }
+    panel.append(inside);
     return panel;
   }
   function entityHistoryDetails(entry){
@@ -533,19 +554,29 @@ export function mountUI(api){
     title(heading,caption);
     const entries=(state[kind]||[]).filter(x=>!x.manual);
     const rules=Object.entries(mem.entityAliases?.[kind]||{});
-    recordCards('当前'+heading,entries,x=>({title:x.name,
-      subtitle:x.correctionStale?'新剧情已更新部分人工纠错':x.manualCorrection?'当前状态 · 人工确认':'',description:[
-      x.description,x.location&&'位置：'+x.location,x.owner&&'归属：'+x.owner,
-      x.relationship&&'关系：'+x.relationship,x.status,Number.isFinite(x.quantity)&&'数量：'+x.quantity,
-      kind==='characters'&&x.presence==='present'&&'当前在场',kind==='characters'&&x.presence==='absent'&&'当前不在场',
-      kind==='characters'&&x.knowledge?.length&&('知情：'+x.knowledge.map(k=>({knows:'知道',suspects:'怀疑',believes:'误信',hides:'隐瞒'}[k.stance]||k.stance)+'「'+k.fact+'」'+(k.provenance==='secondhand'?'（转述）':'')).join('；'))
-    ].filter(Boolean).join(' · ')}),null,x=>{
+    recordCards(kind==='plans'?'计划记录':'当前'+heading,entries,x=>({
+      title:x.name,
+      subtitle:x.correctionStale?'新剧情已更新部分人工纠错':x.manualCorrection?'当前状态 · 人工确认':'',
+      description:x.description||'',
+      status:x.status||'',
+      facts:[
+        ['位置',x.location],['归属',x.owner],['关系',x.relationship],
+        ['数量',Number.isFinite(x.quantity)?String(x.quantity):''],
+        ['时间',x.time],
+        ['在场',kind==='characters'&&x.presence==='present'?'当前在场':
+          kind==='characters'&&x.presence==='absent'?'当前不在场':''],
+        ['知情',kind==='characters'&&x.knowledge?.length?x.knowledge.map(k=>
+          ({knows:'知道',suspects:'怀疑',believes:'误信',hides:'隐瞒'}[k.stance]||k.stance)+
+          '「'+k.fact+'」'+(k.provenance==='secondhand'?'（转述）':'')).join('；'):'']
+      ].filter(([,value])=>value!==undefined&&value!==null&&value!=='')
+    }),null,x=>{
       const wrap=el('div','sm-entity-details');
-      wrap.append(entityHistoryDetails(x));
+      if(x.history?.length)wrap.append(entityHistoryDetails(x));
       wrap.append(entityCorrection(kind,x));
-      wrap.append(entityMergeControl(kind,x,entries,
+      const merge=entityMergeControl(kind,x,entries,
         rules.filter(([,rule])=>entityNameKey(rule.to)===entityNameKey(x.name))
-          .map(([,rule])=>rule)));
+          .map(([,rule])=>rule));
+      if(merge)wrap.append(merge);
       return wrap;
     });
     const warnings=state.ambiguities?.[kind]||[];

@@ -656,13 +656,22 @@ test('entity merge panel aligns with other full-width cards and preserves inline
     assert.equal(panel.parent.tag,'main');
     assert.ok(walk(panel).some(x=>x.textContent==='合并同一实体的不同称呼'));
     assert.ok(walk(panel).some(x=>x.className==='sm-btn sm-btn-primary sm-entity-merge-confirm'));
-    assert.ok(walk(list).some(x=>x.className==='sm-entity-merge'),'record-level merge retains its own controls');
-    assert.ok(walk(panel).every(x=>x.className!=='sm-entity-merge'),'outer panel no longer inherits narrow record spacing');
+    const nested=walk(list).find(x=>x.className==='sm-entity-history sm-entity-merge');
+    assert.ok(nested,'record merge is a compact accordion like history and correction');
+    assert.equal(nested.tag,'details');
+    assert.equal(nested.open,false,'merge controls stay collapsed by default');
+    assert.equal(nested.children[0].tag,'summary');
+    assert.ok(walk(nested).some(x=>x.className==='sm-entity-controls'));
+    assert.ok(walk(panel).every(x=>!x.className?.includes('sm-entity-merge-content')),
+      'full-width merge panel does not inherit record-only spacing');
   }
   const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
-  assert.match(css,/\.sm-record>\.sm-entity-merge\{margin:0 15px 15px;/);
+  assert.match(css,/\.sm-entity-details\{display:grid;gap:9px;padding:0 15px 15px/);
+  assert.match(css,/\.sm-entity-details>\.sm-entity-history\{margin:0/);
+  assert.match(css,/\.sm-entity-merge-content\{display:grid;gap:11px/);
   assert.match(css,/\.sm-entity-merge-panel \.sm-manual-content\{display:grid;gap:12px/);
-  assert.doesNotMatch(css,/(?:^|\n)\.sm-entity-merge\{margin:0 15px/m);
+  assert.match(css,/@media\(max-width:560px\)\{[\s\S]*\.sm-entity-controls\{grid-template-columns:minmax\(0,1fr\)/);
+  assert.doesNotMatch(css,/\.sm-record>\.sm-entity-merge\{/);
 }));
 
 test('long original story opens fully and older chapter floors load in pages',()=>withUI(body=>{
@@ -1070,4 +1079,52 @@ test('injection preview reveals per-section budget in a collapsed drawer',()=>wi
   assert.ok(drawer);
   assert.equal(drawer.open,false);
   assert.ok(walk(drawer).some(x=>String(x.textContent||'').includes('注入预算')));
+}));
+
+test('plans, items, scenes and characters share tidy metadata and closed utility rows',()=>withUI(body=>{
+  const chat=[{is_user:false,mes:'事件发生',swipe_id:0}];
+  const ctx={chat,getCurrentChatId:()=> 'entity-layout-all'};
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'记下四类实体',
+    items:[{op:'add',name:'银钥匙',location:'口袋'},{op:'add',name:'铜钥匙'}],
+    scenes:[{op:'add',name:'广场',location:'城内'},{op:'add',name:'花园'}],
+    characters:[{op:'add',name:'守卫',status:'受伤'},{op:'add',name:'旅人'}],
+    plans:[{op:'add',name:'找回钥匙',description:'钥匙已经找回。',status:'已完成',location:'广场',time:'上午'},
+      {op:'add',name:'修复城门',status:'进行中'}]
+  }));
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}}});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  const selectPage=label=>find(dialog,x=>x.className?.includes('sm-nav-item')&&
+    walk(x).some(y=>y.textContent===label)).fire('click');
+  for(const page of ['物品','场景','角色','计划']){
+    selectPage(page);
+    const current=find(dialog,x=>x.className==='sm-record-list');
+    const card=find(current,x=>x.className==='sm-record');
+    assert.ok(card,page+' needs a record card');
+    const details=find(card,x=>x.className==='sm-entity-details');
+    assert.ok(details);
+    const merge=find(details,x=>x.className==='sm-entity-history sm-entity-merge');
+    assert.ok(merge,page+' merge belongs to a collapsed details control');
+    assert.equal(merge.open,false);
+    assert.equal(merge.children[0].tag,'summary');
+    assert.ok(walk(details).every(x=>x.className!=='sm-entity-hint'||x.parent?.className==='sm-entity-merge-content'));
+  }
+  selectPage('计划');
+  const plans=find(dialog,x=>x.className==='sm-record-list');
+  const planCard=find(plans,x=>x.className==='sm-record');
+  assert.ok(walk(dialog).some(x=>x.tag==='h3'&&x.textContent==='计划记录'));
+  const status=find(planCard,x=>x.className?.startsWith('sm-record-status'));
+  assert.equal(status?.textContent,'已完成');
+  assert.ok(status.className.includes('is-complete'));
+  const description=find(planCard,x=>x.className==='sm-record-text');
+  assert.equal(description?.textContent,'钥匙已经找回。');
+  const facts=find(planCard,x=>x.className==='sm-entity-facts');
+  assert.ok(facts);
+  assert.ok(walk(facts).some(x=>x.textContent==='位置：'));
+  assert.ok(walk(facts).some(x=>x.textContent==='时间：'));
+  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+  assert.match(css,/\.sm-entity-facts\{display:flex;flex-wrap:wrap/);
+  assert.match(css,/\.sm-entity-fact-value\{min-width:0;overflow-wrap:anywhere/);
+  assert.match(css,/\.sm-record-status\{flex-shrink:0;max-width/);
 }));
