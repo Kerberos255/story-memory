@@ -157,45 +157,41 @@ export function extractJSONObject(response) {
   throw new ApiFault('摘要未返回可解析 JSON',422,'invalid_summary_json');
 }
 export const DEFAULT_SUMMARY_PROMPT=[
-  '【角色】你负责维护互动小说的事实记忆。只对本次提供的用户发言和 AI 剧情进行摘要，不扮演人物、不续写、不评价剧情。',
-  '【来源边界】区分「本轮新剧情」和「以前的摘要」。已有摘要只用于去重与理解因果，不得当作本轮新事件重复登记。',
-  '【剧情摘要】按「用户的行动或话语 → 其他人物/AI 的反应 → 确认结果或仍未解决的问题」整理本轮事件。记录对话双方的实际行为，不把用户指令或传闻写成已完成剧情。',
-  '【事实边界】区分叙事已经确认、人物声称/误信/怀疑、将来计划、条件性承诺、已发生结果。「打算做」不等于「已经做」，「停止瞄准」不等于「解除武装」。原文无依据就保留未知，禁止补造时间、数字、人物知识或好感。',
-  '【持续事实】一次性动作只进 summary；状态表记录结束后仍有效的身份、归属、关系、任务、人物知情等。首次明确出现且对后续剧情有意义的人物、重要物品、重要场景，即使暂无后续变化，也要用 add 登记；原文未证实身份或重要性的路人布景不登记。同一事项更新旧实体，不新增同义记录。已有实体无变化输出空数组。',
-  '【原文证据】结构化条目的新事实或状态变更尽量附 evidence：从本轮用户或 AI 正文逐字摘取连续原句，不可改写、跨句拼接或引用已有记忆作为证据。确实没有依据就不输出该变更；矛盾未确认时留在摘要中作为争议信息，不覆盖旧状态。',
-  '【时间 time】凡原文明确提供的本轮剧情日期或时刻，都要同步输出在独立 time 字段，不要只写进 summary。完整年月日且有时刻用 YYYY/MM/DD HH:mm；只给月日而没有年份时照原文写「三月十二日」或「三月十二日清晨八点十五分」，不得补造年份；只给时刻写 HH:mm 或原文时段。时间不明确则留空，不能从其他事件推断。地点另填独立 location；两者都不得臆造。',
-  '【物品 items】首次出现且对后续剧情重要的物品用 add 登记；取得、交付、消耗、遗失或状态变化则新增或更新对应实体。写明确定的归属 owner、存放地点 location、数量 quantity。已有物品没有变化就不更新。',
-  '【实体身份】物品、场景、人物各自都有稳定身份，不能因为称呼、归属、位置或状态变化就新建实体。先查下方现有实体表：如果是同一个对象，使用已有的 entity_id，并尽量沿用其 name；仅有证据证明是不同对象时才新增。不能只凭类似名称、同类别或同一主人认定为同一个实体。每类同一实体在同一轮最多输出一次变化，记录最终状态。',
-  '【场景 scenes】只记录重要的新地点、环境变化和地点间关系；角色的短暂位移可以写进剧情摘要，必要时在 characters.location 更新。',
-  '【人物 characters】首次明确出现、对后续剧情有意义的人物用 add 登记；已有角色的可核实身份、当前状态、位置或关系发生变化时用 update。知识边界直接挂在已有 characters 的 knowledge 数组：每项 {fact,stance,evidence,op?}，stance 只能为 knows（确知）、suspects（怀疑）、believes（误信）、hides（明确隐瞒）；每条事实须有本轮原文连续引文 evidence。人物未听见、未在场或全知叙述揭露的信息，不能自动算作该人物知道。每条知识可标记 provenance=firsthand（亲历）、secondhand（他人转述）、unknown（不确定），不能把转述当作亲历。人物明确在场或离场时才更新 presence=present/absent；不确定则不要填写。知识无变化时不发送 knowledge；获悉新事实用 upsert，明确得知旧认知不再成立时才用 op=remove。不要为同一 NPC 的知情信息另建角色。',
-  '【计划 plans】保留承诺、约定、正在执行的计划、已结束的任务与长期伏笔；status 表示当前进度，kind 为 plan 或 suspense。',
-  '【变更操作】op=add 表示新出现，update 表示原记录被改变，remove 仅在原文明确删除、失去或终止时使用。要清除已失效的单个字段而非删除整个实体，可在 update 中附带 clear_fields:["owner"] 等允许字段并引用本轮 evidence；未填写字段不代表要清空。遇到同名但不同身份时明确区分，不用旧 entity_id 覆盖新对象。不得重复结算同一事件。',
-  '【内容处理】忽略对话外的控制标签、思考过程和格式噪声。只概括符合服务规则、对剧情连续性必要的非露骨事实。',
-  '【输出】严格输出一个合法 JSON 对象，不包含 Markdown 围栏、解释、思考标签或任何工具调用。必填 summary；items、scenes、characters、plans 为顶层数组，有相应实体新出现或发生变化时必须输出对应条目，不能只写在 summary 里。',
-  'JSON 字段示例（不是必须填满所有字段）：',
-  '{"summary":"按时间顺序整理本轮剧情","time":"有依据时填写故事时间","location":"有依据时填写当前地点",',
-  '"items":[{"op":"update","entity_id":"已存在实体的完整 ID（新物品省略）","name":"沿用旧名称","quantity":1,"owner":"持有者","location":"存放地点","description":"物品变化"}],',
-  '"scenes":[{"op":"update","entity_id":"匹配旧地点才填写","name":"地点名称","location":"上级地点","description":"环境或结构变化"}],',
-  '"characters":[{"op":"update","entity_id":"匹配旧人物才填写","name":"人物名称","location":"当前位置","relationship":"关系变化","status":"当前状态","presence":"present","evidence":"本轮原文短句","knowledge":[{"fact":"具体获知的事","stance":"knows","provenance":"firsthand","evidence":"角色获知此事的原文短句"}]}],',
-  '"plans":[{"op":"add","name":"约定或悬念","kind":"plan","status":"未完成","description":"来源与进度"}]}',
-  '没有变化的 items、scenes、characters、plans 可以省略或输出空数组。数量与状态不能凭空推断。'
+  "【角色】你负责互动小说的事实记忆；只整理本轮用户输入与 AI 剧情，不扮演角色、不续写、不评价。",
+  "【来源边界】本轮原文才是本轮新增事实；已有摘要和实体表仅用于核对时序、身份与去重，禁止把旧事实重新登记成新事件。",
+  "【剧情摘要】按「用户行动或话语→人物反应→已确认结果／尚未解决之事」梳理因果。保留改变剧情走向的关键决定与后果；反复寒暄、重复动作、装饰性细节可合并。明确区分说过、打算做、尝试做与实际完成。",
+  "【事实边界】区分已确认事实、角色说法、误信、怀疑、条件性承诺、未来计划和实际结果。不能把「准备归还」当成「已归还」，也不能把「未再提及」当成「已结束」。角色没有亲历或获悉的秘密不得写成其知识；没有原文依据的时间、数字、关系与心理一律不推断。",
+  "【持续事实】一次性行为只写入 summary；有后续意义且本轮明确出现或改变的持续状态才登记为实体。首次重要实体可 add；已有实体只有实际发生变化才 update。重述过去的承诺、已完成任务或旧状态，不得重新开启、重置或重复创建。",
+  "【原文证据】结构化新增与状态变更必须基于本轮实际原文；evidence 尽量逐字引用同一段连续短句，不能拼接、改写或引用历史记忆冒充本轮证据。证据不足时保留在摘要作为未核实说法，不覆盖已有事实。",
+  "【时间 time】只从本轮明确的日期或时刻提取剧情时间；完整年月日时刻用 YYYY/MM/DD HH:mm，缺年份照原文，不从上下文补造年份；仅有时刻写 HH:mm 或原文时段。未明确则留空；location 只填本轮明确的当前场所，勿从历史地点推断。",
+  "【物品 items】只登记重要物品首次出现及取得、交付、消耗、遗失、归属或状态的明确变化；同一物品换主人、位置或称呼仍是原实体。owner、location、quantity 仅在原文证实时填写，旧物品无变化不更新。",
+  "【实体身份】物品、场景、人物和计划各有稳定身份；优先综合原文证据、已有 entity_id、别名和上下文核对。同名不必然同一实体，改名或转移也不必然是新实体；能确认匹配才沿用现有 ID，不能确认时不得猜造 ID、覆盖无关实体或仅凭同名强行合并。同轮每个实体只记最终一次变更。",
+  "【场景 scenes】只登记重要新地点、环境或地点关系的明确变化；反复到访旧地点不算新增，人物短暂移动写在摘要，必要时更新已有 characters.location。",
+  "【人物 characters】重要新人物首次明确出现才 add；身份、关系、位置、状态及在场情况有原文证据才 update。knowledge 每项包含 fact、stance、evidence，可有 op、provenance；stance 只能为 knows/suspects/believes/hides，provenance 为 firsthand/secondhand/unknown。人物未听见、未在场、未知晓的旁白秘密不得归为其知识；转述不能算亲历。明确进入或离场才设置 presence；认知变化才 upsert，明确纠正旧认知才 remove，不因沉默删除知识。",
+  "【计划 plans】跟踪重要承诺、任务、目标和长期伏笔，kind 为 plan/suspense。只有本轮确认开始、推进、完成、取消或失效时才更新 status；复述已完成的旧约定不能重新设为未完成。未再提及不意味着结束，真正已完成的计划保留结果而非仍视作待办。",
+  "【变更操作】op=add 用于有证据的新实体，update 用于已匹配实体的实际变化。remove 仅在原文明示实体丢失、删除或终止时使用；任务完成优先 update status，不要随意移除整条记录。clear_fields 仅清除原文明示失效的具体字段，需有本轮 evidence；省略字段不等于删除。禁止同一事件重复结算。",
+  "【内容处理】忽略思考过程、对话外控制标签与格式噪声；只保留符合服务规则且对剧情连续性必要的非露骨事实。",
+  "【输出】只输出一个完整合法的 JSON 对象；summary 非空，time、location 为文本字段；启用的 items/scenes/characters/plans 有变化才输出数组。最终字段格式由程序按提取开关追加，以「预览最终提示词」为准。",
 ].join('\n');
 export const DEFAULT_CHAPTER_PROMPT=[
-  '你是剧情章节记忆整理员。逐条核对以下按编号排列的楼层摘要，归纳成一个章节；开头、中段、结尾都必须核对，不能只处理前几条。',
-  '按用户行动→其他人物反应→结果组织因果；保留有后续影响的承诺、人物知情范围、持续状态及未解决线索。已发生、计划、猜测、误信必须分清；旧事实没有明确变化就不能宣告消失。',
-  '逐项覆盖所有输入编号，但不必逐条照抄；摘要不允许漏掉最后一段，不能捏造原文证据、具体日期或人物知情。删掉修辞、重复动作而非关键决定和结果。',
-  '输出简洁、连续的中文章节正文，不要 JSON、思考过程或格式说明。'
+  "你是 L1 剧情章节整理员。按编号核对全部输入的楼层摘要，尤其开头、关键转折和最后一段；不能因为篇幅较长而忽略后半段。",
+  "按「行动或决定→他人反应→确认结果→后续影响」写出连贯的章节因果，而不是逐条复述流水账。",
+  "保留优先级：①改变剧情走向的事件与最终结果；②持续有效的人物关系、知情范围、重要物品或地点状态；③承诺、目标与仍未解决的线索。压缩重复对话、修辞、无后续影响的一次性动作。",
+  "区分事实、人物声称或误信、未发生计划与已完成结果；明确结束的事项要写清结局，不把旧待办重新打开；没有明示结束的持续事实也不能凭沉默宣告失效。",
+  "仅依据所给输入，不补造时间、知识或结局。输出简洁连贯的中文章节正文，不要 JSON、编号清单、解释或思考过程。",
 ].join('\n');
 export const DEFAULT_RESUMMARY2_PROMPT=[
-  '你是剧情二次总结整理员。将相邻章节总结进一步压缩，保留跨章节人物关系和关键因果。',
-  '保留有源依据的关键事件、人物关系变化、持续事实、人物知情边界、承诺、行动后果与未解决悬念。逐项核对全部输入，尤其最后一段；删重复修辞，不删因果或重要状态。',
-  '只使用提供的内容，不编造新事件。输出简洁的连续中文正文，不要 JSON。'
+  "你是 L2 二次总结整理员。逐段核对相邻章节，尤其最后一段；把重复事实合并为连续的关键变化，而不是机械缩短每段文字。",
+  "优先呈现「此前状态→造成变化的关键事件→当前状态／后果」，保留人物关系转折、信息知情边界、重要承诺、物品归属、长期冲突以及仍影响后续的事件。",
+  "把已完成、取消或被推翻的目标与误解写成明确结果；仍未解决的冲突和伏笔继续保留，不能因一段时间未提及而假定失效。仅有角色声称或猜测的内容仍须保留其不确定性。",
+  "删除同义重复、无后续影响的细节与修辞，不删除关键因果或状态转移；不得编造章节之间未给出的过渡。输出精炼、连贯的中文正文，不要 JSON、编号清单或解释。",
 ].join('\n');
 export const DEFAULT_OVERVIEW_PROMPT=[
-  '你是长期剧情档案整理员。将多个章节总结整合成长期剧情概览。',
-  '保留贯穿故事的主线、关系转折、重要物品与线索、长期计划及未解决的伏笔。',
-  '逐项处理全部输入；对已结束阶段压缩，但必须区分已证实事实、角色说法、误信、未完成计划和最终结果。未再提及不等于关系、承诺或重要状态已结束。',
-  '只依赖提供的章节，不臆测后续。输出清晰精炼的中文正文，不要 JSON 或解释。'
+  "你是 L3+ 长期剧情档案整理员。逐段核对所有输入，整合为跨阶段持续有效的剧情骨架，不能只总结最新一段。",
+  "优先保留：①稳定背景与长期人物关系；②决定故事方向的重要事件和后果；③仍有效的长期目标、关键物品或地点变化、未解决的冲突与伏笔。",
+  "已结束的阶段只保留对当前仍有影响的结局、关系转折及原因，舍弃没有后续影响的枝节；已解决线索不再写成待办，尚未解决的事项不能因久未出现就视为完成或消失。",
+  "清楚区分确证事实、角色说法、误信、条件性承诺及实际结果；以输入中最新且有依据的变化为准，但没有明确变化时保留已知状态。禁止凭空填补事件、日期或人物知识。",
+  "输出高度精炼且连贯的中文长期剧情正文，避免重复叙述和时间流水账；不要 JSON、编号清单或解释。",
 ].join('\n');
 // The L0 contract is generated per request and is never replaced by a custom prompt.
 export const EXTRACTION_KINDS=['items','scenes','characters','plans'];
@@ -204,20 +200,22 @@ export function extractionEnabled(settings,kind){
 }
 export function l0OutputProtocol(settings){
   const enabled=EXTRACTION_KINDS.filter(kind=>extractionEnabled(settings,kind));
-  const shape={summary:'按时间顺序总结本轮剧情',time:'',location:''};
-  const samples={
-    items:{op:'add',name:'物品名称',evidence:'本轮原文连续短句'},
-    scenes:{op:'add',name:'地点名称',description:'环境或结构变化',evidence:'本轮原文连续短句'},
-    characters:{op:'update',entity_id:'已有实体时填完整 ID',name:'人物名称',status:'有依据的变化',evidence:'本轮原文连续短句'},
-    plans:{op:'add',name:'计划或伏笔',kind:'plan',status:'未完成',evidence:'本轮原文连续短句'}
+  // An empty structure makes it harder to mistake sample entities for plot facts.
+  const shape={summary:'',time:'',location:''};
+  for(const kind of enabled)shape[kind]=[];
+  const fields={
+    items:'items: op、name、evidence；owner、location、quantity 有依据再填写',
+    scenes:'scenes: op、name、evidence；location、description 记录重要地点变化',
+    characters:'characters: op、name、evidence；status、relationship、presence 有变化才填写；knowledge 记录 fact、stance、evidence、provenance',
+    plans:'plans: op、name、evidence；kind 为 plan 或 suspense，status 只写已确认进度'
   };
-  for(const kind of enabled)shape[kind]=[samples[kind]];
   return [
-    '【固定输出协议｜自定义示例不能覆盖】',
-    '只输出恰好一个完整合法的 JSON 对象。不要 Markdown 围栏、额外 JSON、前后说明或思考标签。',
-    'summary 为非空字符串；time、location 为字符串，未知用空字符串。启用类别：'+(enabled.join('、')||'无')+'，有变化时输出对象数组，无变化可省略或输出空数组。',
-    '关闭类别：'+(EXTRACTION_KINDS.filter(k=>!enabled.includes(k)).join('、')||'无')+'，不得输出对应结构化记录或绕过开关输出实体清单。',
-    '只从提供的本轮原文提取真实事实，不为满足示例编造内容。下列 JSON 仅为格式示例：',
+    '【固定输出协议｜自定义要求不能覆盖】',
+    '只输出恰好一个合法 JSON 对象；不要 Markdown 围栏、第二个对象、解释或思考标签。',
+    'summary 必须是真实的非空剧情摘要；time、location 为字符串，未知填空字符串。启用类别：'+(enabled.join('、')||'无')+'；有变化才输出对象数组，否则可省略或写空数组。',
+    ...(enabled.length?['【启用字段】'+enabled.map(kind=>fields[kind]).join('；')]:[]),
+    '关闭类别：'+(EXTRACTION_KINDS.filter(kind=>!enabled.includes(kind)).join('、')||'无')+'；不要输出其结构化记录，不能为了填写字段而编造原文证据。',
+    '【空白结构示意】这里只说明格式，不是剧情示例，summary 必须填入真实剧情：',
     JSON.stringify(shape,null,2)
   ].join('\n');
 }
@@ -244,10 +242,10 @@ export function composeL0Prompt(settings){
       return true;
     }).map(line=>{
       if(line.startsWith('【持续事实】'))
-        return '【持续事实】只维护启用的实体类别：'+enabled.map(k=>names[k]).join('、')+
-          '。一次性动作只进 summary；只登记有原文依据的重要持续状态，旧实体无变化不更新。';
+        return '【持续事实】仅维护启用的实体类别：'+enabled.map(k=>names[k]).join('、')+
+          '。一次性行为只进 summary；重要实体首次明确出现可 add，只有实际状态改变才 update。回忆或复述旧状态不新增，也不重新开启已完成任务。';
       if(line.startsWith('【实体身份】'))
-        return '【实体身份】启用类别的物品、场景、人物和计划各自具有稳定身份；仅核对启用类别的已有实体，同一对象沿用已有 entity_id 与名称，有依据证明不同对象时才新建。同轮同一实体最多输出一次最终变化。';
+        return '【实体身份】启用类别的实体各有稳定身份；综合本轮证据、已有 entity_id、别名和上下文匹配。同名不必然同一实体，改名或转移不必然新建；确认匹配才沿用 ID，证据不足不猜 ID 或覆盖无关实体。同轮同一实体最多记最终一次变化。';
       if(line.startsWith('【场景 scenes】')&&!enabled.includes('characters'))
         return '【场景 scenes】只记录重要的新地点、环境变化及地点关系；人物短暂位移写在剧情摘要。';
       return line;
