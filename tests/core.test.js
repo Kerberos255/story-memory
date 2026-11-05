@@ -50,7 +50,7 @@ test('NPC knowledge is an evidence-backed update on the existing character ident
 });
 test('injection skips over-budget full entries instead of slicing memory or JSON',()=>{
  const cfg=defaultSettings();cfg.injection.budget=400;cfg.summary.keepRecent=0;
- cfg.injection.vector=true;
+ cfg.vector.enabled=true;
  const chat=[{is_user:false,mes:'剧情',swipe_id:0}];
  let memory=freshMemory();
  memory.manual.summaries.push({id:'manual:large',text:'极长笔记开始'+ '甲'.repeat(1600)});
@@ -868,4 +868,27 @@ test('later plot deltas supersede only the manually corrected fields they change
   assert.equal(latest.relationship,'朋友','unrelated manual correction can remain');
   assert.equal(latest.correctionStale,true);
   assert.match(injectionText(mem,chat,defaultSettings()),/再次受伤/);
+});
+
+test('search switches alone control retrieval injection, including legacy false flags',()=>{
+ const cfg=defaultSettings();
+ assert.equal(Object.hasOwn(cfg.injection,'retrieval'),false);
+ assert.equal(Object.hasOwn(cfg.injection,'vector'),false);
+ // Old saved disabled-injection flags must not suppress an enabled search mode.
+ cfg.injection.retrieval=false;cfg.injection.vector=false;
+ const memory=freshMemory(),history=[{text:'故地的历史线索'}],vector=[{text:'远古语义线索'}];
+ const both=injectionText(memory,[],{...cfg,vector:{...cfg.vector,enabled:true}},vector,history);
+ assert.match(both,/【相关历史】/);
+ assert.match(both,/故地的历史线索/);
+ assert.match(both,/【相关旧记忆】/);
+ assert.match(both,/远古语义线索/);
+ const withoutHistory=injectionText(memory,[],{...cfg,retrieval:{...cfg.retrieval,enabled:false},
+   vector:{...cfg.vector,enabled:true}},vector,history);
+ assert.doesNotMatch(withoutHistory,/故地的历史线索/);
+ assert.match(withoutHistory,/远古语义线索/);
+ const withoutVector=injectionText(memory,[],{...cfg,vector:{...cfg.vector,enabled:false}},vector,history);
+ assert.match(withoutVector,/故地的历史线索/);
+ assert.doesNotMatch(withoutVector,/远古语义线索/);
+ const neither=injectionText(memory,[],{...cfg,retrieval:{...cfg.retrieval,enabled:false}},vector,history);
+ assert.doesNotMatch(neither,/故地的历史线索|远古语义线索/);
 });

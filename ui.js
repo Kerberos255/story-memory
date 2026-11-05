@@ -833,8 +833,7 @@ export function mountUI(api){
     ]));
 
     const flags=[['inventory','物品状态'],['scenes','场景地点'],
-      ['characters','人物档案'],['plans','计划与伏笔'],
-      ['retrieval','相关历史'],['vector','向量召回']]
+      ['characters','人物档案'],['plans','计划与伏笔']]
       .map(([key,label])=>[key,switchRow(label,cfg.injection[key]??(key==='plans'))]);
     const flagGroup=el('div','sm-switch-grid');
     flagGroup.append(...flags.map(([,x])=>x.wrapper));
@@ -849,11 +848,11 @@ export function mountUI(api){
         maxSources:Math.max(0,Math.min(5,Number(sourceCount.input.value)||0))};
       openInjectionPreview(previewButton,previewCfg);
     },'sm-btn');
-    const injectionPanel=accordion('inject','注入设置','选择发送给主模型的记忆',[
+    const injectionPanel=accordion('inject','注入设置','选择发送给主模型的实体记忆',[
       flagGroup,budget.wrapper,previewButton
     ]);
 
-    const retrievalEnabled=switchRow('自动查找历史',cfg.retrieval?.enabled!==false);
+    const retrievalEnabled=switchRow('启用历史检索',cfg.retrieval?.enabled!==false);
     const recallCount=field('最多参考记忆',cfg.retrieval?.maxHits??5,'number');
     recallCount.input.min='1';recallCount.input.max='10';
     const sourceCount=field('最多补充原文',cfg.retrieval?.maxSources??3,'number');
@@ -885,14 +884,14 @@ export function mountUI(api){
     const historySection=el('section','sm-memory-search-section');
     const historyHeading=el('div','sm-memory-search-heading');
     historyHeading.append(el('strong','','历史检索'),
-      el('small','','按关键词与剧情关联找回旧记录，无需额外 API。'));
+      el('small','','开启后检索并发送相关历史给主模型，无需额外 API。'));
     historySection.append(historyHeading,retrievalEnabled.wrapper,
       grid(recallCount.wrapper,sourceCount.wrapper));
 
     const semanticSection=el('section','sm-memory-search-section');
     const semanticHeading=el('div','sm-memory-search-heading');
     semanticHeading.append(el('strong','','语义检索'),
-      el('small','','可选增强：用向量模型找回语义相近的历史记忆。'));
+      el('small','','开启后用向量模型召回并发送相关记忆给主模型。'));
     semanticSection.append(semanticHeading,vector.wrapper);
 
     const vectorConfig=el('details','sm-memory-vector-config');
@@ -964,6 +963,8 @@ export function mountUI(api){
         next.injection.budget=Number(budget.input.value)||4500;
         for(const [key,value] of flags)next.injection[key]=value.input.checked;
         delete next.injection.summary;
+        delete next.injection.retrieval;
+        delete next.injection.vector;
         next.retrieval={enabled:retrievalEnabled.input.checked,
           maxHits:Math.max(1,Math.min(10,Number(recallCount.input.value)||5)),
           maxSources:Math.max(0,Math.min(5,Number(sourceCount.input.value)||0))};

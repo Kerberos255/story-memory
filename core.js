@@ -6,7 +6,7 @@ export function defaultSettings() {
   return {
     enabled: true, autoSummary: true, api: {name:'摘要 API',mode:'main',url:'',key:'',model:'',headers:{},exclude:[],include:{},maxTokens:null,thinkLevel:'auto',timeout:90,temperature:0},
     summary: {keepRecent:3,autoHide:true,delayFloors:3,leafBatchThreshold:12,leafKeepRecent:3,resummaryThreshold:6,higherResummaryThreshold:3,retry:1},
-    injection: {inventory:true,scenes:true,characters:true,plans:true,vector:false,retrieval:true,budget:4500},
+    injection: {inventory:true,scenes:true,characters:true,plans:true,budget:4500},
     retrieval: {enabled:true,maxHits:5,maxSources:3},
     prompts: {summary:'',summaryFull:'',chapter:'',resummary2:'',overview:''},
     vector: {enabled:false,url:'https://api.siliconflow.cn/v1',key:'',model:'BAAI/bge-m3',topK:5,threshold:0.35,rerankEnabled:false,rerankModel:'BAAI/bge-reranker-v2-m3',rerankCandidates:15}
@@ -592,7 +592,7 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
     add('【计划与伏笔】',confirmed);
     add('【历史计划（状态待核对，不代表当前待办；请以最新剧情为准）】',unverified);
   }
-  if(cfg.retrieval!==false&&settings.retrieval?.enabled!==false)
+  if(settings.retrieval?.enabled!==false)
     add('【相关历史】',historyHits.map(x=>note(x.text)));
   if(cfg.inventory)add('【物品】',(state.items||[]).slice(-45).map(entityLine));
   if(cfg.scenes)add('【场景】',(state.scenes||[]).slice(-45).map(entityLine));
@@ -604,7 +604,7 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
   add('【剧情摘要】',visible.map(x=>({text:(x.time?'['+x.time+'] ':'')+x.summary,identity:x.summary})));
   const roots=chapters.filter(c=>!nested.has(c.id)).slice(-12);
   add('【分层剧情记忆】',roots.map(x=>({text:'[L'+x.level+'] '+x.summary,identity:x.summary})));
-  if(cfg.vector)add('【相关旧记忆】',vectorHits.map(x=>note(x.text)));
+  if(settings.vector?.enabled)add('【相关旧记忆】',vectorHits.map(x=>note(x.text)));
   // This is a historical archive, not a turn in the live conversation.
   const archiveHeader='【历史剧情记忆｜非新发生的对话；若与后续实际剧情冲突，以较新的聊天记录为准】\n';
   const budget=Math.max(400,Math.min(18000,Number(cfg.budget)||4500))*3;

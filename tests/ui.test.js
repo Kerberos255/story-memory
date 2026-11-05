@@ -514,7 +514,7 @@ test('history search settings are simple, editable and retain defaults',()=>with
   find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
   const heading=walk(dialog).find(x=>x.textContent==='历史检索');
   assert.ok(heading);
-  const toggle=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='自动查找历史'));
+  const toggle=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='启用历史检索'));
   assert.ok(toggle);
   const check=walk(toggle).find(x=>x.tag==='input');
   assert.equal(check.checked,true);
@@ -571,7 +571,7 @@ test('memory retrieval groups historical and semantic search while hiding vector
  assert.equal(sections.length,2);
  assert.deepEqual(sections.map(x=>walk(x).find(y=>y.tag==='strong')?.textContent),
    ['历史检索','语义检索']);
- const historyToggle=find(sections[0],x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='自动查找历史'));
+ const historyToggle=find(sections[0],x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='启用历史检索'));
  const semanticToggle=find(sections[1],x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='启用语义检索'));
  assert.ok(historyToggle&&semanticToggle,'each search mode has an independent toggle');
  assert.equal(find(historyToggle,x=>x.tag==='input').checked,true);
@@ -586,11 +586,12 @@ test('memory retrieval groups historical and semantic search while hiding vector
  assert.ok(walk(config).some(x=>x.textContent==='Embedding API 密钥'));
  assert.ok(walk(config).some(x=>x.textContent==='重排模型'));
  const switches=walk(inject).filter(x=>x.className==='sm-switch-row');
- assert.equal(switches.length,6,'three balanced rows of optional injection switches');
+ assert.equal(switches.length,4,'only four entity-memory injection switches remain');
  assert.ok(!walk(inject).some(x=>x.textContent==='剧情摘要'),
    'story summaries have no separate injection switch');
  assert.equal(walk(inject).filter(x=>x.className==='sm-switch-grid').length,1);
- assert.ok(walk(inject).some(x=>x.textContent==='相关历史'));
+ assert.ok(!walk(inject).some(x=>['相关历史','向量召回'].includes(x.textContent)));
+ assert.equal(walk(inject).filter(x=>x.className==='sm-switch-row').length,4);
  assert.ok(walk(inject).some(x=>x.textContent==='计划与伏笔'));
  const rerank=find(config,x=>x.className==='sm-vector-rerank');
  assert.ok(rerank);
@@ -603,7 +604,8 @@ test('memory retrieval groups historical and semantic search while hiding vector
  assert.equal(saved.vector.rerankEnabled,true);
  assert.equal(saved.retrieval.enabled,true);
  assert.equal(saved.vector.enabled,false);
- assert.equal(saved.injection.retrieval,true);
+ assert.ok(!Object.hasOwn(saved.injection,'retrieval'));
+ assert.ok(!Object.hasOwn(saved.injection,'vector'));
  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
  assert.match(css,/\.sm-memory-search-section\{display:grid;gap:12px/);
  assert.match(css,/\.sm-memory-vector-config\{min-width:0;/);
@@ -615,6 +617,7 @@ test('memory retrieval groups historical and semantic search while hiding vector
 test('memory retrieval keeps old saved retrieval and vector settings independent',()=>withUI(body=>{
  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=> 'saved-search'};let saved;
  const original=defaultSettings();original.retrieval={enabled:false,maxHits:7,maxSources:2};
+ original.injection.retrieval=false;original.injection.vector=false;
  original.vector={...original.vector,enabled:true,model:'custom-embedding-model',
    key:'synthetic-vector-key',topK:3,rerankEnabled:true};
  const view=mountUI({context:()=>ctx,memory:freshMemory,settings:()=>original,
@@ -623,7 +626,7 @@ test('memory retrieval keeps old saved retrieval and vector settings independent
  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
  const retrieval=find(dialog,x=>x.className==='sm-accordion'&&
    walk(x).some(y=>y.tag==='strong'&&y.textContent==='记忆检索'));
- const history=find(retrieval,x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='自动查找历史'));
+ const history=find(retrieval,x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='启用历史检索'));
  const semantic=find(retrieval,x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='启用语义检索'));
  assert.equal(find(history,x=>x.tag==='input').checked,false);
  assert.equal(find(semantic,x=>x.tag==='input').checked,true);
@@ -638,6 +641,8 @@ test('memory retrieval keeps old saved retrieval and vector settings independent
  assert.equal(saved.vector.key,'synthetic-vector-key');
  assert.equal(saved.vector.topK,3);
  assert.equal(saved.vector.rerankEnabled,true,'collapsing the technical panel must not reset its data');
+ assert.equal(Object.hasOwn(saved.injection,'retrieval'),false);
+ assert.equal(Object.hasOwn(saved.injection,'vector'),false);
 }));
 
 test('settings save shows a centered transient success card and keeps the form in place',()=>withUI(body=>{
@@ -940,7 +945,7 @@ test('preview honors unsaved history retrieval changes without saving unrelated 
   let overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
   assert.ok(walk(overlay).some(x=>x.tag==='textarea'&&x.value.includes('遥远的记忆片段')));
   find(overlay,x=>x.tag==='button'&&x.textContent==='关闭').fire('click');
-  const history=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='自动查找历史'));
+  const history=walk(dialog).find(x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='启用历史检索'));
   assert.ok(history);
   const checkbox=find(history,x=>x.tag==='input');checkbox.checked=false;
   button.fire('click');

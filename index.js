@@ -22,11 +22,17 @@ function getSettings(){
       vector:{...base.vector,...raw.vector},retrieval:{...base.retrieval,...raw.retrieval},
       prompts:{...base.prompts,...raw.prompts}};
   }else settings=base;
+  // Retire legacy per-section injection flags. Search toggles now control both
+  // retrieval and delivery; stale false flags must never silently block them.
+  delete settings.injection.retrieval;
+  delete settings.injection.vector;
   return settings;
 }
 function saveSettings(next){
   const ctx=getContext();if(!ctx?.extensionSettings)throw Error('SillyTavern 设置未就绪');
   settings=structuredClone(next);
+  delete settings.injection.retrieval;
+  delete settings.injection.vector;
   ctx.extensionSettings[SETTINGS_KEY]=settings;ctx.saveSettingsDebounced?.();
   inject();
 }
@@ -139,7 +145,7 @@ async function generateInterceptor(_chat,_contextSize,_abort,type){
   const latestUser=[...(ctx.chat||[])].reverse().find(x=>x?.is_user&&!x?.is_system);
   const query=String(latestUser?.mes||'');
   let vectors=[];
-  if(cfg.vector.enabled&&cfg.injection.vector&&query.trim()){
+  if(cfg.vector.enabled&&query.trim()){
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),11500);
     try{vectors=await recall(ctx,memory,cfg,query,controller.signal);}
     catch{/* Embedding outages must not prevent local historical search. */}
@@ -150,7 +156,7 @@ async function generateInterceptor(_chat,_contextSize,_abort,type){
   if(latestUser&&!current?.chat?.includes(latestUser))return;
   const activeMemory=current?.chatMetadata?.[META_KEY]===memory?memory:peekMemory(current);
   let history=[];
-  if(cfg.retrieval?.enabled!==false&&cfg.injection.retrieval!==false){
+  if(cfg.retrieval?.enabled!==false){
     try{
       const found=selectHistory(current,activeMemory,query,vectors,cfg.retrieval.maxHits);
       const limit=Math.max(0,Math.min(5,Number(cfg.retrieval?.maxSources??3)));
@@ -159,7 +165,7 @@ async function generateInterceptor(_chat,_contextSize,_abort,type){
         .map(row=>({key:row.key,text:'['+(row.kind==='floor'?'#'+row.sourceIndex:'历史摘要')+'] '+row.summary}))];
     }catch{/* Damaged indexes must not affect roleplay. */}
   }
-  inject(cfg.retrieval?.enabled!==false&&cfg.injection.retrieval!==false?[]:vectors,history,activeMemory,true);
+  inject(cfg.retrieval?.enabled!==false?[]:vectors,history,activeMemory,true);
 }
 // SillyTavern calls this by manifest name during user generation.
 globalThis.storyMemoryGenerationInterceptor=generateInterceptor;
