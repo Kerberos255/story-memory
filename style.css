@@ -443,6 +443,9 @@
 
 /* Unified memory retrieval: independent search modes with optional vector setup. */
 .sm-memory-search-section{display:grid;gap:12px;min-width:0}
+.sm-extraction-panel{display:grid;gap:12px;min-width:0;padding-bottom:16px;border-bottom:1px solid var(--edge)}
+.sm-extraction-grid{min-width:0}
+.sm-prompt-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;min-width:0}
 .sm-memory-search-section+.sm-memory-search-section{padding-top:16px;border-top:1px solid var(--edge)}
 .sm-memory-search-heading{display:grid;gap:3px;min-width:0}
 .sm-memory-search-heading strong{font-size:13px;font-weight:680;color:var(--fg)}

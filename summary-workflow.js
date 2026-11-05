@@ -1,5 +1,6 @@
 // Request-sized chunks are internal safeguards, not model limits or user settings.
-import {ApiFault,requestChat,extractJSONObject,buildSummaryMessages,buildChapterMessages} from './api.js';
+import {ApiFault,requestChat,buildSummaryMessages,buildChapterMessages,
+  parseL0Response,repairL0Messages} from './api.js';
 import {floorUserMessages,normalizeDelta} from './core.js';
 
 const SOURCE_CHUNK=14000,MERGE_INPUT=13000,MAX_PARTS=64;
@@ -66,9 +67,20 @@ async function combineNarratives(sections,settings,ctx,signal){
         {role:'system',content:MERGE_PROMPT},
         {role:'user',content:source}
       ],ctx,signal);
-      const parsed=extractJSONObject(answer);
-      if(typeof parsed.summary!=='string'||!parsed.summary.trim())
-        throw new ApiFault('合并摘要缺少正文',422,'invalid_merged_summary');
+      // Long-floor merges use the same strict single-object parser as L0.
+      // Never choose the first of several JSON samples as the real narrative.
+      let parsed;
+      try{parsed=parseL0Response(answer,settings);}
+      catch(err){
+        if(!(err instanceof ApiFault)||
+          !['invalid_summary_json','invalid_summary_shape'].includes(err.code)||
+          answer.length>16000||signal?.aborted)throw err;
+        const fixed=await requestChat(settings.api,[
+          {role:'system',content:'只修复 JSON 格式，不重新总结或新增事实。输出恰好一个合法 JSON 对象，唯一字段 summary，必须为原有摘要正文。'},
+          {role:'user',content:'【待修复的合并摘要输出】\n'+answer}
+        ],ctx,signal);
+        parsed=parseL0Response(fixed,settings);
+      }
       next.push(parsed.summary.trim());
     }
     if(next.length>=current.length && next.join('').length>=current.join('').length)
@@ -91,7 +103,18 @@ export async function summarizeFloor(index,ctx,memory,settings,signal){
     try{
       const messages=buildSummaryMessages(index,ctx.chat,memory,settings,part);
       const raw=await requestChat(settings.api,messages,ctx,signal);
-      results.push(normalizeDelta(extractJSONObject(raw),source));
+      let parsed;
+      try{parsed=parseL0Response(raw,settings);}
+      catch(err){
+        // One targeted format-only retry. Never repair ambiguous multi-object output,
+        // excessively large responses, upstream errors, or a cancelled request.
+        if(!(err instanceof ApiFault)||
+          !['invalid_summary_json','invalid_summary_shape'].includes(err.code)||
+          raw.length>16000||signal?.aborted)throw err;
+        const repaired=await requestChat(settings.api,repairL0Messages(raw,settings),ctx,signal);
+        parsed=parseL0Response(repaired,settings);
+      }
+      results.push(normalizeDelta(parsed,source,settings.extraction));
     }catch(err){
       // Only retry when the upstream clearly reports a context/payload-length issue.
       const sizeError=err instanceof ApiFault&&['request_too_large','context_length_exceeded'].includes(err.code);

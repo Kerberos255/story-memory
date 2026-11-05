@@ -1220,3 +1220,50 @@ test('settings show consistent concise Chinese labels and readable preview namin
   assert.match(css,/\.sm-accordion-copy small\{[^}]*overflow-wrap:anywhere/);
   assert.match(css,/@media\(max-width:700px\)[\s\S]*\.sm-fields-grid,\.sm-switch-grid\{grid-template-columns:1fr\}/);
 }));
+
+test('L0 extraction switches preserve drafts and preview exact model-facing prompt',()=>withUI(body=>{
+  const cfg=defaultSettings();let saved;
+  const view=mountUI({context:()=>({chat:[],chatMetadata:{},getCurrentChatId:()=> 'extraction-ui'}),
+    memory:freshMemory,settings:()=>cfg,saveSettings:value=>{saved=value;},
+    queue:{busy:false,enqueueMissing(){}}});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  const promptPanel=find(dialog,x=>x.className==='sm-accordion'&&
+    walk(x).some(y=>y.tag==='strong'&&y.textContent==='提示配置'));
+  assert.ok(promptPanel);
+  const extraction=find(promptPanel,x=>x.className==='sm-extraction-panel');
+  assert.ok(extraction);
+  const rows=walk(extraction).filter(x=>x.className==='sm-switch-row');
+  assert.equal(rows.length,4);
+  const labels=['提取物品','提取场景','提取人物','提取计划'];
+  assert.deepEqual(rows.map(row=>walk(row).find(x=>x.tag==='strong')?.textContent),labels);
+  assert.ok(rows.every(row=>find(row,x=>x.tag==='input').checked));
+  const first=find(promptPanel,x=>x.className==='sm-prompt-group');
+  const editor=find(first,x=>x.tag==='textarea');
+  assert.ok(editor.value.includes('【物品 items】'));
+  editor.value='只按事实摘要，别复制这个示例：{"summary":"示例"}';
+  find(rows[0],x=>x.tag==='input').checked=false;
+  find(rows[2],x=>x.tag==='input').checked=false;
+  const preview=find(first,x=>x.tag==='button'&&x.textContent==='预览最终提示词');
+  assert.ok(preview);preview.fire('click');
+  const overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+  const rendered=find(overlay,x=>x.tag==='textarea'&&x.attrs['aria-label']==='最终 L0 提示词');
+  assert.ok(rendered?.readOnly);
+  assert.ok(rendered.value.startsWith(editor.value));
+  assert.ok(rendered.value.includes('固定输出协议'));
+  assert.doesNotMatch(rendered.value,/"items":\s*\[/);
+  assert.doesNotMatch(rendered.value,/"characters":\s*\[/);
+  assert.match(rendered.value,/"scenes":\s*\[/);
+  assert.match(rendered.value,/"plans":\s*\[/);
+  find(overlay,x=>x.tag==='button'&&x.textContent==='关闭').fire('click');
+  assert.equal(saved,undefined,'preview must not save settings');
+  find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+  assert.equal(saved.extraction.items,false);
+  assert.equal(saved.extraction.scenes,true);
+  assert.equal(saved.extraction.characters,false);
+  assert.equal(saved.extraction.plans,true);
+  assert.equal(saved.prompts.summaryFull,editor.value);
+  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+  assert.match(css,/\.sm-extraction-panel\{[^}]*min-width:0/);
+  assert.match(css,/\.sm-prompt-actions\{[^}]*flex-wrap:wrap/);
+}));

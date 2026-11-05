@@ -6,6 +6,7 @@ export function defaultSettings() {
   return {
     enabled: true, autoSummary: true, api: {name:'摘要 API',mode:'main',url:'',key:'',model:'',headers:{},exclude:[],include:{},maxTokens:null,thinkLevel:'auto',timeout:90,temperature:0},
     summary: {keepRecent:3,autoHide:true,delayFloors:3,leafBatchThreshold:12,leafKeepRecent:3,resummaryThreshold:6,higherResummaryThreshold:3,retry:1},
+    extraction: {items:true,scenes:true,characters:true,plans:true},
     injection: {inventory:true,scenes:true,characters:true,plans:true,budget:4500},
     retrieval: {enabled:true,maxHits:5,maxSources:3},
     prompts: {summary:'',summaryFull:'',chapter:'',resummary2:'',overview:''},
@@ -152,7 +153,7 @@ export function leadingStoryTime(summary){
   const matched=head.match(new RegExp('^('+date+'(?:\\s*'+clock+')?|'+clock+')(?=[，,。；;、\\s]|$)'));
   return matched?matched[1].replace(/\s+/g,' ').trim():'';
 }
-export function normalizeDelta(raw,sourceText='') {
+export function normalizeDelta(raw,sourceText='',enabledKinds=null) {
   if(!raw||typeof raw!=='object'||Array.isArray(raw))throw Error('摘要 JSON 必须是对象');
   const summary=typeof raw.summary==='string'?raw.summary.trim():'';
   if(!summary)throw Error('缺少 summary');
@@ -162,6 +163,7 @@ export function normalizeDelta(raw,sourceText='') {
   // Prefer the explicit top-level field and normalize both formats through the same validation.
   const candidates=[raw,raw.delta,raw.entities,raw.state].filter(x=>x&&typeof x==='object'&&!Array.isArray(x));
   for(const kind of Object.keys(delta)){
+    if(enabledKinds?.[kind]===false)continue;
     const values=candidates.find(x=>x[kind]!==undefined)?.[kind];
     if(values!==undefined&&!Array.isArray(values))throw Error(kind+' 必须为数组');
     for(const item of (values||[]).slice(0,35)){

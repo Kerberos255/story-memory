@@ -18,7 +18,8 @@ function getSettings(){
   const base=defaultSettings();
   if(raw&&typeof raw==='object'){
     settings={...base,...raw,api:{...base.api,...raw.api},
-      summary:{...base.summary,...raw.summary},injection:{...base.injection,...raw.injection},
+      summary:{...base.summary,...raw.summary},extraction:{...base.extraction,...raw.extraction},
+      injection:{...base.injection,...raw.injection},
       vector:{...base.vector,...raw.vector},retrieval:{...base.retrieval,...raw.retrieval},
       prompts:{...base.prompts,...raw.prompts}};
   }else settings=base;

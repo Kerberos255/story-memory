@@ -197,6 +197,108 @@ export const DEFAULT_OVERVIEW_PROMPT=[
   '逐项处理全部输入；对已结束阶段压缩，但必须区分已证实事实、角色说法、误信、未完成计划和最终结果。未再提及不等于关系、承诺或重要状态已结束。',
   '只依赖提供的章节，不臆测后续。输出清晰精炼的中文正文，不要 JSON 或解释。'
 ].join('\n');
+// The L0 contract is generated per request and is never replaced by a custom prompt.
+export const EXTRACTION_KINDS=['items','scenes','characters','plans'];
+export function extractionEnabled(settings,kind){
+  return settings.extraction?.[kind]!==false;
+}
+export function l0OutputProtocol(settings){
+  const enabled=EXTRACTION_KINDS.filter(kind=>extractionEnabled(settings,kind));
+  const shape={summary:'按时间顺序总结本轮剧情',time:'',location:''};
+  const samples={
+    items:{op:'add',name:'物品名称',evidence:'本轮原文连续短句'},
+    scenes:{op:'add',name:'地点名称',description:'环境或结构变化',evidence:'本轮原文连续短句'},
+    characters:{op:'update',entity_id:'已有实体时填完整 ID',name:'人物名称',status:'有依据的变化',evidence:'本轮原文连续短句'},
+    plans:{op:'add',name:'计划或伏笔',kind:'plan',status:'未完成',evidence:'本轮原文连续短句'}
+  };
+  for(const kind of enabled)shape[kind]=[samples[kind]];
+  return [
+    '【固定输出协议｜自定义示例不能覆盖】',
+    '只输出恰好一个完整合法的 JSON 对象。不要 Markdown 围栏、额外 JSON、前后说明或思考标签。',
+    'summary 为非空字符串；time、location 为字符串，未知用空字符串。启用类别：'+(enabled.join('、')||'无')+'，有变化时输出对象数组，无变化可省略或输出空数组。',
+    '关闭类别：'+(EXTRACTION_KINDS.filter(k=>!enabled.includes(k)).join('、')||'无')+'，不得输出对应结构化记录或绕过开关输出实体清单。',
+    '只从提供的本轮原文提取真实事实，不为满足示例编造内容。下列 JSON 仅为格式示例：',
+    JSON.stringify(shape,null,2)
+  ].join('\n');
+}
+export function composeL0Prompt(settings){
+  const enabled=EXTRACTION_KINDS.filter(kind=>extractionEnabled(settings,kind));
+  const names={items:'物品',scenes:'场景',characters:'人物',plans:'计划'};
+  const saved=settings.prompts?.summaryFull?.trim()||'';
+  // Existing saved copies of the built-in template remain dynamic defaults.
+  const custom=saved&&saved!==DEFAULT_SUMMARY_PROMPT;
+  let body;
+  if(custom)body=saved;
+  else{
+    body=DEFAULT_SUMMARY_PROMPT.split('\n').filter(line=>{
+      if(line.startsWith('【输出】')||line.startsWith('JSON 字段示例')||
+        line.startsWith('{"summary":')||line.startsWith('"items":')||
+        line.startsWith('"scenes":')||line.startsWith('"characters":')||
+        line.startsWith('"plans":')||line.startsWith('没有变化的 items'))return false;
+      if(line.startsWith('【物品 items】'))return enabled.includes('items');
+      if(line.startsWith('【场景 scenes】'))return enabled.includes('scenes');
+      if(line.startsWith('【人物 characters】'))return enabled.includes('characters');
+      if(line.startsWith('【计划 plans】'))return enabled.includes('plans');
+      if(['【持续事实】','【原文证据】','【实体身份】','【变更操作】']
+        .some(prefix=>line.startsWith(prefix)))return enabled.length>0;
+      return true;
+    }).map(line=>{
+      if(line.startsWith('【持续事实】'))
+        return '【持续事实】只维护启用的实体类别：'+enabled.map(k=>names[k]).join('、')+
+          '。一次性动作只进 summary；只登记有原文依据的重要持续状态，旧实体无变化不更新。';
+      if(line.startsWith('【实体身份】'))
+        return '【实体身份】启用类别的物品、场景、人物和计划各自具有稳定身份；仅核对启用类别的已有实体，同一对象沿用已有 entity_id 与名称，有依据证明不同对象时才新建。同轮同一实体最多输出一次最终变化。';
+      if(line.startsWith('【场景 scenes】')&&!enabled.includes('characters'))
+        return '【场景 scenes】只记录重要的新地点、环境变化及地点关系；人物短暂位移写在剧情摘要。';
+      return line;
+    }).join('\n');
+  }
+  return body+'\n\n'+l0OutputProtocol(settings);
+}
+/** Do not silently select the first JSON object if the model returned several. */
+export function parseL0Response(response,settings){
+  let input=String(response||'').trim().replace(/<thinking>[\s\S]*?<\/thinking>/gi,'').trim();
+  const fence=input.match(new RegExp('^\\x60{3}(?:json)?\\s*\\r?\\n([\\s\\S]*?)\\r?\\n\\x60{3}$','i'));
+  if(fence)input=fence[1].trim();
+  let data;
+  try{data=JSON.parse(input);}catch{
+    let start=-1,depth=0,quoted=false,escaped=false,objects=0;
+    for(let i=0;i<input.length;i++){
+      const ch=input[i];
+      if(start<0){if(ch==='{'){start=i;depth=1;}continue;}
+      if(quoted){if(escaped)escaped=false;else if(ch==='\\')escaped=true;else if(ch==='"')quoted=false;}
+      else if(ch==='"')quoted=true;
+      else if(ch==='{')depth++;
+      else if(ch==='}'&&--depth===0){
+        try{JSON.parse(input.slice(start,i+1));objects++;}catch{}
+        start=-1;
+      }
+    }
+    if(objects>1)throw new ApiFault('摘要包含多个 JSON 对象，为避免误存已拒绝',422,'multiple_summary_json');
+    throw new ApiFault('摘要未返回完整的单个 JSON 对象',422,'invalid_summary_json');
+  }
+  if(!data||typeof data!=='object'||Array.isArray(data)||
+    typeof data.summary!=='string'||!data.summary.trim()||
+    data.summary.trim()==='按时间顺序总结本轮剧情'||
+    (data.time!==undefined&&typeof data.time!=='string')||
+    (data.location!==undefined&&typeof data.location!=='string'))
+    throw new ApiFault('摘要 JSON 缺少正确的 summary/time/location 字段',422,'invalid_summary_shape');
+  const candidates=[data,data.delta,data.entities,data.state].filter(x=>x&&typeof x==='object'&&!Array.isArray(x));
+  for(const kind of EXTRACTION_KINDS){
+    if(!extractionEnabled(settings,kind))continue;
+    const value=candidates.find(row=>row[kind]!==undefined)?.[kind];
+    if(value!==undefined&&!Array.isArray(value))
+      throw new ApiFault('摘要 JSON 的 '+kind+' 必须是数组',422,'invalid_summary_shape');
+  }
+  return data;
+}
+export function repairL0Messages(raw,settings){
+  return [
+    {role:'system',content:'你只负责修复以下 L0 摘要结果的 JSON 格式，不要重新总结、增加事实或凭空补字段。若原内容不足以恢复摘要，不要编造。\n\n'+l0OutputProtocol(settings)},
+    {role:'user',content:'【仅待修复的模型输出，不是新剧情】\n'+String(raw||'')}
+  ];
+}
+
 export function effectiveSummaryPrompt(settings) {
   const full=settings.prompts?.summaryFull?.trim();
   if(full)return full;
@@ -216,7 +318,8 @@ export function buildSummaryMessages(index,chat,memory,settings,sourceOverride=n
   // A manual backfill must not expose future story events to earlier floors.
   const history={...memory,leaves:Object.fromEntries(Object.entries(memory.leaves||{}).filter(([floor])=>Number(floor)<index))};
   const state=deriveState(history,chat);
-  const kinds=[['items','物品',36],['scenes','场景',24],['characters','人物',36],['plans','计划',16]];
+  const kinds=[['items','物品',36],['scenes','场景',24],['characters','人物',36],['plans','计划',16]]
+    .filter(([kind])=>extractionEnabled(settings,kind));
   // Keep each catalog row complete; never cut a JSON entity record mid-field.
   let remaining=8500;
   const catalogSections=[];
@@ -240,7 +343,7 @@ export function buildSummaryMessages(index,chat,memory,settings,sourceOverride=n
     }
   }
   const catalog=catalogSections.join('\n\n');
-  const instruction=effectiveSummaryPrompt(settings);
+  const instruction=composeL0Prompt(settings);
   return [{role:'system',content:instruction},{role:'user',content:'【已有摘要，仅供去重】\n'+prior+'\n\n'+(catalog?catalog+'\n\n【实体引用要求】如为上述已有实体，请引用完全一致的 entity_id，保留统一名称；如无法确定则不要猜测 ID。\n\n':'')+source}];
 }
 export function buildChapterMessages(entries,settings,kind='chapter'){

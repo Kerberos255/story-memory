@@ -1,5 +1,5 @@
 import {defaultSettings,entityNameKey,formatStoryTime,leadingStoryTime,messageFingerprint,userFingerprint,pendingFloors,automaticFloorIndices,deriveState,injectionText,validChapters} from './core.js';
-import {DEFAULT_SUMMARY_PROMPT,DEFAULT_CHAPTER_PROMPT,DEFAULT_RESUMMARY2_PROMPT,DEFAULT_OVERVIEW_PROMPT,effectiveSummaryPrompt,parseExtraBody,parseExcluded,parseHeaderLines} from './api.js';
+import {DEFAULT_SUMMARY_PROMPT,DEFAULT_CHAPTER_PROMPT,DEFAULT_RESUMMARY2_PROMPT,DEFAULT_OVERVIEW_PROMPT,effectiveSummaryPrompt,composeL0Prompt,parseExtraBody,parseExcluded,parseHeaderLines} from './api.js';
 
 const NAV=[['summaries','摘要','book'],['items','物品','package'],['scenes','场景','pin'],
   ['characters','角色','users'],['plans','计划','target'],['settings','设置','sliders']];
@@ -911,13 +911,24 @@ export function mountUI(api){
     ]));
     box.append(injectionPanel);
 
+    const extractionSwitches=[['items','提取物品'],['scenes','提取场景'],
+      ['characters','提取人物'],['plans','提取计划']]
+      .map(([key,label])=>[key,switchRow(label,cfg.extraction?.[key]!==false)]);
+    const extractionPanel=el('section','sm-extraction-panel');
+    const extractionHeading=el('div','sm-memory-search-heading');
+    extractionHeading.append(el('strong','','实体提取'),
+      el('small','','控制 L0 是否新增和更新独立档案；旧记录保留，与「记忆发送」独立。'));
+    const extractionGrid=el('div','sm-switch-grid sm-extraction-grid');
+    extractionGrid.append(...extractionSwitches.map(([,row])=>row.wrapper));
+    extractionPanel.append(extractionHeading,extractionGrid);
+
     const promptConfigs=[
-      {key:'summaryFull',name:'楼层摘要与状态提取',desc:'同时整理摘要、物品、场景、角色与计划',def:DEFAULT_SUMMARY_PROMPT,initial:effectiveSummaryPrompt(cfg)},
+      {key:'summaryFull',name:'楼层摘要与状态提取',desc:'整理本轮剧情，按上方开关提取实体档案',def:DEFAULT_SUMMARY_PROMPT,initial:effectiveSummaryPrompt(cfg)},
       {key:'chapter',name:'首次总结（L1）',desc:'将楼层摘要整理为章节',def:DEFAULT_CHAPTER_PROMPT,initial:cfg.prompts.chapter||DEFAULT_CHAPTER_PROMPT},
       {key:'resummary2',name:'二次总结（L2）',desc:'进一步融合多条首次总结',def:DEFAULT_RESUMMARY2_PROMPT,initial:cfg.prompts.resummary2||DEFAULT_RESUMMARY2_PROMPT},
       {key:'overview',name:'高层总结（L3+）',desc:'持续压缩旧剧情，保留长期主线',def:DEFAULT_OVERVIEW_PROMPT,initial:cfg.prompts.overview||DEFAULT_OVERVIEW_PROMPT}
     ];
-    const promptEditors=new Map(),promptSections=[];
+    const promptEditors=new Map(),promptSections=[extractionPanel];
     for(const spec of promptConfigs){
       const group=el('details','sm-prompt-group'),head=el('summary','sm-prompt-head');
       const label=el('span','sm-prompt-title');
@@ -927,7 +938,19 @@ export function mountUI(api){
       promptArea.classList?.add('sm-prompt-textarea');
       const toolbar=el('div','sm-prompt-toolbar');
       toolbar.append(el('small','sm-help','编辑后点击页面底部「保存设置」生效'));
-      toolbar.append(button('恢复默认',()=>{promptArea.value=spec.def;},'sm-btn'));
+      const promptActions=el('div','sm-prompt-actions');
+      promptActions.append(button('恢复默认',()=>{promptArea.value=spec.def;},'sm-btn'));
+      if(spec.key==='summaryFull'){
+        const preview=button('预览最终提示词',()=>{
+          const draft=structuredClone(cfg);
+          draft.prompts.summaryFull=promptArea.value.trim();
+          draft.extraction={...draft.extraction};
+          for(const [key,row] of extractionSwitches)draft.extraction[key]=row.input.checked;
+          openL0PromptPreview(preview,composeL0Prompt(draft));
+        },'sm-btn');
+        promptActions.append(preview);
+      }
+      toolbar.append(promptActions);
       const content=el('div','sm-prompt-content');content.append(promptArea,toolbar);
       group.append(head,content);promptSections.push(group);
       promptEditors.set(spec.key,promptArea);
@@ -960,6 +983,8 @@ export function mountUI(api){
         delete next.summary.chapterEvery;
         delete next.summary.maxInputChars;
         next.summary.retry=Math.max(0,Math.min(2,Number(retries.input.value)||0));
+        next.extraction={...next.extraction};
+        for(const [key,row] of extractionSwitches)next.extraction[key]=row.input.checked;
         next.injection.budget=Number(budget.input.value)||4500;
         for(const [key,value] of flags)next.injection[key]=value.input.checked;
         delete next.injection.summary;
@@ -1019,6 +1044,36 @@ export function mountUI(api){
     },'sm-btn');
     reset.setAttribute('data-testid','reset-settings');
     saveBar.append(reset,save);box.append(saveBar);body.append(box);
+  }
+  function openL0PromptPreview(trigger,prompt){
+    clearSaveToast();closeRecordModal(false);
+    recordReturnFocus=trigger||null;
+    const overlay=el('div','sm-record-modal-overlay'),panel=el('section','sm-record-modal sm-preview-modal');
+    recordOverlay=overlay;
+    panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');
+    const heading=el('h3','sm-record-modal-title','最终提示词预览');
+    heading.id='sm-l0-preview-heading';panel.setAttribute('aria-labelledby',heading.id);
+    const header=el('div','sm-record-modal-head');
+    const close=button('',()=>closeRecordModal(),'sm-record-modal-close');
+    close.append(svg('x'));close.setAttribute('aria-label','关闭弹窗');
+    header.append(heading,close);
+    const content=el('div','sm-record-modal-body');
+    content.append(el('p','sm-help','仅预览 L0 摘要 API 的系统提示词，不发送请求；按当前草稿开关生成，包含不可编辑的输出协议。'),
+      el('p','sm-preview-counter','约 '+Math.ceil(prompt.length/3)+' Tokens · '+prompt.length+' 字符'));
+    const area=textArea(prompt,18);area.readOnly=true;area.setAttribute('aria-label','最终 L0 提示词');
+    content.append(area);
+    const footer=el('div','sm-record-modal-footer');
+    const done=button('关闭',()=>closeRecordModal(),'sm-btn sm-btn-primary');
+    footer.append(done);panel.append(header,content,footer);overlay.append(panel);dialog.append(overlay);
+    layout.inert=true;top.inert=true;
+    overlay.addEventListener('click',e=>{if(e.target===overlay)closeRecordModal();});
+    overlay.addEventListener('keydown',e=>{
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation?.();closeRecordModal();return;}
+      if(e.key!=='Tab')return;
+      if(e.shiftKey&&e.target===close){e.preventDefault();done.focus();}
+      else if(!e.shiftKey&&e.target===done){e.preventDefault();close.focus();}
+    });
+    close.focus?.();
   }
   function openInjectionPreview(trigger,previewSettings=null){
     clearSaveToast();closeRecordModal(false);
