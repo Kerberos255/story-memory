@@ -1,4 +1,5 @@
-import {defaultSettings,SETTINGS_KEY,META_KEY,peekMemory,writeMemory,addManual,editManual,removeManual,editGeneratedLeaf,deleteGeneratedLeaf,resumeGeneratedFloor,editGeneratedChapter,deleteGeneratedChapter,mergeEntities,unmergeEntity,injectionText,rebaseDeletedMessages,correctEntity,clearEntityCorrection} from './core.js';
+import {defaultSettings,SETTINGS_KEY,META_KEY,peekMemory,writeMemory,addManual,editManual,removeManual,editGeneratedLeaf,deleteGeneratedLeaf,resumeGeneratedFloor,editGeneratedChapter,deleteGeneratedChapter,mergeEntities,unmergeEntity,injectionText,rebaseDeletedMessages,correctEntity,clearEntityCorrection,injectionTextWithinBudget} from './core.js';
+import {countTokens} from './text-stats.js';
 import {SummaryQueue} from './queue.js';
 import {listSummaryModels} from './api.js';
 import {indexSummaries,recall} from './vector-local.js';
@@ -10,6 +11,7 @@ let ui,queue,lastChat='',settings;
 let lastInjection={chatId:'',text:'',at:0};
 let lastGenerationInjection=null;
 let knownChatMessages=[];
+let injectionRevision=0;
 function rememberChatMessages(){knownChatMessages=[...(getContext()?.chat||[])];}
 const getContext=()=>{try{return window.SillyTavern?.getContext?.()||null;}catch{return null;}};
 function getSettings(){
@@ -37,7 +39,8 @@ function saveSettings(next){
   ctx.extensionSettings[SETTINGS_KEY]=settings;ctx.saveSettingsDebounced?.();
   inject();
 }
-function inject(hits=[],historyHits=[],memory=null,forGeneration=false){
+function inject(hits=[],historyHits=[],memory=null){
+  ++injectionRevision;
   const ctx=getContext();if(!ctx?.setExtensionPrompt)return;
   const cfg=getSettings();
   const text=cfg.enabled?injectionText(memory||peekMemory(ctx),ctx.chat,cfg,hits,historyHits):'';
@@ -46,7 +49,16 @@ function inject(hits=[],historyHits=[],memory=null,forGeneration=false){
   // beginning of Chat History (after the preset prompts) even after trimming.
   ctx.setExtensionPrompt('story_memory_injection_v1',text,1,10000,false,0,null);
   lastInjection={chatId:ctx.getCurrentChatId?.()||'',text,at:Date.now()};
-  if(forGeneration)lastGenerationInjection=lastInjection;
+}
+async function injectForGeneration(hits=[],historyHits=[],memory=null){
+  const ctx=getContext();if(!ctx?.setExtensionPrompt)return;
+  const revision=++injectionRevision,chatId=ctx.getCurrentChatId?.()||'';
+  const cfg=getSettings(),text=cfg.enabled?await injectionTextWithinBudget(
+    memory||peekMemory(ctx),ctx.chat,cfg,hits,historyHits,value=>countTokens(ctx,value)):'';
+  if(revision!==injectionRevision||chatId!==(getContext()?.getCurrentChatId?.()||''))return;
+  ctx.setExtensionPrompt('story_memory_injection_v1',text,1,10000,false,0,null);
+  lastInjection={chatId,text,at:Date.now()};
+  lastGenerationInjection=lastInjection;
 }
 function afterQueueChanged(){
   inject();ui?.refresh();refreshButtonStatus();
@@ -166,7 +178,7 @@ async function generateInterceptor(_chat,_contextSize,_abort,type){
         .map(row=>({key:row.key,text:'['+(row.kind==='floor'?'#'+row.sourceIndex:'历史摘要')+'] '+row.summary}))];
     }catch{/* Damaged indexes must not affect roleplay. */}
   }
-  inject(cfg.retrieval?.enabled!==false?[]:vectors,history,activeMemory,true);
+  await injectForGeneration(cfg.retrieval?.enabled!==false?[]:vectors,history,activeMemory);
 }
 // SillyTavern calls this by manifest name during user generation.
 globalThis.storyMemoryGenerationInterceptor=generateInterceptor;

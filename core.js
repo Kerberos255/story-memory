@@ -542,7 +542,7 @@ function injectionState(memory,chat){
     refs:keys.map(x=>memory.leaves[x]),valid:keys.map(x=>leafValid(memory,chat,Number(x))),state});
   return state;
 }
-export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],diagnostics=null) {
+export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],diagnostics=null,maxChars=null) {
   const state=injectionState(memory,chat),cfg=settings.injection||{},sections=[];
   const add=(title,entries)=>{if(entries.length)sections.push({title,entries});};
   const note=text=>({text:String(text||'').trim(),identity:String(text||'').trim()});
@@ -610,7 +610,8 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
   // This is a historical archive, not a turn in the live conversation.
   const archiveHeader='【历史剧情记忆｜非新发生的对话；若与后续实际剧情冲突，以较新的聊天记录为准】\n';
   const budget=Math.max(400,Math.min(18000,Number(cfg.budget)||4500))*3;
-  let remaining=budget-archiveHeader.length;
+  const capacity=maxChars===null?budget:Math.max(0,Math.min(budget,Math.floor(maxChars)));
+  let remaining=capacity-archiveHeader.length;
   const result=[],seen=new Set(),breakdown=[];
   // Select entire entries by priority, newest within a section; never slice JSON
   // or prose in the middle. Preserve chronology when presenting chosen entries.
@@ -635,7 +636,7 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
     const section=title+'\n'+chosen.reverse().join('\n');
     result.push(section);
     remaining-=section.length+(result.length>1?2:0);
-    breakdown.push({title,selected:chosen.length,omitted,chars:section.length});
+    breakdown.push({title,selected:chosen.length,omitted,chars:Array.from(section).length});
   }
   const content=result.join('\n\n');
   const text=content?archiveHeader+content:'';
@@ -645,6 +646,30 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
     diagnostics.sections=breakdown;
   }
   return text;
+}
+
+/** Check the assembled archive against the host tokenizer before generation.
+ * Keep whole memory records and their established priority. A bounded retry
+ * shrinks the character candidate pool if the selected model counts more tokens.
+ * The synchronous selector remains as a fallback for hosts without a tokenizer.
+ */
+export async function injectionTextWithinBudget(memory,chat,settings,vectorHits=[],historyHits=[],countTokens,diagnostics=null){
+  const budgetTokens=Math.max(400,Math.min(18000,Number(settings.injection?.budget)||4500));
+  let maxChars=budgetTokens*3;
+  for(let attempt=0;attempt<8;attempt++){
+    const usage={};
+    const text=injectionText(memory,chat,settings,vectorHits,historyHits,usage,maxChars);
+    const measured=text?await countTokens(text):{tokens:0,estimated:false};
+    if(!text||measured.tokens<=budgetTokens){
+      if(diagnostics)Object.assign(diagnostics,usage,{usedTokens:measured.tokens,tokenEstimated:measured.estimated});
+      return text;
+    }
+    const ratio=budgetTokens/Math.max(1,measured.tokens);
+    maxChars=Math.floor(maxChars*Math.max(.2,Math.min(.8,ratio*.9)));
+  }
+  // Never inject a known over-budget prompt after repeated unsuccessful checks.
+  if(diagnostics)Object.assign(diagnostics,{budgetTokens,usedTokens:0,tokenEstimated:false,sections:[]});
+  return '';
 }
 
 /** Resolve AI-message-only keep boundary. User messages are not counted. */

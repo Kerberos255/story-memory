@@ -1,4 +1,5 @@
-import {defaultSettings,entityNameKey,formatStoryTime,leadingStoryTime,messageFingerprint,userFingerprint,pendingFloors,automaticFloorIndices,deriveState,injectionText,validChapters} from './core.js';
+import {defaultSettings,entityNameKey,formatStoryTime,leadingStoryTime,messageFingerprint,userFingerprint,pendingFloors,automaticFloorIndices,deriveState,injectionText,injectionTextWithinBudget,validChapters} from './core.js';
+import {characterCount,countTokens} from './text-stats.js';
 import {DEFAULT_SUMMARY_PROMPT,DEFAULT_CHAPTER_PROMPT,DEFAULT_RESUMMARY2_PROMPT,DEFAULT_OVERVIEW_PROMPT,effectiveSummaryPrompt,composeL0Prompt,parseExtraBody,parseExcluded,parseHeaderLines} from './api.js';
 
 const NAV=[['summaries','摘要','book'],['items','物品','package'],['scenes','场景','pin'],
@@ -63,6 +64,17 @@ function sectionTitle(title,description=''){
   const holder=el('div','sm-subheading');
   holder.append(el('h3','',title));
   if(description)holder.append(el('p','',description));return holder;
+}
+
+/** Two compact counters shared by prompt and injection previews. */
+function textStats(){
+  const wrap=el('div','sm-preview-stats'),token=el('strong','sm-preview-stat-value','计算中…');
+  const chars=el('strong','sm-preview-stat-value','0');
+  for(const [label,value] of [['Token（约）',token],['字符数',chars]]){
+    const item=el('div','sm-preview-stat');
+    item.append(el('span','sm-preview-stat-label',label),value);wrap.append(item);
+  }
+  return {wrap,token,chars};
 }
 
 export function mountUI(api){
@@ -1058,8 +1070,11 @@ export function mountUI(api){
     close.append(svg('x'));close.setAttribute('aria-label','关闭弹窗');
     header.append(heading,close);
     const content=el('div','sm-record-modal-body');
-    content.append(el('p','sm-help','仅预览 L0 摘要 API 的系统提示词，不发送请求；按当前草稿开关生成，包含不可编辑的输出协议。'),
-      el('p','sm-preview-counter','约 '+Math.ceil(prompt.length/3)+' Tokens · '+prompt.length+' 字符'));
+    const stats=textStats();stats.chars.textContent=characterCount(prompt).toLocaleString();
+    content.append(el('p','sm-help','仅预览 L0 摘要 API 的系统提示词，不发送请求；按当前草稿开关生成，包含固定输出协议。Token 按酒馆当前主模型分词器统计，独立摘要 API 可能不同。'),stats.wrap);
+    void countTokens(api.context(),prompt).then(result=>{
+      if(recordOverlay===overlay)stats.token.textContent=result.tokens.toLocaleString()+(result.estimated?'（回退估算）':'');
+    });
     const area=textArea(prompt,18);area.readOnly=true;area.setAttribute('aria-label','最终 L0 提示词');
     content.append(area);
     const footer=el('div','sm-record-modal-footer');
@@ -1096,29 +1111,50 @@ export function mountUI(api){
     close.append(svg('x'));close.setAttribute('aria-label','关闭弹窗');
     header.append(heading,close);
     const content=el('div','sm-record-modal-body');
-    const explanation=el('p','sm-help','模拟预览使用当前设置草稿与本地历史检索；不发送向量请求。历史快照仅为本扩展写给酒馆的内容，不包含其他预设与插件。Token 数为估算。');
-    const counter=el('p','sm-preview-counter');
+    const explanation=el('p','sm-help','模拟预览使用当前设置草稿与本地历史检索；不发送向量请求。Token 按酒馆当前主模型分词器统计，具体模型可能仍有偏差。');
+    const stats=textStats();
     const textarea=textArea(result||'当前没有需要发送的记忆。',15);
     textarea.readOnly=true;textarea.setAttribute('aria-label','发送预览内容');
-    let showSnapshot=false;
+    let showSnapshot=false,simulated=result,previewEpoch=0,previewReady=false;
+    const budgetLabel=el('p','sm-preview-counter','记忆用量 · 统计中…');
     const update=()=>{
-      const value=String(showSnapshot?(snapshot?.text||''):result||'');
+      const epoch=++previewEpoch;
+      const value=String(showSnapshot?(snapshot?.text||''):simulated||'');
       textarea.value=value||'当前没有需要发送的记忆。';
-      counter.textContent=(showSnapshot?'上轮生成时提交':'当前草稿模拟')+' · 约 '+Math.ceil(value.length/3)+' Tokens · '+value.length+' 字符';
+      stats.chars.textContent=characterCount(value).toLocaleString();
+      stats.token.textContent='计算中…';
+      budgetLabel.textContent=(showSnapshot?'上轮生成时提交':'当前草稿模拟')+' · Token 统计中…';
+      if(!showSnapshot){
+        if(previewReady){
+          stats.token.textContent=usage.usedTokens.toLocaleString()+(usage.tokenEstimated?'（回退估算）':'');
+          budgetLabel.textContent='当前草稿模拟 · 约 '+usage.usedTokens.toLocaleString()+' / '+usage.budgetTokens.toLocaleString()+' Tokens';
+        }
+        return;
+      }
+      void countTokens(ctx,value).then(measured=>{
+        if(recordOverlay!==overlay||epoch!==previewEpoch)return;
+        stats.token.textContent=measured.tokens.toLocaleString()+(measured.estimated?'（回退估算）':'');
+        budgetLabel.textContent=(showSnapshot?'上轮生成时提交':'当前草稿模拟')+
+          ' · 约 '+measured.tokens.toLocaleString()+' / '+usage.budgetTokens.toLocaleString()+' Tokens';
+      });
     };
     update();
-    content.append(explanation,counter,textarea);
+    content.append(explanation,stats.wrap,textarea,budgetLabel);
     const breakdown=el('details','sm-injection-breakdown');
-    breakdown.append(el('summary','sm-entity-history-heading',
-      '记忆用量 · 约 '+usage.usedTokens+' / '+usage.budgetTokens+' Tokens'));
+    const breakdownTitle=el('summary','sm-entity-history-heading','记忆组成 · 统计中…');
+    breakdown.append(breakdownTitle);
     const breakdownList=el('div','sm-injection-breakdown-list');
-    for(const section of usage.sections||[]){
-      const row=el('div','sm-injection-breakdown-row');
-      row.append(el('span','',section.title.replace(/[【】]/g,'')),
-        el('span','',Math.ceil(section.chars/3)+'t · '+section.selected+' 条'+
-          (section.omitted?' · 跳过 '+section.omitted+' 条':'')));
-      breakdownList.append(row);
-    }
+    const refreshBreakdown=()=>{
+      breakdownList.replaceChildren();
+      for(const section of usage.sections||[]){
+        const row=el('div','sm-injection-breakdown-row');
+        row.append(el('span','',section.title.replace(/[【】]/g,'')),
+          el('span','',section.chars.toLocaleString()+' 字符 · '+section.selected+' 条'+
+            (section.omitted?' · 跳过 '+section.omitted+' 条':'')));
+        breakdownList.append(row);
+      }
+      breakdownTitle.textContent='记忆组成 · '+(usage.sections||[]).length+' 类';
+    };
     breakdown.append(breakdownList);
     content.append(breakdown);
     const footer=el('div','sm-record-modal-footer');
@@ -1142,6 +1178,11 @@ export function mountUI(api){
       if(e.shiftKey&&e.target===first){e.preventDefault();last.focus();}
       else if(!e.shiftKey&&e.target===last){e.preventDefault();first.focus();}
     });
+    void injectionTextWithinBudget(memory,ctx?.chat||[],cfg,[],recalled,
+      value=>countTokens(ctx,value),usage).then(value=>{
+      if(recordOverlay!==overlay||typeof document==='undefined')return;
+      simulated=value;previewReady=true;refreshBreakdown();update();
+    }).catch(()=>{if(recordOverlay===overlay&&typeof document!=='undefined'){previewReady=true;refreshBreakdown();update();}});
     close.focus?.();
   }
   function render(){

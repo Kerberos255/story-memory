@@ -1123,7 +1123,7 @@ test('entity correction stays collapsed by default and updates only after explic
   assert.match(css,/@media\(max-width:700px\)\{\.sm-entity-correction-fields\{grid-template-columns:1fr\}/);
 }));
 
-test('injection preview reveals per-section budget in a collapsed drawer',()=>withUI(body=>{
+test('injection preview reveals per-section character count in a collapsed drawer',()=>withUI(body=>{
   const chat=[{is_user:false,mes:'记住这些剧情',swipe_id:0}];
   const memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({summary:'回到故乡'}));
   const ctx={chat,chatMetadata:{},getCurrentChatId:()=> 'budget-ui'};
@@ -1135,7 +1135,9 @@ test('injection preview reveals per-section budget in a collapsed drawer',()=>wi
   const drawer=find(dialog,x=>x.className==='sm-injection-breakdown');
   assert.ok(drawer);
   assert.equal(drawer.open,false);
-  assert.ok(walk(drawer).some(x=>String(x.textContent||'').includes('记忆用量')));
+  assert.ok(walk(drawer).some(x=>String(x.textContent||'').includes('记忆组成')));
+  assert.ok(walk(dialog).some(x=>x.textContent==='Token（约）'));
+  assert.ok(walk(dialog).some(x=>x.textContent==='字符数'));
 }));
 
 test('plans, items, scenes and characters share tidy metadata and closed utility rows',()=>withUI(body=>{
@@ -1212,7 +1214,9 @@ test('settings show consistent concise Chinese labels and readable preview namin
   assert.ok(modal);
   assert.ok(walk(modal).some(x=>x.className==='sm-record-modal-title'&&x.textContent==='发送预览'));
   assert.ok(walk(modal).some(x=>x.tag==='textarea'&&x.attrs['aria-label']==='发送预览内容'));
-  assert.ok(walk(modal).some(x=>String(x.textContent||'').includes('记忆用量 · 约')));
+  assert.ok(walk(modal).some(x=>String(x.textContent||'').includes('当前草稿模拟')));
+  assert.equal(walk(modal).filter(x=>x.className==='sm-preview-stat').length,2);
+  assert.match(readFileSync(new URL('../style.css',import.meta.url),'utf8'),/\.sm-preview-stats\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
   assert.match(css,/\.sm-accordion-head\{display:flex;align-items:center;justify-content:space-between;gap:12px/);
   assert.match(css,/\.sm-accordion-copy\{display:flex;flex-direction:column;gap:2px/);
@@ -1266,4 +1270,20 @@ test('L0 extraction switches preserve drafts and preview exact model-facing prom
   const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
   assert.match(css,/\.sm-extraction-panel\{[^}]*min-width:0/);
   assert.match(css,/\.sm-prompt-actions\{[^}]*flex-wrap:wrap/);
+}));
+
+test('Token counters use native tokenizer and Unicode characters correctly',()=>withUI(async body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=> 'metrics',getTokenCountAsync:async()=>37};
+  const view=mountUI({context:()=>ctx,memory:()=>addManual(freshMemory(),'summaries','旅途🙂'),
+    settings:defaultSettings,queue:{busy:false,enqueueMissing(){}},previewHistory:()=>[]});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  find(dialog,x=>x.tag==='button'&&x.textContent==='预览发送内容').fire('click');
+  await new Promise(resolve=>setImmediate(resolve));
+  const stats=walk(dialog).filter(x=>x.className==='sm-preview-stat');
+  assert.equal(stats.length,2);
+  assert.equal(walk(stats[0]).find(x=>x.className==='sm-preview-stat-value').textContent,'37');
+  const area=walk(dialog).find(x=>x.tag==='textarea'&&x.attrs['aria-label']==='发送预览内容');
+  const {characterCount}=await import('../text-stats.js');
+  assert.equal(Number(walk(stats[1]).find(x=>x.className==='sm-preview-stat-value').textContent.replace(/,/g,'')),characterCount(area.value));
 }));

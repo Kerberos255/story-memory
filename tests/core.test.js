@@ -892,3 +892,32 @@ test('search switches alone control retrieval injection, including legacy false 
  const neither=injectionText(memory,[],{...cfg,retrieval:{...cfg.retrieval,enabled:false}},vector,history);
  assert.doesNotMatch(neither,/故地的历史线索|远古语义线索/);
 });
+
+// Native host tokenizer accounting is asynchronous and must preserve full entries.
+test('injection verifies its budget using host token counts',async()=>{
+  const {injectionTextWithinBudget}=await import('../core.js');
+  const cfg=defaultSettings();cfg.injection.budget=400;
+  let mem=freshMemory();
+  for(let i=0;i<18;i++)mem=addManual(mem,'summaries','剧情 '+i+'：'+('守卫与钥匙的约定。'.repeat(28)));
+  const count=async text=>({tokens:Math.ceil(text.length/1.4),estimated:false});
+  const usage={};
+  const result=await injectionTextWithinBudget(mem,[],cfg,[],[],count,usage);
+  assert.ok(Math.ceil(result.length/1.4)<=400,'final payload uses actual tokenizer-based budget');
+  assert.equal(usage.usedTokens,Math.ceil(result.length/1.4));
+  assert.equal(usage.tokenEstimated,false);
+  assert.equal(usage.budgetTokens,400);
+});
+
+test('host tokenizer failure falls back to bounded estimate without rejecting generation',async()=>{
+  const {injectionTextWithinBudget}=await import('../core.js');
+  const {countTokens,characterCount}=await import('../text-stats.js');
+  assert.equal(characterCount('中文🙂A'),4);
+  assert.deepEqual(await countTokens({getTokenCountAsync:async()=>{throw Error('offline');}},'123456'),{tokens:2,estimated:true});
+  assert.deepEqual(await countTokens({getTokenCountAsync:async()=>0},'123456'),{tokens:2,estimated:true});
+  const cfg=defaultSettings();cfg.injection.budget=400;
+  const memory=addManual(freshMemory(),'summaries','往事'.repeat(120));
+  const usage={};
+  const text=await injectionTextWithinBudget(memory,[],cfg,[],[],value=>countTokens(null,value),usage);
+  assert.ok(text.length<=1200);
+  assert.equal(usage.tokenEstimated,true);
+});
