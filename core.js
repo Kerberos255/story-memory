@@ -372,20 +372,28 @@ export function unmergeEntity(memory,kind,fromName){
   next.revision++;return next;
 }
 const editableFields={
-  items:['description','location','owner','status','quantity'],
-  scenes:['description','location','status'],
-  characters:['description','location','status','relationship','presence'],
-  plans:['description','location','status','time']
+  items:['name','description','location','owner','status','quantity'],
+  scenes:['name','description','location','status'],
+  characters:['name','description','location','status','relationship','presence'],
+  plans:['name','description','location','status','time']
 };
 /** User-confirmed field overrides belong to the same chat; source Delta remains immutable. */
-export function correctEntity(memory,chat,kind,id,values){
+export function correctEntity(memory,chat,kind,id,values,locks=null){
   if(!editableFields[kind]?.length)throw Error('未知实体类型');
   const entity=deriveState(memory,chat)[kind].find(x=>!x.manual&&x.entity_id===id);
   if(!entity)throw Error('实体已失效，请重新打开');
+  const previous=memory.entityCorrections?.[kind]?.[id]||{};
+  const lockState=locks===null?{...(previous.locks||{})}:Object.fromEntries(
+    editableFields[kind].filter(field=>locks?.[field]===true).map(field=>[field,true]));
   const cleaned={};
   for(const field of editableFields[kind]){
     if(!Object.hasOwn(values||{},field))continue;
     const value=values[field];
+    const unlockingUnchanged=previous.locks?.[field]===true&&!lockState[field]&&
+      String(value??'')===String(previous.values?.[field]??'');
+    // Unlocking an unchanged locked value always returns control to extraction,
+    // even after a previous save reaffirmed the lock against newer plot facts.
+    if(unlockingUnchanged)continue;
     if(field==='quantity'){
       if(value!==null&&value!==''){
         const n=Number(value);if(!Number.isInteger(n)||n<0||n>1e6)throw Error('数量应为非负整数');
@@ -396,14 +404,21 @@ export function correctEntity(memory,chat,kind,id,values){
       cleaned[field]=value;
     }else{
       if(typeof value!=='string'||value.length>600)throw Error('字段内容过长或不合法');
+      if(field==='name'&&!value.trim())throw Error('名称不能为空');
       cleaned[field]=value.trim();
     }
+  }
+  // A lock with no submitted override captures the currently displayed value,
+  // including an intentionally absent field (represented by null).
+  for(const field of editableFields[kind]){
+    if(lockState[field]&&!Object.hasOwn(cleaned,field))
+      cleaned[field]=Object.hasOwn(entity,field)?entity[field]:null;
   }
   const sources=Object.fromEntries(Object.keys(cleaned).map(field=>
     [field,entity.fieldVersions?.[field]?.at(-1)?.validFromFloor??-1]));
   const old=memory.entityCorrections||{};
   const next={...memory,entityCorrections:{...old,[kind]:{...(old[kind]||{}),
-    [id]:{values:cleaned,sources,updatedAt:Date.now()}}},revision:(Number(memory.revision)||0)+1};
+    [id]:{values:cleaned,sources,locks:lockState,updatedAt:Date.now()}}},revision:(Number(memory.revision)||0)+1};
   return next;
 }
 export function clearEntityCorrection(memory,kind,id){
@@ -412,15 +427,71 @@ export function clearEntityCorrection(memory,kind,id){
   const values={...memory.entityCorrections[kind]};delete values[id];
   return {...memory,entityCorrections:{...memory.entityCorrections,[kind]:values},revision:(Number(memory.revision)||0)+1};
 }
+const STATE_CHECKPOINT_INTERVAL=128;
+const stateCheckpointCache=new WeakMap();
+function cloneStateEntity(entity){
+  return {...entity,history:Array.isArray(entity.history)?[...entity.history]:entity.history};
+}
+function cloneStateMap(map){
+  return new Map([...map].map(([key,value])=>[key,cloneStateEntity(value)]));
+}
+function makeStateCheckpoint(memory,chat,floors,throughFloor,validCount,aliasKey,state){
+  const prefix=[];
+  for(const index of floors){
+    if(index>throughFloor)break;
+    prefix.push({index,ref:memory.leaves[index],valid:leafValid(memory,chat,index)});
+  }
+  return {
+    throughFloor,validCount,aliasKey,prefix,
+    sections:Object.fromEntries(entityKinds.map(kind=>[kind,cloneStateMap(state.sections[kind])])),
+    archived:Object.fromEntries(entityKinds.map(kind=>[kind,state.archived[kind].map(cloneStateEntity)])),
+    ambiguities:Object.fromEntries(entityKinds.map(kind=>[kind,state.ambiguities[kind].slice()])),
+    byId:Object.fromEntries(entityKinds.map(kind=>[kind,new Map(state.byId[kind])])),
+    knownAliases:Object.fromEntries(entityKinds.map(kind=>[kind,new Map(state.knownAliases[kind])])),
+    timeline:state.timeline.slice()
+  };
+}
+function checkpointMatches(checkpoint,memory,chat,floors,aliasKey){
+  if(checkpoint.aliasKey!==aliasKey)return false;
+  let position=0;
+  for(const index of floors){
+    if(index>checkpoint.throughFloor)break;
+    const previous=checkpoint.prefix[position++];
+    if(!previous||previous.index!==index||previous.ref!==memory.leaves[index]||
+      previous.valid!==leafValid(memory,chat,index))return false;
+  }
+  return position===checkpoint.prefix.length;
+}
+function restoreStateCheckpoint(checkpoint){
+  return {
+    sections:Object.fromEntries(entityKinds.map(kind=>[kind,cloneStateMap(checkpoint.sections[kind])])),
+    archived:Object.fromEntries(entityKinds.map(kind=>[kind,checkpoint.archived[kind].map(cloneStateEntity)])),
+    ambiguities:Object.fromEntries(entityKinds.map(kind=>[kind,checkpoint.ambiguities[kind].slice()])),
+    byId:Object.fromEntries(entityKinds.map(kind=>[kind,new Map(checkpoint.byId[kind])])),
+    knownAliases:Object.fromEntries(entityKinds.map(kind=>[kind,new Map(checkpoint.knownAliases[kind])])),
+    timeline:checkpoint.timeline.slice()
+  };
+}
 export function deriveState(memory,chat) {
-  const sections={items:new Map(),scenes:new Map(),characters:new Map(),plans:new Map()};
-  const archived={items:[],scenes:[],characters:[],plans:[]};
-  const ambiguities={items:[],scenes:[],characters:[],plans:[]};
-  const byId=Object.fromEntries(entityKinds.map(kind=>[kind,new Map()]));
-  const knownAliases=Object.fromEntries(entityKinds.map(kind=>[kind,new Map()]));
-  const floors=Object.keys(memory.leaves||{}).map(Number).sort((a,b)=>a-b);
-  const timeline=[];
+  const floors=Object.keys(memory.leaves||{}).map(Number).filter(Number.isSafeInteger).sort((a,b)=>a-b);
+  const aliasKey=hashText(JSON.stringify(memory.entityAliases||{}));
+  const cached=Array.isArray(chat)?stateCheckpointCache.get(chat):null;
+  let checkpoints=cached?.aliasKey===aliasKey?cached.checkpoints:[];
+  let checkpoint=null;
+  for(let i=checkpoints.length-1;i>=0;i--){
+    if(checkpointMatches(checkpoints[i],memory,chat,floors,aliasKey)){checkpoint=checkpoints[i];break;}
+  }
+  checkpoints=checkpoint?checkpoints.filter(x=>x.throughFloor<=checkpoint.throughFloor):[];
+  const restored=checkpoint?restoreStateCheckpoint(checkpoint):null;
+  const sections=restored?.sections||{items:new Map(),scenes:new Map(),characters:new Map(),plans:new Map()};
+  const archived=restored?.archived||{items:[],scenes:[],characters:[],plans:[]};
+  const ambiguities=restored?.ambiguities||{items:[],scenes:[],characters:[],plans:[]};
+  const byId=restored?.byId||Object.fromEntries(entityKinds.map(kind=>[kind,new Map()]));
+  const knownAliases=restored?.knownAliases||Object.fromEntries(entityKinds.map(kind=>[kind,new Map()]));
+  const timeline=restored?.timeline||[];
+  let validCount=checkpoint?.validCount||0;
   for(const i of floors){
+    if(checkpoint&&i<=checkpoint.throughFloor)continue;
     const entry=memory.leaves[i];
     if(!entry || !leafValid(memory,chat,i))continue;
     timeline.push(entry);
@@ -487,9 +558,9 @@ export function deriveState(memory,chat) {
             validFromFloor:i,validToFloor:null,evidence:change.evidence||'',evidenceStatus}];
         }
         const history=old?.history||[];
-        if(!old||changedFields.length)history.push({floor:i,op:old?'update':'add',
-          evidence:change.evidence||'',fields:changedFields});
-        const updated={...old,...change,name:display,entity_id,aliases,op:undefined,sourceIndex:i,history,fieldVersions,evidenceStatus,
+        const nextHistory=!old||changedFields.length?
+          [...history,{floor:i,op:old?'update':'add',evidence:change.evidence||'',fields:changedFields}]:history;
+        const updated={...old,...change,name:display,entity_id,aliases,op:undefined,sourceIndex:i,history:nextHistory,fieldVersions,evidenceStatus,
           ...(kind==='characters'?{knowledge:[...knowledge.values()]}:{})};
         for(const field of retire)delete updated[field];
         delete updated.clear_fields;
@@ -498,21 +569,39 @@ export function deriveState(memory,chat) {
         if(raw!==key&&!map.has(raw))knownAliases[kind].set(raw,key);
       }
     }
+    validCount++;
   }
+  // Build one checkpoint at the latest completed 128-floor boundary. Avoid
+  // copying the entire accumulated state at every intermediate boundary.
+  if(validCount>=STATE_CHECKPOINT_INTERVAL&&
+    (!checkpoint||validCount-checkpoint.validCount>=STATE_CHECKPOINT_INTERVAL)){
+    const lastIndex=timeline.at(-1)?.sourceIndex;
+    if(Number.isSafeInteger(lastIndex))
+      checkpoints=[makeStateCheckpoint(memory,chat,floors,lastIndex,validCount,aliasKey,
+        {sections,archived,ambiguities,byId,knownAliases,timeline})];
+  }
+  if(Array.isArray(chat))stateCheckpointCache.set(chat,{aliasKey,checkpoints});
   for(const kind of ['items','scenes','characters','plans']){
-    for(const entity of sections[kind].values()){
+    for(const [key,baseEntity] of sections[kind]){
+      const entity={...baseEntity};sections[kind].set(key,entity);
       const correction=memory.entityCorrections?.[kind]?.[entity.entity_id];
       if(correction?.values&&typeof correction.values==='object'){
-        let applied=0,stale=0;
+        let applied=0,stale=0;const lockedFields=[],lockConflicts=[];
         for(const [field,value] of Object.entries(correction.values)){
           const sourceVersion=entity.fieldVersions?.[field]?.at(-1)?.validFromFloor??-1;
-          const recorded=correction.sources?.[field];
-          // New generated evidence wins over an older user override for this field.
-          if(Number.isInteger(recorded)&&sourceVersion>recorded){stale++;continue;}
-          entity[field]=value;applied++;
+          const recorded=correction.sources?.[field],locked=correction.locks?.[field]===true;
+          const newer=Number.isInteger(recorded)&&sourceVersion>recorded;
+          if(locked&&newer&&!Object.is(entity[field]??null,value??null))
+            lockConflicts.push({field,floor:sourceVersion,extracted:entity[field]??null});
+          // Locked fields retain the user's confirmed value; unlocked corrections yield to newer evidence.
+          if(!locked&&newer){stale++;continue;}
+          if(value===null)delete entity[field];else entity[field]=value;
+          applied++;if(locked)lockedFields.push(field);
         }
         entity.manualCorrection=Boolean(applied);
         entity.correctionStale=Boolean(stale);
+        if(lockedFields.length)entity.lockedFields=lockedFields;
+        if(lockConflicts.length)entity.lockConflicts=lockConflicts;
       }
     }
     for(const m of memory.manual?.[kind]||[]){
@@ -549,7 +638,7 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
   const entityLine=(entity,historical=false)=>{
     if(entity.manual)return note(entity.name);
     // Keep each JSON record intact. Internal source/identity IDs are not RP facts.
-    const {entity_id,aliases,sourceIndex,op,evidence,knowledge,history,fieldVersions,evidenceStatus,identityStatus,manualCorrection,correctionStale,retiredAtFloor,...publicState}=entity;
+    const {entity_id,aliases,sourceIndex,op,evidence,knowledge,history,fieldVersions,evidenceStatus,identityStatus,manualCorrection,correctionStale,lockedFields,lockConflicts,retiredAtFloor,...publicState}=entity;
     if(Array.isArray(knowledge)&&knowledge.length)
       publicState.knowledge=knowledge.map(x=>({stance:x.stance,fact:x.fact,
         ...(x.provenance==='secondhand'?{来源:'转述信息，角色并非亲历'}:{})}));

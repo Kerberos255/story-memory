@@ -2,12 +2,14 @@ import {defaultSettings,SETTINGS_KEY,META_KEY,peekMemory,writeMemory,addManual,e
 import {countTokens} from './text-stats.js';
 import {SummaryQueue} from './queue.js';
 import {listSummaryModels} from './api.js';
-import {indexSummaries,recall} from './vector-local.js';
+import {recall} from './vector-local.js';
+import {VectorIndexScheduler} from './vector-index-scheduler.js';
 import {selectHistory,historyEvidence,sourcePreview} from './retrieval-local.js';
 import {mountUI} from './ui.js';
 import {ensureStoryMemoryEntry} from './toolbar.js';
 // Pure private ST extension. No external scripts, analytics or dependencies.
-let ui,queue,lastChat='',settings;
+let ui,queue,vectorIndexer,lastChat='',settings;
+let lastIndexedRevisionKey='';
 let lastInjection={chatId:'',text:'',at:0};
 let lastGenerationInjection=null;
 let knownChatMessages=[];
@@ -37,6 +39,11 @@ function saveSettings(next){
   delete settings.injection.retrieval;
   delete settings.injection.vector;
   ctx.extensionSettings[SETTINGS_KEY]=settings;ctx.saveSettingsDebounced?.();
+  if(vectorIndexer){
+    vectorIndexer.cancel();
+    lastIndexedRevisionKey='';
+    vectorIndexer.schedule();
+  }
   inject();
 }
 function inject(hits=[],historyHits=[],memory=null){
@@ -60,22 +67,35 @@ async function injectForGeneration(hits=[],historyHits=[],memory=null){
   lastInjection={chatId,text,at:Date.now()};
   lastGenerationInjection=lastInjection;
 }
+function scheduleVectorWhenChanged(force=false){
+  const ctx=getContext();if(!ctx?.getCurrentChatId?.()||!vectorIndexer)return;
+  const memory=peekMemory(ctx);
+  const key=[ctx.groupId||'',ctx.characterId||'',ctx.getCurrentChatId(),memory.revision].join('|');
+  if(force||key!==lastIndexedRevisionKey){
+    lastIndexedRevisionKey=key;
+    vectorIndexer.schedule();
+  }
+}
 function afterQueueChanged(){
+  scheduleVectorWhenChanged();
   inject();ui?.refresh();refreshButtonStatus();
 }
 function afterMemoryChanged(){
+  scheduleVectorWhenChanged(true);
   inject();ui?.refresh(true);refreshButtonStatus();
   void queue?.restoreStale().catch(()=>{});
 }
 function afterSourceChanged(eventName){
   // Edits, swipe changes and deletions invalidate any in-flight extraction or chapter job.
   queue?.cancel(false);
+  vectorIndexer?.cancel();
   const ctx=getContext();
   if(eventName==='MESSAGE_DELETED'&&ctx?.chat&&knownChatMessages.length>ctx.chat.length){
     const before=peekMemory(ctx),rebound=rebaseDeletedMessages(before,knownChatMessages,ctx.chat);
     if(rebound!==before)writeMemory(ctx,rebound);
   }
   rememberChatMessages();
+  scheduleVectorWhenChanged(true);
   inject();ui?.refresh();refreshButtonStatus();
   void queue?.restoreStale().catch(()=>{});
 }
@@ -138,8 +158,8 @@ async function fetchSummaryModels(config){
   return listSummaryModels(getContext(),config);
 }
 async function indexNow(){
-  const ctx=getContext();if(!ctx)throw Error('聊天未就绪');
-  return indexSummaries(ctx,peekMemory(ctx),getSettings());
+  if(!vectorIndexer)throw Error('记忆索引未就绪');
+  return vectorIndexer.rebuild();
 }
 async function onGeneration(){
   const ctx=getContext(),cfg=getSettings();
@@ -174,8 +194,11 @@ async function generateInterceptor(_chat,_contextSize,_abort,type){
       const found=selectHistory(current,activeMemory,query,vectors,cfg.retrieval.maxHits);
       const limit=Math.max(0,Math.min(5,Number(cfg.retrieval?.maxSources??3)));
       const sources=limit?historyEvidence(current,activeMemory,found,query,limit):[];
-      history=[...sources,...found.filter(row=>!sources.some(s=>s.key==='source:'+row.sourceIndex))
-        .map(row=>({key:row.key,text:'['+(row.kind==='floor'?'#'+row.sourceIndex:'历史摘要')+'] '+row.summary}))];
+      history=[...sources,...found.filter(row=>row.kind!=='floor'||
+        !sources.some(s=>s.key==='source:'+row.sourceIndex))
+        .map(row=>({key:row.key,text:'['+
+          (row.kind==='floor'?'#'+row.sourceIndex:row.kind==='entity'?'当前实体':
+            row.kind==='manual'?'人工记忆':'历史摘要')+'] '+row.summary}))];
     }catch{/* Damaged indexes must not affect roleplay. */}
   }
   await injectForGeneration(cfg.retrieval?.enabled!==false?[]:vectors,history,activeMemory);
@@ -200,11 +223,13 @@ function init(){
   const ctx=getContext();
   if(!ctx?.eventSource||!ctx?.chatMetadata||!ctx?.extensionSettings)return false;
   getSettings();
+  vectorIndexer=new VectorIndexScheduler(getContext,getSettings,undefined,
+    {onStatus:()=>ui?.updateVectorStatus?.()});
   queue=new SummaryQueue(getContext,getSettings,afterQueueChanged);
   ui=mountUI({context:getContext,memory:()=>peekMemory(getContext()),settings:getSettings,saveSettings,
     addManual:add,editManual:edit,removeManual:remove,
     correctEntity:saveEntityCorrection,clearEntityCorrection:removeEntityCorrection,
-    lastInjection:()=>lastGenerationInjection,
+    lastInjection:()=>lastGenerationInjection,vectorStatus:()=>vectorIndexer.status(),
     editLeaf,deleteLeaf,resumeLeaf,editChapter,deleteChapter,mergeEntity,unmergeAlias,queue,indexNow,fetchSummaryModels,
     previewHistory:(ctx,memory,previewCfg)=>{
       const settings=previewCfg||getSettings();
@@ -217,7 +242,7 @@ function init(){
     sourcePreview:(ctx,memory,key,limit,offset)=>sourcePreview(ctx,memory,key,limit,offset)});
   lastChat=ctx.getCurrentChatId?.()||'';
   rememberChatMessages();
-  const onChatChanged=()=>{const now=getContext()?.getCurrentChatId?.()||'';if(now!==lastChat){lastChat=now;queue.cancel();ui?.resetChatView?.();}rememberChatMessages();inject();ui?.refresh();refreshButtonStatus();};
+  const onChatChanged=()=>{const now=getContext()?.getCurrentChatId?.()||'';if(now!==lastChat){lastChat=now;queue.cancel();vectorIndexer.cancel();lastIndexedRevisionKey='';ui?.resetChatView?.();}rememberChatMessages();scheduleVectorWhenChanged();inject();ui?.refresh();refreshButtonStatus();};
   ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED,onChatChanged);
   ctx.eventSource.on(ctx.eventTypes.GENERATION_ENDED,()=>{
     rememberChatMessages();
@@ -230,7 +255,7 @@ function init(){
   for(const name of ['MESSAGE_SWIPED','MESSAGE_EDITED','MESSAGE_UPDATED','MESSAGE_DELETED','MESSAGE_SWIPE_DELETED']){
     if(ctx.eventTypes[name])ctx.eventSource.on(ctx.eventTypes[name],()=>afterSourceChanged(name));
   }
-  ensureButton();inject();
+  ensureButton();inject();scheduleVectorWhenChanged(true);
   // Only rescan the button if the host replaces its quick reply strip.
   let observer=null;
   const attach=()=>{
@@ -246,7 +271,7 @@ function init(){
     if(!observer)attach();
     if(++tries>60)clearInterval(timer);
   },1000);
-  window.addEventListener('pagehide',()=>{queue.cancel();observer?.disconnect();clearInterval(timer);inject([]);});
+  window.addEventListener('pagehide',()=>{queue.cancel();vectorIndexer.cancel();observer?.disconnect();clearInterval(timer);inject([]);});
   return true;
 }
 function boot(){

@@ -101,6 +101,11 @@
 .sm-entity-correction-content{padding:2px 12px 12px;display:grid;gap:12px}
 .sm-entity-correction-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 .sm-entity-correction-fields .sm-field{min-width:0}
+.sm-correction-field-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:23px}
+.sm-lock-field{display:inline-flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;white-space:nowrap;flex-shrink:0;opacity:.9}
+.sm-lock-checkbox{width:15px;height:15px;margin:0;accent-color:var(--sm-accent,#6897ed);cursor:pointer}
+.sm-correction-field .sm-input{width:100%;min-width:0}
+.sm-lock-conflict{border-left:3px solid var(--sm-accent,#6897ed);padding:6px 8px;background:var(--sm-surface-soft,transparent);border-radius:4px}
 .sm-entity-version-list{padding:0 12px 12px;display:grid;gap:4px;color:var(--muted)}
 .sm-entity-version-list small{font-size:12px;overflow-wrap:anywhere}
 .sm-entity-ambiguity{margin:12px 0}
@@ -243,6 +248,11 @@
   .sm-api-tuning-grid{grid-template-columns:1fr}
   .sm-settings-save{margin:8px -18px -26px;bottom:-26px;padding:12px 18px}
   @keyframes sm-mobile-enter{from{opacity:.65;transform:translateY(14px)}to{opacity:1;transform:none}}
+}
+@media(max-width:430px){
+  .sm-nav{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:2px;padding:6px 4px;overflow-x:hidden}
+  .sm-nav-item{min-width:0;width:100%;justify-content:center;gap:3px;padding:8px 2px;font-size:12px}
+  .sm-nav-item svg{width:14px;height:14px}
 }
 @media(max-width:410px){
   .sm-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}

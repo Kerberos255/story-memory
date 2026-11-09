@@ -1287,3 +1287,78 @@ test('Token counters use native tokenizer and Unicode characters correctly',()=>
   const {characterCount}=await import('../text-stats.js');
   assert.equal(Number(walk(stats[1]).find(x=>x.className==='sm-preview-stat-value').textContent.replace(/,/g,'')),characterCount(area.value));
 }));
+
+test('field locks render as compact controls and warn before overwriting newer plot facts',()=>withUI(body=>{
+  const chat=[
+    {is_user:false,mes:'守门人保护主角。',swipe_id:0},
+    {is_user:false,mes:'守门人后来加入敌方。',swipe_id:0}
+  ];
+  let memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'守门人保护主角',characters:[{op:'add',name:'守门人',relationship:'盟友',evidence:'守门人保护主角。'}]
+  }));
+  const ctx={chat,chatMetadata:{},getCurrentChatId:()=> 'field-lock-ui'};
+  const calls=[];
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},
+    correctEntity:(kind,id,values,locks)=>{calls.push({kind,id,values,locks});memory=correctEntity(memory,chat,kind,id,values,locks);},
+    clearEntityCorrection:(kind,id)=>{memory=clearEntityCorrection(memory,kind,id);}});
+  view.open();
+  const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='角色')).fire('click');
+  let form=find(dialog,x=>x.className==='sm-entity-history sm-entity-correction');
+  const titleLock=find(form,x=>x.attrs['aria-label']==='守门人 · 锁定名称');
+  const relationLock=find(form,x=>x.attrs['aria-label']==='守门人 · 锁定关系');
+  assert.ok(titleLock&&relationLock);
+  titleLock.checked=true;
+  relationLock.checked=true;
+  find(form,x=>x.tag==='button'&&x.textContent==='保存纠错').fire('click');
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].locks.name,true);
+  assert.equal(calls[0].locks.relationship,true);
+  assert.equal(deriveState(memory,chat).characters[0].relationship,'盟友');
+  const id=deriveState(memory,chat).characters[0].entity_id;
+  memory=commitLeaf(memory,1,messageFingerprint(chat[1]),normalizeDelta({
+    summary:'守门人反叛',characters:[{op:'update',name:'守门人',entity_id:id,relationship:'敌人',
+      evidence:'守门人后来加入敌方。'}]
+  }));
+  view.refresh(true);
+  form=find(dialog,x=>x.className==='sm-entity-history sm-entity-correction');
+  assert.ok(walk(form).some(x=>String(x.textContent||'').includes('新剧情与锁定字段不一致')));
+  assert.equal(deriveState(memory,chat).characters[0].relationship,'盟友');
+  const latestRelationLock=find(form,x=>x.attrs['aria-label']==='守门人 · 锁定关系');
+  latestRelationLock.checked=false;
+  find(form,x=>x.tag==='button'&&x.textContent==='保存纠错').fire('click');
+  assert.equal(deriveState(memory,chat).characters[0].relationship,'敌人');
+  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+  assert.match(css,/\.sm-correction-field-heading/);
+  assert.match(css,/\.sm-lock-checkbox/);
+}));
+
+test('semantic search displays background index state without resetting settings drafts',()=>withUI(body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=> 'vector-status-ui'};
+  const status={enabled:true,busy:false,pending:true,error:'',lastCount:0};
+  const view=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+    vectorStatus:()=>status,queue:{busy:false,enqueueMissing(){}}});
+  view.open();
+  const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  const label=find(dialog,x=>x.className==='sm-help sm-vector-index-status');
+  assert.match(label.textContent,/等待后台更新/);
+  const key=find(dialog,x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='Embedding API 密钥'));
+  const input=walk(key).find(x=>x.tag==='input');
+  input.value='draft-not-saved';
+  status.pending=false;status.busy=true;
+  view.updateVectorStatus();
+  assert.match(label.textContent,/后台更新中/);
+  assert.equal(input.value,'draft-not-saved');
+  status.busy=false;status.error='Embedding API HTTP 503';
+  view.updateVectorStatus();
+  assert.match(label.textContent,/索引失败/);
+  assert.equal(input.value,'draft-not-saved');
+}));
+
+test('mobile navigation exposes all six tabs without horizontal scrolling',()=>{
+  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+  assert.match(css,/@media\(max-width:430px\)\{\s*\.sm-nav\{display:grid;grid-template-columns:repeat\(6,minmax\(0,1fr\)\)/);
+  assert.match(css,/\.sm-nav-item\{min-width:0;width:100%;justify-content:center;gap:3px/);
+});

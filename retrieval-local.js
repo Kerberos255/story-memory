@@ -1,5 +1,5 @@
 // Local search index and source tracing. Kept in memory and rebuilt from chat metadata.
-import {META_KEY,leafValid,validChapters,floorUserMessages} from './core.js';
+import {META_KEY,leafValid,validChapters,floorUserMessages,deriveState} from './core.js';
 
 const snapshots=new Map(),MAX_SCOPES=2;
 const STOP=new Set(['继续','然后','接着','好的','好吧','嗯','哦','啊','再说','开始','下一步','现在','怎么','什么','那个','这个','这里','那里','就是','还是','我们','你们','他们','她们','一个','一下','已经','可以','没有','是否','时候','如果','因为','所以','知道','觉得','一点']);
@@ -46,7 +46,18 @@ function entityNames(row){
   }
   return {names:[...names],mutable};
 }
-function allDocs(memory){
+const ENTITY_LABELS={items:'物品',scenes:'场景',characters:'人物',plans:'计划'};
+function entitySearchText(kind,entity){
+  const data={类型:ENTITY_LABELS[kind],名称:entity.name};
+  for(const field of ['description','location','owner','quantity','status','relationship','presence','time']){
+    if(entity[field]!==undefined&&entity[field]!==null&&entity[field]!=='')data[field]=entity[field];
+  }
+  if(Array.isArray(entity.aliases)&&entity.aliases.length)data.别名=entity.aliases;
+  if(Array.isArray(entity.knowledge)&&entity.knowledge.length)
+    data.知情记录=entity.knowledge.map(x=>({事实:x.fact,态度:x.stance,来源:x.provenance}));
+  return JSON.stringify(data).slice(0,6000);
+}
+function allDocs(memory,chat){
   const next=new Map();
   for(const [id,leaf] of Object.entries(memory.leaves||{})){
     if(!leaf?.summary)continue;
@@ -58,12 +69,41 @@ function allDocs(memory){
     if(!c?.id||!c.summary)continue;
     next.set(c.id,{key:c.id,summary:c.summary,searchText:content(c,'chapter'),kind:'chapter'});
   }
+  const state=deriveState(memory,chat||[]);
+  for(const kind of Object.keys(ENTITY_LABELS)){
+    for(const entity of state[kind]||[]){
+      if(entity.manual||!entity.entity_id)continue;
+      const key='entity:'+kind+':'+entity.entity_id;
+      const sourceFloors=[...new Set((entity.history||[]).map(x=>x.floor).filter(Number.isSafeInteger))].sort((a,b)=>b-a);
+      const names=[entity.name,...(entity.aliases||[])].map(x=>String(x||'').normalize('NFKC').toLowerCase().trim())
+        .filter(x=>x.length>=2&&x.length<=60&&!STOP.has(x));
+      const searchText=entitySearchText(kind,entity);
+      next.set(key,{key,summary:searchText,searchText,kind:'entity',sourceIndex:entity.sourceIndex,
+        sourceFloors,names,mutable:true});
+    }
+    for(const note of memory.manual?.[kind]||[]){
+      if(!note?.id||!note.text?.trim())continue;
+      const key='manual:'+kind+':'+note.id;
+      const searchText=JSON.stringify({类型:ENTITY_LABELS[kind],人工补充:note.text}).slice(0,6000);
+      next.set(key,{key,summary:searchText,searchText,kind:'manual',sourceFloors:[],
+        names:[String(note.text).normalize('NFKC').toLowerCase().trim()],mutable:false});
+    }
+  }
   return next;
 }
-function reconcile(previous,memory){
+function validSourceSignature(memory,chat){
+  const valid=[];
+  for(const key of Object.keys(memory.leaves||{})){
+    const index=Number(key);
+    if(Number.isSafeInteger(index)&&leafValid(memory,chat,index))valid.push(index);
+  }
+  valid.sort((a,b)=>a-b);
+  return valid.join(',');
+}
+function reconcile(previous,memory,chat,chatSignature){
   const index=previous||{docs:new Map(),postings:new Map(),revision:-1,source:null};
-  if(index.source===memory)return index;
-  const fresh=allDocs(memory);
+  if(index.source===memory&&index.chatSignature===chatSignature)return index;
+  const fresh=allDocs(memory,chat);
   for(const [key,row] of index.docs){
     const next=fresh.get(key);
     if(next&&next.searchText===row.searchText&&next.summary===row.summary)continue;
@@ -82,23 +122,25 @@ function reconcile(previous,memory){
       index.postings.get(term).add(key);
     }
   }
-  index.revision=memory.revision;index.source=memory;
+  index.revision=memory.revision;index.source=memory;index.chatSignature=chatSignature;
   return index;
 }
 export function searchIndex(ctx,memory){
-  const key=scope(ctx),source=ctx?.chatMetadata?.[META_KEY]||memory;
-  if(!key)return reconcile(null,source);
+  const key=scope(ctx),source=ctx?.chatMetadata?.[META_KEY]||memory,chat=ctx?.chat||[];
+  const signature=validSourceSignature(source,chat);
+  if(!key)return reconcile(null,source,chat,signature);
   const existing=snapshots.get(key);
-  const updated=reconcile(existing,source);
+  const updated=reconcile(existing,source,chat,signature);
   snapshots.delete(key);snapshots.set(key,updated);
   while(snapshots.size>MAX_SCOPES)snapshots.delete(snapshots.keys().next().value);
   return updated;
 }
-function validKey(key,memory,chat,chapters){
+function validKey(key,memory,chat,chapters,docs){
   if(key.startsWith('floor:')){
     const n=Number(key.slice(6));
     return Number.isInteger(n)&&leafValid(memory,chat,n);
   }
+  if(key.startsWith('entity:')||key.startsWith('manual:'))return Boolean(docs?.has(key));
   return chapters.has(key);
 }
 function rankWords(index,terms){
@@ -117,7 +159,7 @@ export function lexicalSearch(ctx,memory,query,limit=18){
   const chapters=new Set(validChapters(memory,chat).map(x=>x.id));
   const scored=rankWords(idx,terms);
   return [...scored].sort((a,b)=>b[1]-a[1])
-    .filter(([key])=>validKey(key,memory,chat,chapters))
+    .filter(([key])=>validKey(key,memory,chat,chapters,idx.docs))
     .slice(0,Math.max(1,Math.min(40,limit)))
     .map(([key,score])=>({...idx.docs.get(key),score}));
 }
@@ -131,7 +173,7 @@ export function selectHistory(ctx,memory,query,semantic=[],limit=5){
   const merged=new Map();
   const include=(key,rank,source)=>{
     const row=idx.docs.get(key);
-    if(!row||!validKey(key,memory,ctx.chat||[],valid))return;
+    if(!row||!validKey(key,memory,ctx.chat||[],valid,idx.docs))return;
     const prev=merged.get(key)||{...row,rank:0,from:[]};
     prev.rank+=1/(12+rank)*(source==='keyword'?1.2:1);
     prev.from.push(source);merged.set(key,prev);
@@ -190,8 +232,16 @@ export function sourceEvidence(ctx,memory,hit,query,maxFloors=3){
   if(!terms.length)return [];
   const idx=searchIndex(ctx,memory),chat=ctx.chat||[];
   const chapters=new Set(validChapters(memory,chat).map(x=>x.id));
-  if(!validKey(hit.key,memory,chat,chapters))return [];
-  const sources=childFloor(hit.key,memory,idx,terms,maxFloors);
+  if(!validKey(hit.key,memory,chat,chapters,idx.docs))return [];
+  const doc=idx.docs.get(hit.key);
+  // Entity facts can survive for thousands of floors. Prefer original floors
+  // whose text matches the query, not only the most recent 48 updates.
+  const sources=doc?.kind==='entity'?[...(doc.sourceFloors||[])]
+    .map(index=>{
+      const text=idx.docs.get('floor:'+index)?.searchText?.toLowerCase()||'';
+      return {index,match:terms.reduce((n,t)=>n+(text.includes(t)?1:0),0)};
+    }).sort((a,b)=>b.match-a.match||b.index-a.index).slice(0,48).map(x=>x.index):
+    doc?.kind==='manual'?[]:childFloor(hit.key,memory,idx,terms,maxFloors);
   const matches=[];
   for(const i of sources){
     if(!leafValid(memory,chat,i))continue;
@@ -225,7 +275,8 @@ export function historyEvidence(ctx,memory,hits,query,maxSources=3){
 export function sourcePreview(ctx,memory,key,limit=5,offset=0){
   const chat=ctx?.chat||[];
   const chapters=new Set(validChapters(memory,chat).map(x=>x.id));
-  if(!validKey(key,memory,chat,chapters))return [];
+  if(!validKey(key,memory,chat,chapters,searchIndex(ctx,memory).docs))return [];
+  if(key.startsWith('entity:')||key.startsWith('manual:'))return [];
   const chapterById=new Map((memory.chapters||[]).map(c=>[c.id,c]));
   const pageSize=Math.max(1,Math.min(20,Math.trunc(Number(limit)||5)));
   const skip=Math.max(0,Math.trunc(Number(offset)||0));

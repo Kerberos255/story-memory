@@ -35,3 +35,32 @@ test('pre-generation hook adds local historical evidence without any vector API'
     assert.ok(!prompts[0].text.includes('[原文 #1]'));
   }finally{globalThis.document=originalDoc;globalThis.window=originalWindow;}
 });
+
+test('structured entity result remains in pre-generation injection even when source evidence is present',async()=>{
+  const chat=[
+    {is_user:false,mes:'银戒指由艾琳保管。',swipe_id:0},
+    {is_user:false,mes:'艾琳把银戒指交给主角。',swipe_id:0},
+    {is_user:true,mes:'现在银戒指在谁手上？'}
+  ];
+  let memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),
+    normalizeDelta({summary:'戒指原本归艾琳',items:[{op:'add',name:'银戒指',owner:'艾琳'}]}));
+  memory=commitLeaf(memory,1,messageFingerprint(chat[1]),
+    normalizeDelta({summary:'戒指被交还',items:[{op:'update',name:'银戒指',owner:'主角'}]}));
+  const settings=defaultSettings();settings.summary.keepRecent=0;
+  settings.injection.inventory=false;settings.injection.characters=false;
+  const prompts=[];
+  const ctx={chat,chatMetadata:{[META_KEY]:memory},
+    extensionSettings:{[SETTINGS_KEY]:settings},getCurrentChatId:()=> 'entity-hook-test',
+    setExtensionPrompt:(key,text)=>prompts.push({key,text})};
+  const originalDoc=globalThis.document,originalWindow=globalThis.window;
+  globalThis.document={readyState:'loading',addEventListener:()=>{}};
+  globalThis.window={SillyTavern:{getContext:()=>ctx}};
+  try{
+    await import('../index.js?entity-current-evidence');
+    await globalThis.storyMemoryGenerationInterceptor();
+    assert.equal(prompts.length,1);
+    assert.match(prompts[0].text,/\[当前实体\]/);
+    assert.match(prompts[0].text,/"owner":"主角"/);
+    assert.ok(prompts[0].text.includes('相关历史'));
+  }finally{globalThis.document=originalDoc;globalThis.window=originalWindow;}
+});

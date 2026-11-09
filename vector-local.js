@@ -1,6 +1,6 @@
 // Standalone browser-side embeddings, completely independent from SillyTavern's secret vault.
 // Cache is rebuildable; canonical summaries always remain in chat metadata.
-import {hashText,leafValid,validChapters} from './core.js';
+import {META_KEY,hashText,leafValid,validChapters,deriveState} from './core.js';
 const DB='story-memory-embeddings-v1',TABLE='entries';
 let opening;
 function db(){
@@ -153,40 +153,78 @@ export function scopeId(ctx,settings){
   const scope=[ctx.groupId||'',ctx.characterId||'',chat,settings.vector?.url||'',settings.vector?.model||''].join('|');
   return hashText(scope)+hashText([...scope].reverse().join(''))+':';
 }
+const ENTITY_LABELS={items:'物品',scenes:'场景',characters:'人物',plans:'计划'};
+function entityDocument(kind,entity){
+  const data={类型:ENTITY_LABELS[kind],名称:entity.name};
+  for(const field of ['description','location','owner','quantity','status','relationship','presence','time']){
+    if(entity[field]!==undefined&&entity[field]!==null&&entity[field]!=='')data[field]=entity[field];
+  }
+  if(Array.isArray(entity.aliases)&&entity.aliases.length)data.别名=entity.aliases;
+  if(Array.isArray(entity.knowledge)&&entity.knowledge.length)
+    data.知情记录=entity.knowledge.map(x=>({事实:x.fact,态度:x.stance,来源:x.provenance}));
+  return JSON.stringify(data).slice(0,6000);
+}
 export function candidates(ctx,memory){
   const result=[];
   for(const [key,leaf] of Object.entries(memory.leaves||{})){
     const i=Number(key);
-    if(!leafValid(memory,ctx.chat,i))continue;
-    result.push({key:'floor:'+i,text:leaf.summary});
+    if(!leafValid(memory,ctx.chat,i)||!leaf.summary?.trim())continue;
+    result.push({key:'floor:'+i,text:leaf.summary,kind:'floor'});
   }
   for(const chapter of validChapters(memory,ctx.chat||[])){
-    result.push({key:chapter.id,text:chapter.summary});
+    if(chapter.summary?.trim())result.push({key:chapter.id,text:chapter.summary,kind:'chapter'});
+  }
+  const state=deriveState(memory,ctx.chat||[]);
+  for(const kind of Object.keys(ENTITY_LABELS)){
+    for(const entity of state[kind]||[]){
+      if(entity.manual||!entity.entity_id)continue;
+      const text=entityDocument(kind,entity);
+      if(text)result.push({key:'entity:'+kind+':'+entity.entity_id,text,kind:'entity'});
+    }
+    for(const note of memory.manual?.[kind]||[]){
+      if(!note?.id||!note.text?.trim())continue;
+      const text=JSON.stringify({类型:ENTITY_LABELS[kind],人工补充:note.text}).slice(0,6000);
+      result.push({key:'manual:'+kind+':'+note.id,text,kind:'manual'});
+    }
   }
   return result.filter(x=>x.text?.trim());
 }
-export async function indexSummaries(ctx,memory,settings,signal){
+/**
+ * Full indexing remains available for initial backfill. Automatic maintenance can
+ * select only changed keys/kinds while still pruning stale rows from this chat.
+ */
+export async function indexSummaries(ctx,memory,settings,signal,options=null){
   if(!settings.vector?.enabled)return 0;
   const prefix=scopeId(ctx,settings),records=candidates(ctx,memory);
   const stored=await rows(prefix),lookup=new Map(stored.map(x=>[x.id,x]));
   const desired=new Set(records.map(x=>prefix+x.key));
-  // A new model uses a different namespace; stale old-model cache remains inert.
   const stale=stored.filter(x=>!desired.has(x.id)).map(x=>x.id);
-  const changed=records.filter(row=>{
+  const full=!options||options.full===true;
+  const keys=new Set(options?.keys||[]),kinds=new Set(options?.refreshKinds||[]);
+  let changed=records.filter(row=>(full||keys.has(row.key)||kinds.has(row.kind))&&(()=>{
     const cached=lookup.get(prefix+row.key);
     return !cached||cached.hash!==hashText(row.text);
-  });
+  })());
+  const cap=Number(options?.maxRecords);
+  if(Number.isSafeInteger(cap)&&cap>0)changed=changed.reverse().slice(0,Math.min(60,cap));
   let count=0;
   for(let i=0;i<changed.length;i+=6){
     if(signal?.aborted)break;
     const batch=changed.slice(i,i+6),vectors=await embed(settings,batch.map(x=>x.text),signal);
-    if(prefix!==scopeId(ctx,settings))return count;
+    if(signal?.aborted||prefix!==scopeId(ctx,settings))return count;
+    const latest=ctx.chatMetadata?.[META_KEY]||memory;
+    // Never write embeddings computed from a superseded metadata snapshot.
+    if(latest!==memory)return count;
     await write(batch.map((item,j)=>({
-      id:prefix+item.key,hash:hashText(item.text),key:item.key,text:item.text,vector:normalizeEmbedding(vectors[j])
+      id:prefix+item.key,hash:hashText(item.text),key:item.key,text:item.text,kind:item.kind,
+      vector:normalizeEmbedding(vectors[j])
     })));
     count+=batch.length;
   }
-  if(prefix===scopeId(ctx,settings))await write([],stale);
+  if(signal?.aborted||prefix!==scopeId(ctx,settings))return count;
+  const latest=ctx.chatMetadata?.[META_KEY]||memory;
+  if(latest!==memory)return count;
+  if(stale.length)await write([],stale);
   return count;
 }
 /** Cheap preselection and fail-open rerank, independently testable without IndexedDB. */

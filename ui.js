@@ -91,7 +91,7 @@ export function mountUI(api){
   topActions.append(themeButton,close);top.append(brand,topActions);
   const layout=el('div','sm-layout'),nav=el('nav','sm-nav'),body=el('main','sm-content');
   layout.append(nav,body);dialog.append(top,layout);
-  let active=false,page='summaries',notice='',settingsOpen=new Set();
+  let active=false,page='summaries',notice='',settingsOpen=new Set(),vectorStatusField=null;
   let dirtyEditor=false;
   let timelineLimit=50,chapterLimit=40,timelineQuery='';
   // Queue progress must not replace an in-progress form or destroy nested dialogs.
@@ -520,19 +520,32 @@ export function mountUI(api){
     return wrap;
   }
   function entityCorrection(kind,entry){
-    const fields={items:['description','location','owner','status','quantity'],
-      scenes:['description','location','status'],
-      characters:['description','location','status','relationship','presence'],
-      plans:['description','location','status','time']}[kind]||[];
-    const labels={description:'说明',location:'位置',owner:'归属',status:'状态',
+    const fields={items:['name','description','location','owner','status','quantity'],
+      scenes:['name','description','location','status'],
+      characters:['name','description','location','status','relationship','presence'],
+      plans:['name','description','location','status','time']}[kind]||[];
+    const labels={name:'名称',description:'说明',location:'位置',owner:'归属',status:'状态',
       quantity:'数量',relationship:'关系',presence:'在场状态',time:'故事时间'};
     const panel=el('details','sm-entity-history sm-entity-correction');
-    panel.append(el('summary','sm-entity-history-heading',entry.correctionStale?'人工纠错 · 部分待核对':entry.manualCorrection?'人工纠错 · 已生效':'人工纠错'));
+    panel.append(el('summary','sm-entity-history-heading',
+      entry.lockedFields?.length?'人工纠错 · 已锁定 '+entry.lockedFields.length+' 项':
+      entry.correctionStale?'人工纠错 · 部分待核对':entry.manualCorrection?'人工纠错 · 已生效':'人工纠错'));
     const content=el('div','sm-entity-correction-content');
-    content.append(el('p','sm-help','优先采用此处人工确认的当前状态，不修改来源摘要；可随时恢复提取值。'));
-    const grid=el('div','sm-entity-correction-fields'),inputs={};
+    content.append(el('p','sm-help','未锁定的纠错在新证据出现时自动更新；锁定的字段保留人工确认值，解除锁定后可恢复最新提取结果。'));
+    if(entry.lockConflicts?.length){
+      const names=entry.lockConflicts.map(x=>(labels[x.field]||x.field)+'（#'+x.floor+'）').join('、');
+      content.append(el('p','sm-help sm-lock-conflict','新剧情与锁定字段不一致：'+names+'。请核对后决定保留锁定值，或解除锁定使用最新提取结果。'));
+    }
+    const grid=el('div','sm-entity-correction-fields'),inputs={},locks={};
     for(const fieldName of fields){
-      const row=el('label','sm-field');row.append(el('span','sm-field-label',labels[fieldName]));
+      const row=el('div','sm-field sm-correction-field'),heading=el('div','sm-correction-field-heading');
+      heading.append(el('span','sm-field-label',labels[fieldName]));
+      const lockLabel=el('label','sm-lock-field');
+      const lock=el('input','sm-lock-checkbox');lock.type='checkbox';
+      lock.checked=Boolean(entry.lockedFields?.includes(fieldName));
+      lock.setAttribute('aria-label',entry.name+' · 锁定'+labels[fieldName]);
+      lockLabel.append(lock,el('span','','锁定'));
+      locks[fieldName]=lock;heading.append(lockLabel);row.append(heading);
       let input;
       if(fieldName==='presence'){
         input=el('select','sm-input sm-select');
@@ -550,7 +563,9 @@ export function mountUI(api){
     }
     const actions=el('div','sm-row-actions');
     actions.append(button('保存纠错',()=>{
-      try{api.correctEntity(kind,entry.entity_id,Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,v.value])));
+      try{api.correctEntity(kind,entry.entity_id,
+        Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,v.value])),
+        Object.fromEntries(Object.entries(locks).map(([k,v])=>[k,v.checked])));
         showNotice('已更新当前状态');}
       catch(e){showNotice(e.message||'保存失败');}
     },'sm-btn sm-btn-primary'));
@@ -568,7 +583,8 @@ export function mountUI(api){
     const rules=Object.entries(mem.entityAliases?.[kind]||{});
     recordCards(kind==='plans'?'计划记录':'当前'+heading,entries,x=>({
       title:x.name,
-      subtitle:x.correctionStale?'新剧情已更新部分人工纠错':x.manualCorrection?'当前状态 · 人工确认':'',
+      subtitle:x.lockConflicts?.length?'锁定字段与新剧情有冲突':x.lockedFields?.length?'已锁定 '+x.lockedFields.length+' 个字段':
+        x.correctionStale?'新剧情已更新部分人工纠错':x.manualCorrection?'当前状态 · 人工确认':'',
       description:x.description||'',
       status:x.status||'',
       facts:[
@@ -676,6 +692,16 @@ export function mountUI(api){
     return details;
   }
   function grid(...elements){const row=el('div','sm-fields-grid');row.append(...elements);return row;}
+  function updateVectorStatus(){
+    if(!vectorStatusField)return;
+    const info=api.vectorStatus?.();
+    if(!info){vectorStatusField.textContent='索引状态：未连接';return;}
+    if(!info.enabled)vectorStatusField.textContent='索引状态：语义检索未启用';
+    else if(info.error)vectorStatusField.textContent='索引失败：'+String(info.error).slice(0,120)+'；可点击更新索引重试';
+    else if(info.busy)vectorStatusField.textContent='索引状态：后台更新中…';
+    else if(info.pending)vectorStatusField.textContent='索引状态：等待后台更新';
+    else vectorStatusField.textContent='索引状态：已完成本轮同步'+(info.lastCount?' · 最近更新 '+info.lastCount+' 条':'');
+  }
   function renderSettings(){
     const cfg=api.settings();
     title('设置','管理摘要渠道、记忆整理和召回方式');
@@ -881,7 +907,10 @@ export function mountUI(api){
     const rerankModel=field('重排模型',cfg.vector.rerankModel||'BAAI/bge-reranker-v2-m3');
     const rerankCount=field('重排候选数',cfg.vector.rerankCandidates??15,'number');
     rerankCount.input.min='2';rerankCount.input.max='30';
-    const vectorHelp=el('p','sm-help','向量和重排共用 API 地址与密钥。');
+    const vectorHelp=el('p','sm-help','向量和重排共用 API 地址与密钥。开启语义检索后，摘要、实体和章节将后台分批增量索引；旧聊天首次建立索引可能需要一段时间，不会阻塞正文。下方按钮可立即补齐当前聊天索引。');
+    const vectorStatus=el('p','sm-help sm-vector-index-status');
+    vectorStatus.setAttribute('role','status');
+    vectorStatusField=vectorStatus;updateVectorStatus();
     const vectorActions=el('div','sm-row-actions');
     vectorActions.append(button('更新当前聊天索引',async()=>{
       showNotice('正在更新向量索引…');
@@ -914,7 +943,7 @@ export function mountUI(api){
     vectorConfigHead.append(vectorConfigCopy,svg('chevron'));
     const vectorConfigBody=el('div','sm-memory-vector-config-body');
     vectorConfigBody.append(vectorUrl.wrapper,vectorKey.wrapper,vectorModel.wrapper,
-      grid(topK.wrapper,threshold.wrapper),rerankSection,vectorHelp,vectorActions);
+      grid(topK.wrapper,threshold.wrapper),rerankSection,vectorHelp,vectorStatus,vectorActions);
     vectorConfig.append(vectorConfigHead,vectorConfigBody);
     semanticSection.append(vectorConfig);
 
@@ -1187,6 +1216,7 @@ export function mountUI(api){
   }
   function render(){
     if(!active)return;
+    vectorStatusField=null;
     clearSaveToast();closeRecordModal(false);
     body.replaceChildren();nav.replaceChildren();dirtyEditor=false;
     for(const [name,label,icon] of NAV){
@@ -1201,7 +1231,7 @@ export function mountUI(api){
     else if(page==='settings')renderSettings();
     if(notice)showNotice(notice);
   }
-  return {open,resetChatView(){
+  return {open,updateVectorStatus,resetChatView(){
     timelineLimit=50;chapterLimit=40;timelineQuery='';dirtyEditor=false;
   },refresh(force=false){
     // Preserve drafts and editing dialogs during async queue updates.
