@@ -1,15 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {canSafelyReload,refreshAfterInstallOrUpdate} from '../lifecycle.js';
+import {canSafelyReload,reloadBlockReason,refreshAfterInstallOrUpdate} from '../lifecycle.js';
 import {readFileSync} from 'node:fs';
 
 function harness(){
   let nextId=1,reloads=0,confirmResult=false,generating=false,draft='';
   const timeouts=new Map(),intervals=new Map(),events=new Map(),toasts=[];
   let input={value:''},activeElement=null;
+  const managerDialog={
+    querySelector:selector=>selector==='.extensions_info'?{}:null,
+    contains:element=>Boolean(element?.insideManager)
+  };
+  const otherDialog={querySelector:()=>null};
   const doc={visibilityState:'visible',get activeElement(){return activeElement;},
-    querySelector:(selector)=>selector==='#send_textarea'?input:
-      selector==='dialog[open]'?(doc.dialogOpen?{}:null):null};
+    querySelectorAll:selector=>selector==='dialog[open]'?
+      [...(doc.managerOpen?[managerDialog]:[]),...(doc.dialogOpen?[otherDialog]:[])]:[],
+    querySelector:selector=>selector==='#send_textarea'?input:null};
   const win={
     location:{reload:()=>{reloads++;}},
     setTimeout:(fn)=>{const id=nextId++;timeouts.set(id,fn);return id;},
@@ -28,6 +34,7 @@ function harness(){
     generation:(value)=>{generating=value;},isGenerating:()=>generating,
     draft:(value)=>{input.value=value;},
     focus:(value)=>{activeElement=value;},
+    manager:(value)=>{doc.managerOpen=value;},
     confirm:(value)=>{confirmResult=value;},
     get reloads(){return reloads;},
     get intervalCount(){return intervals.size;},
@@ -105,4 +112,88 @@ test('manifest registers both official lifecycle hooks while auto-update remains
   assert.deepEqual(manifest.hooks,{install:'storyMemoryOnInstall',update:'storyMemoryOnUpdate'});
   assert.equal(manifest.auto_update,false);
   for(const key of Object.values(manifest.hooks))assert.match(entry,new RegExp('export function '+key+'\\('));
+});
+
+test('manager popup and its focused search input do not block, but other dialogs and drafts do',()=>{
+  const t=harness();t.manager(true);
+  t.focus({tagName:'INPUT',insideManager:true});
+  assert.equal(reloadBlockReason({doc:t.doc,isGenerating:t.isGenerating}),null);
+  assert.equal(canSafelyReload({doc:t.doc,isGenerating:t.isGenerating}),true);
+  t.doc.dialogOpen=true;
+  assert.equal(reloadBlockReason({doc:t.doc,isGenerating:t.isGenerating}),'还有其他弹窗打开');
+  t.doc.dialogOpen=false;
+  t.draft('原来聊天中的草稿');
+  assert.equal(reloadBlockReason({doc:t.doc,isGenerating:t.isGenerating}),'发送框有未发送内容');
+  t.draft('');
+  t.focus({tagName:'TEXTAREA',insideManager:false});
+  assert.equal(reloadBlockReason({doc:t.doc,isGenerating:t.isGenerating}),'有尚未退出的输入控件');
+  t.focus({tagName:'INPUT',insideManager:true});
+  t.generation(true);
+  assert.equal(reloadBlockReason({doc:t.doc,isGenerating:t.isGenerating}),'酒馆正在生成回复');
+  t.generation(false);
+  assert.equal(canSafelyReload({doc:t.doc,isGenerating:t.isGenerating,
+    getExtensionBlockReason:()=> '剧情记忆正在整理摘要'}),false);
+});
+
+test('update hook reloads once even while official extension manager stays open',async()=>{
+  const t=harness();t.manager(true);
+  t.focus({tagName:'INPUT',insideManager:true});
+  try{
+    assert.equal(await refreshAfterInstallOrUpdate('更新',{doc:t.doc,win:t.win,toast:t.toast,
+      isGenerating:t.isGenerating,delay:12}),true);
+    t.tickTimeouts();
+    assert.equal(t.reloads,1);
+    assert.equal(t.toasts.length,0,'manager alone is not a reason to warn');
+    t.tickIntervals();assert.equal(t.reloads,1);
+  }finally{t.reset();}
+});
+
+test('extension tasks and other dialogs delay reload with accurate reasons until safe',async()=>{
+  const t=harness();t.manager(true);
+  let reason='剧情记忆正在整理摘要';
+  try{
+    await refreshAfterInstallOrUpdate('更新',{doc:t.doc,win:t.win,toast:t.toast,
+      isGenerating:t.isGenerating,getExtensionBlockReason:()=>reason});
+    t.tickTimeouts();
+    assert.equal(t.reloads,0);
+    assert.equal(t.toasts.length,1);
+    assert.match(t.toasts[0].message,/自动刷新暂缓：剧情记忆正在整理摘要/);
+    t.tickIntervals();assert.equal(t.toasts.length,1,'do not repeat unchanged notices');
+    reason='剧情记忆设置有未保存的修改';
+    t.tickIntervals();
+    assert.equal(t.toasts.length,2);
+    assert.match(t.toasts[1].message,/剧情记忆设置有未保存的修改/);
+    reason=null;t.doc.dialogOpen=true;t.tickIntervals();
+    assert.equal(t.reloads,0);
+    assert.equal(t.toasts.length,3);
+    assert.match(t.toasts[2].message,/还有其他弹窗打开/);
+    t.doc.dialogOpen=false;t.tickIntervals();
+    assert.equal(t.reloads,1);
+    t.tickIntervals();assert.equal(t.reloads,1);
+  }finally{t.reset();}
+});
+
+test('manual refresh of a busy extension requires confirmation, without repeated reload',async()=>{
+  const t=harness();t.manager(true);
+  try{
+    await refreshAfterInstallOrUpdate('更新',{doc:t.doc,win:t.win,toast:t.toast,
+      isGenerating:t.isGenerating,getExtensionBlockReason:()=> '剧情记忆正在整理摘要'});
+    t.tickTimeouts();
+    t.toasts[0].options.onclick();
+    assert.equal(t.reloads,0);
+    t.confirm(true);
+    t.toasts[0].options.onclick();
+    assert.equal(t.reloads,1);
+    t.tickIntervals();assert.equal(t.reloads,1);
+  }finally{t.reset();}
+});
+
+test('host and extension state signals remain wired to the lifecycle hook',()=>{
+  const entry=readFileSync(new URL('../index.js',import.meta.url),'utf8');
+  const ui=readFileSync(new URL('../ui.js',import.meta.url),'utf8');
+  assert.match(entry,/getExtensionBlockReason:refreshBlockReason/);
+  assert.match(entry,/queue\?\.busy\|\|queue\?\.chapterRetryBusy/);
+  assert.match(entry,/vectorIndexer\?\.status\(\)\?\.busy/);
+  assert.match(entry,/ui\?\.getRefreshBlockReason\?\.\(\)/);
+  assert.match(ui,/getRefreshBlockReason\(\)/);
 });

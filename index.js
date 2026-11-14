@@ -214,9 +214,19 @@ async function generateInterceptor(_chat,_contextSize,_abort,type){
   }
   await injectForGeneration(cfg.retrieval?.enabled!==false?[]:vectors,history,activeMemory);
 }
-// Extension lifecycle hooks: installation/update finish before the page reload.
-export function storyMemoryOnInstall(){return refreshAfterInstallOrUpdate('安装');}
-export function storyMemoryOnUpdate(){return refreshAfterInstallOrUpdate('更新');}
+// Extension lifecycle hooks: allow the host manager, but protect active work.
+function refreshBlockReason(){
+  if(queue?.busy||queue?.chapterRetryBusy)return '剧情记忆正在整理摘要';
+  if(queue?.restoring||queue?.hiding)return '剧情记忆正在同步聊天正文';
+  if(vectorIndexer?.status()?.busy)return '剧情记忆正在更新向量索引';
+  return ui?.getRefreshBlockReason?.()||null;
+}
+export function storyMemoryOnInstall(){
+  return refreshAfterInstallOrUpdate('安装',{getExtensionBlockReason:refreshBlockReason});
+}
+export function storyMemoryOnUpdate(){
+  return refreshAfterInstallOrUpdate('更新',{getExtensionBlockReason:refreshBlockReason});
+}
 // SillyTavern calls this by manifest name during user generation.
 globalThis.storyMemoryGenerationInterceptor=generateInterceptor;
 function notifyFailures(){

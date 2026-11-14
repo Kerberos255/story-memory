@@ -226,3 +226,16 @@ test('failed chapter compression reports an error and manual retry preserves all
     assert.equal(fixed.chapterPauseUntil,0);
   }finally{q.cancel();}
 });
+
+test('manual chapter retry exposes busy state until compression finishes',async()=>{
+  const {ctx,cfg}=setup(1),q=new SummaryQueue(()=>ctx,()=>cfg,()=>{});
+  let finish;
+  q.maybeChapter=()=>new Promise(resolve=>{finish=resolve;});
+  const running=q.retryChapters();
+  assert.equal(q.chapterRetryBusy,true);
+  await assert.rejects(()=>q.retryChapters(),/正在整理楼层/);
+  finish();
+  assert.equal(await running,true);
+  assert.equal(q.chapterRetryBusy,false);
+  q.cancel();
+});

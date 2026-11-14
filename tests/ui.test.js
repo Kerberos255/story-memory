@@ -1870,3 +1870,22 @@ test('disclosure arrows use one size and CSS rotation instead of OS font glyphs'
   assert.match(css,/\.sm-entity-history-heading::-webkit-details-marker\{display:none\}/);
   assert.doesNotMatch(pending,/[⌃⌄]/,'pending groups must not use font-dependent glyphs');
 });
+
+test('reload guard reports open Story Memory panel and unsaved settings accurately',()=>withUI(body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
+  const view=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}}});
+  assert.equal(view.getRefreshBlockReason(),null,'closed panel does not block updates');
+  view.open();
+  assert.match(view.getRefreshBlockReason(),/面板仍然打开/);
+  const dialog=body.children[0].shadow.children[1];
+  const settings=find(dialog,x=>x.className?.includes('sm-nav-item')&&
+    walk(x).some(y=>y.textContent==='设置'));
+  settings.fire('click');
+  const budget=find(dialog,x=>x.className==='sm-field'&&
+    walk(x).some(y=>y.textContent==='记忆长度上限（约 Tokens）'));
+  assert.ok(budget);
+  const input=find(budget,x=>x.tag==='input');
+  input.value='12000';
+  assert.match(view.getRefreshBlockReason(),/设置有未保存的修改/);
+}));

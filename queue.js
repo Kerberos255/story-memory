@@ -9,7 +9,7 @@ export class SummaryQueue{
   constructor(getContext,getSettings,onChange){
     this.getContext=getContext;this.getSettings=getSettings;this.onChange=onChange;
     this.jobs=[];this.busy=false;this.abort=null;this.chatKey='';
-    this.activeIndex=null;this.retryTimer=null;
+    this.activeIndex=null;this.retryTimer=null;this.chapterRetryBusy=false;
   }
   currentKey(){return this.getContext()?.getCurrentChatId?.()||'';}
   cancel(notify=true){
@@ -259,16 +259,19 @@ export class SummaryQueue{
     }
   }
   async retryChapters(){
-    if(this.busy)throw Error('正在整理楼层，请稍后重试分层压缩');
+    if(this.busy||this.chapterRetryBusy)throw Error('正在整理楼层，请稍后重试分层压缩');
     const key=this.currentKey(),ctx=this.getContext();
     if(!ctx||!key)throw Error('请先打开聊天');
-    const memory=readMemory(ctx);
-    memory.chapterPauseUntil=0;
-    delete memory.chapterError;
-    writeMemory(ctx,memory);this.onChange?.();
-    await this.maybeChapter(key);
-    const current=this.getContext();
-    return this.currentKey()===key&&Boolean(current)&&!peekMemory(current).chapterError;
+    this.chapterRetryBusy=true;
+    try{
+      const memory=readMemory(ctx);
+      memory.chapterPauseUntil=0;
+      delete memory.chapterError;
+      writeMemory(ctx,memory);this.onChange?.();
+      await this.maybeChapter(key);
+      const current=this.getContext();
+      return this.currentKey()===key&&Boolean(current)&&!peekMemory(current).chapterError;
+    }finally{this.chapterRetryBusy=false;}
   }
   async maybeChapter(key){
     const ctx=this.getContext(),cfg=this.getSettings();

@@ -1494,7 +1494,15 @@ export function mountUI(api){
       if(Number.isInteger(selection))search?.setSelectionRange?.(selection,selection);
     }
   }
-  return {open,updateVectorStatus,showFailures(){
+  return {open,updateVectorStatus,
+    getRefreshBlockReason(){
+      if(!active)return null;
+      if(page==='settings'&&(settingsDraft||settingsReadDirty()))
+        return '剧情记忆设置有未保存的修改';
+      if(recordOverlay||dirtyEditor)return '剧情记忆仍有正在编辑的内容';
+      return '剧情记忆面板仍然打开';
+    },
+    showFailures(){
     page='summaries';pendingView.expanded='failed';pendingView.all=false;open(true);
   },resetChatView(){
     timelineLimit=50;chapterLimit=40;timelineQuery='';dirtyEditor=false;
