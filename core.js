@@ -64,6 +64,14 @@ export function leafValid(memory,chat,index){
   if(!leaf||leaf.fingerprint!==messageFingerprint(chat?.[index]))return false;
   return !leaf.userFingerprint||leaf.userFingerprint===userFingerprint(chat,index);
 }
+/** Return a task only while its saved source still matches the current chat. */
+export function taskForFloor(memory,chat,index){
+  const task=memory.tasks?.[index];
+  if(!task)return null;
+  if(task.fingerprint&&task.fingerprint!==messageFingerprint(chat?.[index]))return null;
+  if(task.userFingerprint&&task.userFingerprint!==userFingerprint(chat,index))return null;
+  return task;
+}
 export function pendingFloors(memory,chat) {
   const pending=[];
   for(let i=0;i<(chat?.length||0);i++){
@@ -837,7 +845,13 @@ export function commitCompression(memory,chat,plan,summary){
 /** Automatic summaries wait until an AI reply is outside the newest N AI replies. */
 export function automaticFloorIndices(memory,chat,delay=3){
   const cutoff=recentAiStart(chat,Math.max(0,Math.min(100,Math.trunc(Number(delay)||0))));
-  return pendingFloors(memory,chat).filter(index=>index<cutoff);
+  const now=Date.now();
+  return pendingFloors(memory,chat).filter(index=>{
+    if(index>=cutoff)return false;
+    const task=taskForFloor(memory,chat,index);
+    if(task?.status==='failed'||task?.status==='running')return false;
+    return task?.status!=='cooldown'||Number(task.nextRetryAt||0)<=now;
+  });
 }
 /**
  * Only exclude messages already covered by an unchanged AI leaf. A leaf covers

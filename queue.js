@@ -1,21 +1,31 @@
 import {ApiFault} from './api.js';
 import {summarizeFloor,summarizeChapter} from './summary-workflow.js';
-import {peekMemory,readMemory,writeMemory,messageFingerprint,userFingerprint,leafValid,commitLeaf,pendingFloors,automaticFloorIndices,hideReadyIndices,staleHiddenIndices,nextCompression,commitCompression} from './core.js';
+import {peekMemory,readMemory,writeMemory,messageFingerprint,userFingerprint,taskForFloor,leafValid,commitLeaf,pendingFloors,automaticFloorIndices,hideReadyIndices,staleHiddenIndices,nextCompression,commitCompression} from './core.js';
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const BACKOFF_MS=[30000,120000,300000];
+const isTransient=err=>err instanceof ApiFault&&
+  (err.code==='network_error'||err.code==='timeout'||[429,500,502,503,504].includes(err.status));
 export class SummaryQueue{
   constructor(getContext,getSettings,onChange){
     this.getContext=getContext;this.getSettings=getSettings;this.onChange=onChange;
     this.jobs=[];this.busy=false;this.abort=null;this.chatKey='';
+    this.activeIndex=null;this.retryTimer=null;
   }
   currentKey(){return this.getContext()?.getCurrentChatId?.()||'';}
-  cancel(notify=true){this.jobs=[];this.abort?.abort();this.chatKey=this.currentKey();if(notify)this.onChange?.();}
-  enqueue(indices){
+  cancel(notify=true){
+    this.jobs=[];this.abort?.abort();
+    if(this.retryTimer!==null)clearTimeout(this.retryTimer);
+    this.retryTimer=null;this.chatKey=this.currentKey();
+    if(notify)this.onChange?.();
+  }
+  enqueue(indices,automatic=false){
     const ctx=this.getContext();if(!ctx||!this.getSettings().enabled)return;
     const key=this.currentKey();if(!key)return;
     if(this.chatKey!==key)this.cancel();
     for(const index of indices){
       if(!Number.isInteger(index)||index<0||!messageFingerprint(ctx.chat?.[index]))continue;
-      if(!this.jobs.some(j=>j.index===index))this.jobs.push({index,key});
+      if(this.activeIndex===index&&this.busy)continue;
+      if(!this.jobs.some(j=>j.index===index))this.jobs.push({index,key,automatic});
     }
     this.onChange?.();void this.drain();
   }
@@ -24,8 +34,56 @@ export class SummaryQueue{
     this.enqueue(pendingFloors(peekMemory(ctx),ctx.chat).slice(0,Math.max(1,limit)));
   }
   enqueueAutomatic(limit=100){
-    const ctx=this.getContext();if(!ctx||!this.getSettings().autoSummary)return;
-    this.enqueue(automaticFloorIndices(peekMemory(ctx),ctx.chat,this.getSettings().summary?.delayFloors??3).slice(0,Math.max(1,limit)));
+    const ctx=this.getContext(),cfg=this.getSettings();
+    if(!ctx||!cfg.enabled||!cfg.autoSummary)return;
+    this.enqueue(automaticFloorIndices(peekMemory(ctx),ctx.chat,cfg.summary?.delayFloors??3).slice(0,Math.max(1,limit)),true);
+  }
+  /** Recover interrupted tasks without needing another message to be generated. */
+  resume(){
+    const ctx=this.getContext(),key=this.currentKey();
+    if(!ctx||!key||!this.getSettings().enabled)return;
+    if(this.chatKey!==key)this.cancel(false);
+    const snapshot=peekMemory(ctx),pending=pendingFloors(snapshot,ctx.chat||[]);
+    let memory=null;
+    for(const i of pending){
+      const task=taskForFloor(snapshot,ctx.chat,i);
+      if(task?.status!=='running'||(this.busy&&this.activeIndex===i&&!this.abort?.signal.aborted))continue;
+      memory??=readMemory(ctx);
+      const automatic=Boolean(this.getSettings().autoSummary);
+      memory.tasks[i]={...task,status:automatic?'cooldown':'failed',
+        code:'interrupted',updatedAt:Date.now(),
+        nextRetryAt:automatic?Date.now()+1000:null};
+    }
+    if(memory){writeMemory(ctx,memory);this.onChange?.();}
+    this.enqueueAutomatic(5);
+    this.armRetry();
+  }
+  armRetry(){
+    if(this.retryTimer!==null)clearTimeout(this.retryTimer);
+    this.retryTimer=null;
+    const ctx=this.getContext(),cfg=this.getSettings(),key=this.currentKey();
+    if(!ctx||!key||!cfg.enabled||!cfg.autoSummary)return;
+    let due=Infinity;
+    const memory=peekMemory(ctx),chat=ctx.chat||[];
+    const eligible=automaticFloorIndices({...memory,tasks:{}},chat,cfg.summary?.delayFloors??3);
+    for(const i of eligible){
+      const task=taskForFloor(memory,chat,i);
+      if(task?.status==='cooldown'&&Number.isFinite(task.nextRetryAt))
+        due=Math.min(due,task.nextRetryAt);
+    }
+    if(!Number.isFinite(due))return;
+    this.retryTimer=setTimeout(()=>{
+      this.retryTimer=null;
+      if(key!==this.currentKey())return;
+      const live=this.getContext(),snapshot=peekMemory(live);
+      const dueItems=automaticFloorIndices(snapshot,live.chat||[],cfg.summary?.delayFloors??3)
+        .filter(i=>{const task=taskForFloor(snapshot,live.chat,i);
+          return task?.status==='cooldown'&&Number(task.nextRetryAt)<=Date.now();})
+        .slice(0,5);
+      if(dueItems.length)this.enqueue(dueItems,true);
+      if(!this.busy)this.armRetry();
+    },Math.min(2147483647,Math.max(50,due-Date.now())));
+    this.retryTimer.unref?.(); // Do not keep Node test runners alive.
   }
   async restoreStale(key=this.currentKey()){
     if(this.restoring)return this.restoring;
@@ -83,13 +141,12 @@ export class SummaryQueue{
           if(!message||message.is_system)continue;
           // Mark our excluded AI replies, preserving their swipe fingerprints.
           const beforeExtra=message.extra;
-          const beforeFlag=message.extra?.story_memory_hidden;
           message.extra={...(message.extra||{}),story_memory_hidden:true};
           message.is_system=true;
           const element=typeof document==='undefined'?null:document.querySelector(`.mes[mesid="${index}"]`);
           const oldAttr=element?.getAttribute('is_system');
           if(element)element.setAttribute('is_system','true');
-          changed.push({message,beforeExtra,beforeFlag,element,oldAttr});
+          changed.push({message,beforeExtra,element,oldAttr});
         }
         if(!changed.length)return 0;
         await ctx.saveChat();
@@ -122,12 +179,14 @@ export class SummaryQueue{
       while(this.jobs.length){
         const job=this.jobs.shift();
         if(job.key!==this.currentKey())continue;
+        this.activeIndex=job.index;
         try{await this.summarize(job);}catch{}
+        this.activeIndex=null;
         this.onChange?.();
       }
-    }finally{this.busy=false;this.abort=null;this.onChange?.();}
+    }finally{this.busy=false;this.activeIndex=null;this.abort=null;this.armRetry();this.onChange?.();}
   }
-  async summarize({index,key}){
+  async summarize({index,key,automatic=false}){
     let ctx=this.getContext();
     if(!ctx||key!==this.currentKey())return;
     const fingerprint=messageFingerprint(ctx.chat?.[index]);
@@ -136,12 +195,16 @@ export class SummaryQueue{
     let memory=peekMemory(ctx);
     if(leafValid(memory,ctx.chat,index))return;
     const settings=this.getSettings();
+    const previous=taskForFloor(memory,ctx.chat,index);
+    const autoRetries=automatic?Math.max(0,Number(previous?.autoRetries)||0):0;
+    const attempts=automatic?Math.max(0,Number(previous?.attempts)||0):0;
     const controller=new AbortController();this.abort=controller;
     const maxRetries=Math.max(0,Math.min(2,Number(settings.summary?.retry)||0));
     for(let attempt=0;attempt<=maxRetries;attempt++){
       if(key!==this.currentKey()||controller.signal.aborted)return;
       memory=readMemory(this.getContext());
-      memory.tasks[index]={status:'running',attempts:attempt+1,updatedAt:Date.now()};
+      memory.tasks[index]={status:'running',attempts:attempts+attempt+1,
+        autoRetries,updatedAt:Date.now(),fingerprint,userFingerprint:userFp};
       writeMemory(this.getContext(),memory);this.onChange?.();
       try{
         const parsed=await summarizeFloor(index,ctx,memory,settings,controller.signal);
@@ -155,17 +218,21 @@ export class SummaryQueue{
         return;
       }catch(err){
         if(key!==this.currentKey()||controller.signal.aborted)return;
-        const retryable=err instanceof ApiFault&&
-          (err.code==='network_error'||err.code==='timeout'||[429,500,502,503,504].includes(err.status));
+        const retryable=isTransient(err);
         if(retryable&&attempt<maxRetries){await sleep(900*(attempt+1));continue;}
+        const canRecover=retryable&&settings.autoSummary&&autoRetries<BACKOFF_MS.length;
         memory=readMemory(this.getContext());
-        memory.tasks[index]={status:'failed',code:err instanceof ApiFault?err.code:'unknown',attempts:attempt+1,updatedAt:Date.now()};
+        memory.tasks[index]={status:canRecover?'cooldown':'failed',
+          code:err instanceof ApiFault?err.code:'unknown',
+          httpStatus:err instanceof ApiFault?err.status||null:null,
+          attempts:attempts+attempt+1,autoRetries:canRecover?autoRetries+1:autoRetries,
+          updatedAt:Date.now(),fingerprint,userFingerprint:userFp,
+          nextRetryAt:canRecover?Date.now()+BACKOFF_MS[autoRetries]:null};
         writeMemory(this.getContext(),memory);this.onChange?.();return;
       }
     }
   }
   async maybeChapter(key){
-    // Retain the former method name for existing callers, now handles all levels.
     const ctx=this.getContext(),cfg=this.getSettings();
     if(!ctx||key!==this.currentKey())return;
     let memory=peekMemory(ctx);

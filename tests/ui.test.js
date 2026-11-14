@@ -801,11 +801,12 @@ test('legacy failed floor is retryable after automatic long-text processing',()=
   const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
     queue:{busy:false,enqueueMissing(){},enqueue(){}}});
   view.open();const dialog=body.children[0].shadow.children[1];
-  const failed=find(dialog,x=>x.className?.includes('sm-pill')&&x.className?.includes('is-failed'));
-  assert.ok(failed);
-  assert.ok(failed.textContent.includes('失败'));
-  assert.ok(failed.title.includes('自动分段'));
-  assert.equal(find(dialog,x=>x.className==='sm-pending-error'),undefined);
+  const panel=find(dialog,x=>x.attrs['data-testid']==='summary-progress');
+  assert.ok(panel);
+  assert.ok(walk(panel).some(x=>x.textContent==='需要关注'));
+  assert.ok(walk(panel).some(x=>x.textContent==='#1 · 整理失败'));
+  assert.ok(walk(panel).some(x=>x.tag==='button'&&x.textContent==='重新整理'));
+  assert.ok(walk(dialog).some(x=>x.placeholder==='搜索楼层、故事时间、地点或剧情'));
 }));
 
 test('summary limits use distinct names and auto summary has a real toggle instead of an empty heading',()=>withUI(body=>{
@@ -1362,3 +1363,39 @@ test('mobile navigation exposes all six tabs without horizontal scrolling',()=>{
   assert.match(css,/@media\(max-width:430px\)\{\s*\.sm-nav\{display:grid;grid-template-columns:repeat\(6,minmax\(0,1fr\)\)/);
   assert.match(css,/\.sm-nav-item\{min-width:0;width:100%;justify-content:center;gap:3px/);
 });
+
+test('processing console expands groups, retries individual floors and keeps original timeline',()=>withUI(body=>{
+  const ctx={chat:Array.from({length:5},(_,i)=>({is_user:false,mes:'synthetic floor '+i,swipe_id:0})),
+    getCurrentChatId:()=> 'console-test'};
+  let memory=commitLeaf(freshMemory(),0,messageFingerprint(ctx.chat[0]),
+    normalizeDelta({summary:'synthetic timeline',time:'2026/11/14',location:'test area'}));
+  memory.tasks[1]={status:'failed',code:'upstream_http_401',attempts:3,updatedAt:Date.now(),
+    fingerprint:messageFingerprint(ctx.chat[1])};
+  const config=defaultSettings();config.summary.delayFloors=1;
+  const enqueued=[];
+  const ui=mountUI({context:()=>ctx,memory:()=>memory,settings:()=>config,
+    queue:{busy:false,enqueueMissing(){},enqueue:indices=>enqueued.push(indices)}});
+  ui.open();
+  const dialog=body.children[0].shadow.children[1];
+  assert.ok(find(dialog,x=>x.attrs['data-testid']==='summary-progress'));
+  assert.ok(walk(dialog).some(x=>x.textContent==='剧情时间线'));
+  const retry=find(dialog,x=>x.tag==='button'&&x.textContent==='重新整理');
+  assert.ok(retry);retry.fire('click');
+  assert.deepEqual(enqueued,[[1]]);
+  const viewAll=find(dialog,x=>x.tag==='button'&&x.className==='sm-progress-expand');
+  assert.ok(viewAll);viewAll.fire('click');
+  assert.ok(find(dialog,x=>x.className==='sm-progress-all'));
+  const ready=find(dialog,x=>x.className==='sm-progress-group-head'&&walk(x).some(t=>t.textContent==='等待整理'));
+  assert.ok(ready);ready.fire('click');
+  const detail=find(dialog,x=>x.className==='sm-progress-details');
+  assert.ok(detail);
+  const openReady=find(dialog,x=>x.className==='sm-progress-group-head'&&walk(x).some(t=>t.textContent==='等待整理'));
+  assert.equal(openReady.attrs['aria-expanded'],'true');
+  openReady.fire('click');
+  const collapsed=find(dialog,x=>x.className==='sm-progress-group-head'&&walk(x).some(t=>t.textContent==='等待整理'));
+  assert.equal(collapsed.attrs['aria-expanded'],'false','user can collapse all groups');
+  ui.showFailures();
+  const again=find(dialog,x=>x.className==='sm-progress-group-head'&&walk(x).some(t=>t.textContent==='需要关注'));
+  assert.equal(again.attrs['aria-expanded'],'true');
+  assert.ok(walk(dialog).some(x=>x.textContent==='剧情时间线'));
+}));

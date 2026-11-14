@@ -6,9 +6,10 @@ import {recall} from './vector-local.js';
 import {VectorIndexScheduler} from './vector-index-scheduler.js';
 import {selectHistory,historyEvidence,sourcePreview} from './retrieval-local.js';
 import {mountUI} from './ui.js';
+import {SummaryFailureNotifier,actionableSummaryFailures} from './notifications.js';
 import {ensureStoryMemoryEntry} from './toolbar.js';
 // Pure private ST extension. No external scripts, analytics or dependencies.
-let ui,queue,vectorIndexer,lastChat='',settings;
+let ui,queue,vectorIndexer,failureNotifier,lastChat='',settings;
 let lastIndexedRevisionKey='';
 let lastInjection={chatId:'',text:'',at:0};
 let lastGenerationInjection=null;
@@ -45,6 +46,7 @@ function saveSettings(next){
     vectorIndexer.schedule();
   }
   inject();
+  queue?.resume();
 }
 function inject(hits=[],historyHits=[],memory=null){
   ++injectionRevision;
@@ -79,11 +81,14 @@ function scheduleVectorWhenChanged(force=false){
 function afterQueueChanged(){
   scheduleVectorWhenChanged();
   inject();ui?.refresh();refreshButtonStatus();
+  if(!queue?.busy)notifyFailures();
 }
 function afterMemoryChanged(){
   scheduleVectorWhenChanged(true);
   inject();ui?.refresh(true);refreshButtonStatus();
-  void queue?.restoreStale().catch(()=>{});
+  void queue?.restoreStale().catch(()=>{}).finally(()=>{
+    if(queue?.abort?.signal.aborted)queue.resume();
+  });
 }
 function afterSourceChanged(eventName){
   // Edits, swipe changes and deletions invalidate any in-flight extraction or chapter job.
@@ -97,7 +102,7 @@ function afterSourceChanged(eventName){
   rememberChatMessages();
   scheduleVectorWhenChanged(true);
   inject();ui?.refresh();refreshButtonStatus();
-  void queue?.restoreStale().catch(()=>{});
+  void queue?.restoreStale().catch(()=>{}).finally(()=>queue?.resume());
 }
 function add(kind,text){
   const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('请先打开聊天');
@@ -205,11 +210,15 @@ async function generateInterceptor(_chat,_contextSize,_abort,type){
 }
 // SillyTavern calls this by manifest name during user generation.
 globalThis.storyMemoryGenerationInterceptor=generateInterceptor;
+function notifyFailures(){
+  const ctx=getContext();
+  if(ctx&&!queue?.busy)failureNotifier?.notify(ctx,peekMemory(ctx),globalThis.toastr);
+}
 function refreshButtonStatus(){
   const entry=typeof document==='undefined'?null:document.getElementById('story-memory-open');
   if(!entry)return;
-  const tasks=Object.values(peekMemory(getContext()).tasks||{});
-  const failed=tasks.filter(x=>x?.status==='failed').length;
+  const ctx=getContext();
+  const failed=actionableSummaryFailures(ctx,peekMemory(ctx)).length;
   const label=queue?.busy?'✦ 剧情记忆 · 整理中':failed?'✦ 剧情记忆 · '+failed+' 项失败':'✦ 剧情记忆';
   const title=failed&&!queue?.busy?'有整理失败的楼层，点击查看':'打开剧情记忆';
   if(entry.textContent!==label)entry.textContent=label;
@@ -240,9 +249,12 @@ function init(){
         ...hits.map(x=>({key:x.key,text:'[历史] '+x.summary}))];
     },
     sourcePreview:(ctx,memory,key,limit,offset)=>sourcePreview(ctx,memory,key,limit,offset)});
+  failureNotifier=new SummaryFailureNotifier(()=>ui?.showFailures?.());
   lastChat=ctx.getCurrentChatId?.()||'';
   rememberChatMessages();
-  const onChatChanged=()=>{const now=getContext()?.getCurrentChatId?.()||'';if(now!==lastChat){lastChat=now;queue.cancel();vectorIndexer.cancel();lastIndexedRevisionKey='';ui?.resetChatView?.();}rememberChatMessages();scheduleVectorWhenChanged();inject();ui?.refresh();refreshButtonStatus();};
+  const onChatChanged=()=>{const now=getContext()?.getCurrentChatId?.()||'';if(now!==lastChat){lastChat=now;queue.cancel();vectorIndexer.cancel();lastIndexedRevisionKey='';ui?.resetChatView?.();}rememberChatMessages();scheduleVectorWhenChanged();inject();ui?.refresh();refreshButtonStatus();
+    void queue.restoreStale().catch(()=>{}).finally(()=>{queue.resume();notifyFailures();});
+  };
   ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED,onChatChanged);
   ctx.eventSource.on(ctx.eventTypes.GENERATION_ENDED,()=>{
     rememberChatMessages();
@@ -256,6 +268,7 @@ function init(){
     if(ctx.eventTypes[name])ctx.eventSource.on(ctx.eventTypes[name],()=>afterSourceChanged(name));
   }
   ensureButton();inject();scheduleVectorWhenChanged(true);
+  queue.resume();notifyFailures();
   // Only rescan the button if the host replaces its quick reply strip.
   let observer=null;
   const attach=()=>{

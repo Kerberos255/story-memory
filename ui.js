@@ -1,4 +1,5 @@
-import {defaultSettings,entityNameKey,formatStoryTime,leadingStoryTime,messageFingerprint,userFingerprint,pendingFloors,automaticFloorIndices,deriveState,injectionText,injectionTextWithinBudget,validChapters} from './core.js';
+import {defaultSettings,entityNameKey,formatStoryTime,leadingStoryTime,messageFingerprint,userFingerprint,deriveState,injectionText,injectionTextWithinBudget,validChapters} from './core.js';
+import {createPendingPanel,pendingGroups} from './pending-ui.js';
 import {characterCount,countTokens} from './text-stats.js';
 import {DEFAULT_SUMMARY_PROMPT,DEFAULT_CHAPTER_PROMPT,DEFAULT_RESUMMARY2_PROMPT,DEFAULT_OVERVIEW_PROMPT,effectiveSummaryPrompt,composeL0Prompt,parseExtraBody,parseExcluded,parseHeaderLines} from './api.js';
 
@@ -94,6 +95,7 @@ export function mountUI(api){
   let active=false,page='summaries',notice='',settingsOpen=new Set(),vectorStatusField=null;
   let dirtyEditor=false;
   let timelineLimit=50,chapterLimit=40,timelineQuery='';
+  const pendingView={expanded:'failed',all:false,limit:40};
   // Queue progress must not replace an in-progress form or destroy nested dialogs.
   body.addEventListener('input',e=>{
     const tag=String(e.target?.tagName||e.target?.tag||'').toLowerCase();
@@ -373,32 +375,20 @@ export function mountUI(api){
     const content=el('div','sm-manual-content');content.append(area,actionRow);details.append(content);body.append(details);
   }
   function renderSummary(){
-    const ctx=api.context(),mem=api.memory(),pending=pendingFloors(mem,ctx?.chat||[]);
-    const cfg=api.settings(),ready=automaticFloorIndices(mem,ctx?.chat||[],cfg.summary?.delayFloors??3);
-    const deferred=new Set(pending.filter(index=>!ready.includes(index)));
+    const ctx=api.context(),mem=api.memory(),cfg=api.settings();
+    const status=pendingGroups(mem,ctx?.chat||[],cfg);
     const action=button(api.queue.busy?'正在整理':'批量补摘',()=>api.queue.enqueueMissing(80),'sm-btn sm-btn-primary');
     action.disabled=Boolean(api.queue.busy);
     title('剧情摘要','时间线、章节与重要事件',action);
     const metrics=el('div','sm-metrics');
-    for(const [count,label] of [[Object.keys(mem.leaves).length,'已摘要'],[ready.length,'可自动整理'],[deferred.size,'延迟中'],[validChapters(mem,ctx?.chat||[]).length,'已压缩']]){
+    for(const [count,label] of [[status.complete,'已摘要'],[status.groups.ready.length,'可自动整理'],[status.groups.delay.length,'延迟中'],[validChapters(mem,ctx?.chat||[]).length,'已压缩']]){
       const item=el('div','sm-metric');item.append(el('span','sm-metric-number',count),el('span','sm-metric-label',label));metrics.append(item);
     }
     body.append(metrics);
-    if(pending.length){
-      const pendingBox=el('section','sm-pending-box'),heading=el('div','sm-pending-heading');
-      heading.append(el('strong','', '待整理楼层'),el('span','sm-pending-count',pending.length+' 楼'));
-      if(deferred.size)heading.append(el('span','sm-muted-note','其中 '+deferred.size+' 楼暂缓自动摘要'));
-      const strip=el('div','sm-pills');
-      for(const i of pending.slice(-24)){
-        const failed=mem.tasks?.[i]?.status==='failed';
-        const pill=button('#'+i+(failed?' · 失败':''),()=>api.queue.enqueue([i]),
-          'sm-pill'+(failed?' is-failed':'')+(deferred.has(i)?' is-deferred':''));
-        pill.title=failed?'整理未完成，点击重新尝试（长正文会自动分段）':
-          deferred.has(i)?'延迟窗口内，点击仍可手动补摘':'点击手动补摘';
-        strip.append(pill);
-      }
-      pendingBox.append(heading,strip);body.append(pendingBox);
-    }
+    body.append(createPendingPanel({
+      memory:mem,chat:ctx?.chat||[],config:cfg,queue:api.queue,state:pendingView,
+      summary:status,rerender:render,notice:showNotice
+    }));
     const valid=validChapters(mem,ctx?.chat||[]);
     recordCards('分层剧情回顾',valid.slice(-chapterLimit).reverse(),c=>({title:'L'+c.level+' · '+(c.level===1?'阶段总结':c.level===2?'二次总结':'高层总结'),subtitle:c.children.length+' 段剧情',description:c.summary}),'chapter');
     if(valid.length>chapterLimit)body.append(button('加载更早的分层总结',()=>{
@@ -1231,8 +1221,11 @@ export function mountUI(api){
     else if(page==='settings')renderSettings();
     if(notice)showNotice(notice);
   }
-  return {open,updateVectorStatus,resetChatView(){
+  return {open,updateVectorStatus,showFailures(){
+    page='summaries';pendingView.expanded='failed';pendingView.all=false;open(true);
+  },resetChatView(){
     timelineLimit=50;chapterLimit=40;timelineQuery='';dirtyEditor=false;
+    pendingView.expanded='failed';pendingView.all=false;pendingView.limit=40;
   },refresh(force=false){
     // Preserve drafts and editing dialogs during async queue updates.
     if(active&&page!=='settings'&&(force||(!recordOverlay&&!dirtyEditor)))render();

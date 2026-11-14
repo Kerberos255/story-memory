@@ -226,8 +226,9 @@ test('legacy source cap is ignored; a network failure still keeps the floor pend
     const mem=readMemory(f.ctx);
     assert.equal(sent,1);
     assert.equal(mem.leaves[1],undefined);
-    assert.equal(mem.tasks[1].status,'failed');
+    assert.equal(mem.tasks[1].status,'cooldown');
     assert.equal(mem.tasks[1].code,'network_error');
+    assert.ok(mem.tasks[1].nextRetryAt>Date.now());
     assert.deepEqual(pendingFloors(mem,f.ctx.chat),[1]);
   }finally{globalThis.fetch=oldFetch;}
 });
