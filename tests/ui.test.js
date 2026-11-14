@@ -894,7 +894,7 @@ test('injection preview opens a centered dialog without navigating away or losin
   assert.ok(button);button.fire('click');
   const overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
   assert.ok(overlay);
-  const panel=find(overlay,x=>x.className==='sm-record-modal sm-preview-modal');
+  const panel=find(overlay,x=>x.className==='sm-record-modal sm-preview-modal sm-injection-modal');
   assert.equal(panel.parent,overlay);
   assert.equal(panel.attrs.role,'dialog');
   assert.equal(panel.attrs['aria-modal'],'true');
@@ -1251,7 +1251,7 @@ test('settings show consistent concise Chinese labels and readable preview namin
   assert.ok(!walk(dialog).some(x=>['启用记忆引擎','注入设置','自定义提示词',
     'RP 记忆预算（近似 Tokens）','查看注入预览'].includes(x.textContent)));
   preview.fire('click');
-  const modal=find(dialog,x=>x.className==='sm-record-modal sm-preview-modal');
+  const modal=find(dialog,x=>x.className==='sm-record-modal sm-preview-modal sm-injection-modal');
   assert.ok(modal);
   assert.ok(walk(modal).some(x=>x.className==='sm-record-modal-title'&&x.textContent==='发送预览'));
   assert.ok(walk(modal).some(x=>x.tag==='textarea'&&x.attrs['aria-label']==='发送预览内容'));
@@ -1888,4 +1888,38 @@ test('reload guard reports open Story Memory panel and unsaved settings accurate
   const input=find(budget,x=>x.tag==='input');
   input.value='12000';
   assert.match(view.getRefreshBlockReason(),/设置有未保存的修改/);
+}));
+
+test('sending preview uses a compact scrollable reader without resizing or truncating text',()=>withUI(body=>{
+  const ctx={chat:[{is_user:false,mes:'记忆内容'}],chatMetadata:{},getCurrentChatId:()=> 'compact-preview'};
+  const longText='保留全部记忆原文。'.repeat(600);
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(ctx.chat[0]),
+    normalizeDelta({summary:longText}));
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},previewHistory:()=>[],
+    lastInjection:()=>({chatId:'compact-preview',text:longText,at:Date.now()})});
+  view.open();
+  const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  find(dialog,x=>x.tag==='button'&&x.textContent==='预览发送内容').fire('click');
+  const panel=find(dialog,x=>x.className==='sm-record-modal sm-preview-modal sm-injection-modal');
+  assert.ok(panel,'only sending preview has the compact reader class');
+  const area=find(panel,x=>x.tag==='textarea'&&x.attrs['aria-label']==='发送预览内容');
+  assert.equal(area.rows,10);
+  assert.equal(area.readOnly,true);
+  const footer=find(panel,x=>x.className==='sm-record-modal-footer');
+  assert.ok(footer,'the footer remains outside the scrollable content');
+  const content=find(panel,x=>x.className==='sm-record-modal-body');
+  assert.ok(content);
+  assert.equal(footer.parent,panel);
+  assert.equal(area.parent,content);
+  find(footer,x=>x.tag==='button'&&x.textContent==='查看上轮扩展发送').fire('click');
+  assert.equal(area.value,longText,'last-sent text is shown in full, not sliced');
+  assert.ok(find(footer,x=>x.tag==='button'&&x.textContent==='返回模拟预览'));
+  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+  assert.match(css,/\.sm-injection-modal \.sm-record-modal-body>\.sm-textarea\{[\s\S]*?max-height:min\(280px,42dvh\)/);
+  assert.match(css,/\.sm-injection-modal \.sm-record-modal-body>\.sm-textarea\{[\s\S]*?resize:none/);
+  assert.match(css,/@media\(max-width:700px\)\{[\s\S]*?max-height:min\(230px,35dvh\)/);
+  find(footer,x=>x.tag==='button'&&x.textContent==='关闭').fire('click');
+  assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
 }));

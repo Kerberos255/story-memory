@@ -1352,7 +1352,7 @@ export function mountUI(api){
     const snapshot=api.lastInjection?.();
     const hasSnapshot=Boolean(snapshot?.chatId&&snapshot.chatId===ctx?.getCurrentChatId?.());
     const overlay=el('div','sm-record-modal-overlay');
-    const panel=el('section','sm-record-modal sm-preview-modal');
+    const panel=el('section','sm-record-modal sm-preview-modal sm-injection-modal');
     recordOverlay=overlay;
     panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');
     const heading=el('h3','sm-record-modal-title','发送预览');
@@ -1365,7 +1365,7 @@ export function mountUI(api){
     const content=el('div','sm-record-modal-body');
     const explanation=el('p','sm-help','当前草稿模拟使用本地历史检索，不发送向量请求。Token 按酒馆当前分词器统计；跳过统计只涵盖参与本轮筛选的候选记忆，不包含已关闭类别或来源数量上限之外的记录。');
     const stats=textStats();
-    const textarea=textArea(result||'当前没有需要发送的记忆。',15);
+    const textarea=textArea(result||'当前没有需要发送的记忆。',10);
     textarea.readOnly=true;textarea.setAttribute('aria-label','发送预览内容');
     let showSnapshot=false,simulated=result,previewEpoch=0,previewReady=false;
     const budgetLabel=el('p','sm-preview-counter','记忆用量 · 统计中…');
