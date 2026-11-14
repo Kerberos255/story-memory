@@ -987,3 +987,58 @@ test('tokenizer estimates do not allow a large complete memory past the cap',asy
   assert.equal(text,'','large full entries must be omitted under conservative fallback');
   assert.ok(calls<=1,'failed tokenizer is not repeatedly queried');
 });
+
+test('merge maps original names even after manual renaming on either side, preserving target identity and undo',async()=>{
+  const {mergeEntities,unmergeEntity}=await import('../core.js');
+  const chat=[{is_user:false,mes:'发现银钥匙',swipe_id:0},{is_user:false,mes:'发现铜钥匙',swipe_id:0}];
+  const base=()=>{
+    let memory=freshMemory();
+    for(const [i,name] of ['银钥匙','铜钥匙'].entries())
+      memory=commitLeaf(memory,i,messageFingerprint(chat[i]),
+        normalizeDelta({summary:'发现'+name,items:[{op:'add',name,status:'阶段 '+i}]}));
+    return memory;
+  };
+  const ids=deriveState(base(),chat).items.map(x=>x.entity_id);
+  for(const changed of ['source','target','both']){
+    for(const [from,to] of [[0,1],[1,0]]){
+      let memory=base();
+      if(changed==='source'||changed==='both')
+        memory=correctEntity(memory,chat,'items',ids[0],{name:'古银钥匙'});
+      if(changed==='target'||changed==='both')
+        memory=correctEntity(memory,chat,'items',ids[1],{name:'红铜钥匙'});
+      const before=deriveState(memory,chat);
+      const fromLabel=before.items.find(x=>x.entity_id===ids[from]).name;
+      const targetLabel=before.items.find(x=>x.entity_id===ids[to]).name;
+      const merged=mergeEntities(memory,chat,'items',ids[from],ids[to]);
+      const records=deriveState(merged,chat).items;
+      assert.equal(records.length,1,changed+' '+from+'->'+to);
+      assert.equal(records[0].name,targetLabel);
+      assert.equal(records[0].entity_id,ids[to],'target ID must survive correction and merge');
+      assert.equal(deriveState(unmergeEntity(merged,'items',fromLabel),chat).items.length,2);
+      assert.equal(deriveState(memory,chat).items.length,2,'original persisted state stays immutable');
+    }
+  }
+});
+test('bounded state checkpoints retain correctness for old-prefix reads and later corrections',async()=>{
+  const chat=[],memory=freshMemory();
+  for(let i=0;i<320;i++){
+    const msg={is_user:false,swipe_id:0,mes:'第'+i+'楼持续剧情'};chat.push(msg);
+    memory.leaves[i]={id:'floor:'+i,sourceIndex:i,fingerprint:messageFingerprint(msg),
+      summary:'摘要 '+i,delta:{items:[],scenes:[],characters:[],plans:[]}};
+  }
+  memory.leaves[0].delta.items=[{op:'add',name:'旧银钥匙'}];
+  memory.leaves[257].delta.items=[{op:'add',name:'旧铜钥匙'}];
+  const {mergeEntities,unmergeEntity}=await import('../core.js');
+  const idList=deriveState(memory,chat).items.map(x=>x.entity_id);
+  const merged=mergeEntities(memory,chat,'items',idList[0],idList[1]);
+  const earlier={...merged,leaves:Object.fromEntries(Object.entries(merged.leaves).filter(([key])=>Number(key)<200))};
+  deriveState(earlier,chat);
+  const full=deriveState(merged,chat);
+  assert.equal(full.items.length,1);
+  assert.equal(full.items[0].entity_id,idList[1]);
+  const again=deriveState(merged,chat);
+  assert.deepEqual(again.items,full.items);
+  const edited=correctEntity(merged,chat,'items',idList[1],{name:'确认后的铜钥匙'});
+  assert.equal(deriveState(edited,chat).items[0].name,'确认后的铜钥匙');
+  assert.equal(deriveState(unmergeEntity(edited,'items','旧银钥匙'),chat).items.length,2);
+});

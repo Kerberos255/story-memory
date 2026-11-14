@@ -120,13 +120,15 @@ export function mountUI(api){
   const layout=el('div','sm-layout'),nav=el('nav','sm-nav'),body=el('main','sm-content');
   layout.append(nav,body);dialog.append(top,layout);
   let active=false,page='summaries',notice='',settingsOpen=new Set(),vectorStatusField=null;
+  const openDetails=new Set(),entityTabs=new Map();
+  let showCompletedMetrics=false,timelineSearchTimer=null;
   let dirtyEditor=false,settingsDraft=null,settingsReadDirty=()=>false;
   let timelineLimit=50,chapterLimit=40,timelineQuery='';
   const pendingView={expanded:'failed',all:false,limit:40};
   // Queue progress must not replace an in-progress form or destroy nested dialogs.
   body.addEventListener('input',e=>{
     const tag=String(e.target?.tagName||e.target?.tag||'').toLowerCase();
-    if(['textarea','input','select'].includes(tag))dirtyEditor=true;
+    if(['textarea','input','select'].includes(tag)&&e.target?.type!=='search')dirtyEditor=true;
   });
   let saveToast=null,saveToastTimer=null;
   let theme='dark';
@@ -278,12 +280,7 @@ export function mountUI(api){
     overlay.addEventListener('click',e=>{if(e.target===overlay)closeRecordModal();});
     overlay.addEventListener('keydown',e=>{
       if(e.key==='Escape'){e.preventDefault();e.stopPropagation?.();closeRecordModal();return;}
-      if(e.key!=='Tab')return;
-      const controls=[...panel.querySelectorAll('button:not([disabled]),input:not([disabled]),textarea:not([disabled])')];
-      if(!controls.length)return;
-      const first=controls[0],last=controls[controls.length-1];
-      if(e.shiftKey&&e.target===first){e.preventDefault();last.focus();}
-      else if(!e.shiftKey&&e.target===last){e.preventDefault();first.focus();}
+      trapFocus(panel,e);
     });
     (isDelete?cancel:editor)?.focus?.();
   }
@@ -322,20 +319,67 @@ export function mountUI(api){
     overlay.addEventListener('click',e=>{if(e.target===overlay)closeRecordModal();});
     overlay.addEventListener('keydown',e=>{
       if(e.key==='Escape'){e.preventDefault();e.stopPropagation?.();closeRecordModal();return;}
-      if(e.key==='Tab'&&e.target===close&&e.shiftKey){e.preventDefault();footer.children[0].focus?.();}
-      else if(e.key==='Tab'&&e.target===footer.children[0]&&!e.shiftKey){e.preventDefault();close.focus?.();}
+      trapFocus(panel,e);
     });
     close.focus?.();
   }
-  function recordCards(heading,entries,extract,type=null,detailFactory=null){
+  function rememberDetails(node,key){
+    if(!key)return node;
+    node.open=openDetails.has(key);
+    node.addEventListener('toggle',()=>{
+      // Detaching a details node can queue a stale toggle event.
+      if(node.isConnected===false)return;
+      if(node.open){
+        openDetails.delete(key);openDetails.add(key);
+        if(openDetails.size>240)openDetails.delete(openDetails.values().next().value);
+      }else openDetails.delete(key);
+    });
+    return node;
+  }
+  function focusableIn(panel){
+    return [...panel.querySelectorAll('button, input, textarea, select, summary, a[href], [tabindex]')]
+      .filter(node=>!node.disabled&&!node.hidden&&node.getAttribute?.('tabindex')!=='-1'&&
+        !node.closest?.('[hidden], [inert]')&&
+        (typeof node.getClientRects!=='function'||node.getClientRects().length>0));
+  }
+  function trapFocus(panel,event){
+    if(event.key!=='Tab')return;
+    const nodes=focusableIn(panel);
+    if(!nodes.length){event.preventDefault();return;}
+    const first=nodes[0],last=nodes[nodes.length-1];
+    const current=event.target;
+    if(event.shiftKey&&(current===first||!nodes.includes(current))){
+      event.preventDefault();last.focus?.();
+    }else if(!event.shiftKey&&(current===last||!nodes.includes(current))){
+      event.preventDefault();first.focus?.();
+    }
+  }
+  function recordCards(heading,entries,extract,type=null,detailFactory=null,options={}){
     if(!entries.length)return;
-    body.append(sectionTitle(heading));
-    const list=el('div','sm-record-list');
+    const target=options.container||body,scope=options.scope||type||heading;
+    target.append(sectionTitle(heading));
+    const list=el('div','sm-record-list'+(options.timeline?' is-timeline':''));
     for(const entry of entries){
-      const value=extract(entry),details=el('details','sm-record');
+      const value=extract(entry);
+      const key=scope==='floor'?'floor:'+entry.sourceIndex:
+        scope+':'+(entry.entity_id||entry.id||entry.sourceIndex);
+      const details=rememberDetails(el('details','sm-record'),key);
+      details.setAttribute('data-record-key',key);
+      if(value.level)details.setAttribute('data-level',String(value.level));
       const head=el('summary','sm-record-head');
       const headingCopy=el('span','sm-record-heading');
-      headingCopy.append(el('span','sm-record-label',value.title));
+      const titleRow=el('span','sm-record-title-row');
+      if(value.level)titleRow.append(el('span','sm-level-tag is-l'+Math.min(3,value.level),'L'+value.level));
+      titleRow.append(el('span','sm-record-label',value.title));
+      if(value.tags?.length){
+        const badges=el('span','sm-card-chips');
+        for(const item of value.tags.slice(0,3)){
+          const chip=el('span','sm-meta-chip'+(item.tone?' is-'+item.tone:''),item.label);
+          badges.append(chip);
+        }
+        titleRow.append(badges);
+      }
+      headingCopy.append(titleRow);
       if(value.subtitle)headingCopy.append(el('small','sm-record-subtitle',value.subtitle));
       head.append(headingCopy);
       if(value.status){
@@ -355,6 +399,18 @@ export function mountUI(api){
         }
         if(facts.children.length)details.append(facts);
       }
+      if(value.knowledge?.length){
+        const wrap=el('div','sm-knowledge-wrap');
+        wrap.append(el('span','sm-knowledge-title','知情边界'));
+        const badges=el('div','sm-knowledge-list');
+        for(const k of value.knowledge){
+          const label={knows:'知道',suspects:'怀疑',believes:'误信',hides:'隐瞒'}[k.stance]||'未确认';
+          const chip=el('span','sm-knowledge-badge',label+' · '+k.fact+
+            (k.provenance==='secondhand'?'（转述）':''));
+          chip.setAttribute('data-stance',k.stance||'unknown');badges.append(chip);
+        }
+        wrap.append(badges);details.append(wrap);
+      }
       if(value.meta)details.append(el('p','sm-record-state',value.meta));
       if(detailFactory){const extra=detailFactory(entry);if(extra)details.append(extra);}
       if(type){
@@ -368,14 +424,14 @@ export function mountUI(api){
       }
       list.append(details);
     }
-    body.append(list);
+    target.append(list);
   }
   function manualList(kind,entries){
     if(!entries?.length)return;
     body.append(sectionTitle('手动记录'));
     const list=el('div','sm-record-list');
     for(const entry of entries){
-      const card=el('details','sm-record'),header=el('summary','sm-record-head');
+      const card=rememberDetails(el('details','sm-record'),'manual:'+kind+':'+entry.id),header=el('summary','sm-record-head');
       header.append(el('span','sm-record-label',entry.text.slice(0,84)),svg('chevron'));
       const editor=textArea(entry.text,4),actions=el('div','sm-row-actions');
       actions.append(button('删除',()=>{
@@ -391,7 +447,7 @@ export function mountUI(api){
     body.append(list);
   }
   function manualInput(kind){
-    const details=el('details','sm-manual'),head=el('summary','sm-manual-head');
+    const details=rememberDetails(el('details','sm-manual'),'manual-input:'+kind),head=el('summary','sm-manual-head');
     const left=el('span','sm-manual-title');left.append(svg('plus'),el('span','', '添加记忆'));
     head.append(left,svg('chevron'));details.append(head);
     const area=textArea('',4,'写下需要长期保留的信息…');
@@ -414,11 +470,26 @@ export function mountUI(api){
     const action=button(api.queue.busy?'正在整理':'批量补摘',()=>api.queue.enqueueMissing(80),'sm-btn sm-btn-primary');
     action.disabled=Boolean(api.queue.busy);
     title('剧情摘要','时间线、章节与重要事件',action);
-    const metrics=el('div','sm-metrics');
-    for(const [count,label] of [[status.complete,'已摘要'],[status.groups.ready.length,'可自动整理'],[status.groups.delay.length,'延迟中'],[validChapters(mem,ctx?.chat||[]).length,'已压缩']]){
-      const item=el('div','sm-metric');item.append(el('span','sm-metric-number',count),el('span','sm-metric-label',label));metrics.append(item);
+    const chapters=validChapters(mem,ctx?.chat||[]);
+    const fullyDone=status.complete>0&&!status.pending.length&&!api.queue.busy&&!mem.chapterError;
+    const compact=fullyDone&&!showCompletedMetrics;
+    if(compact){
+      const strip=el('div','sm-status-strip');
+      strip.append(el('span','sm-status-dot'),el('strong','',status.complete+' 楼剧情已完成摘要'),
+        el('span','sm-status-pill','分层总结 '+chapters.length+' 段'));
+      strip.append(button('展开进度',()=>{
+        showCompletedMetrics=true;render();
+      },'sm-btn sm-btn-sm'));
+      body.append(strip);
+    }else{
+      const metrics=el('div','sm-metrics');
+      for(const [count,label] of [[status.complete,'已摘要'],[status.groups.ready.length,'可自动整理'],
+        [status.groups.delay.length,'延迟中'],[chapters.length,'已压缩']]){
+        const item=el('div','sm-metric');
+        item.append(el('span','sm-metric-number',count),el('span','sm-metric-label',label));metrics.append(item);
+      }
+      body.append(metrics);
     }
-    body.append(metrics);
     if(mem.chapterError){
       const alert=el('div','sm-chapter-warning');
       alert.setAttribute('role','alert');
@@ -448,12 +519,20 @@ export function mountUI(api){
       },'sm-btn sm-btn-sm');
       bar.append(explanation,restore);body.append(bar);
     }
-    body.append(createPendingPanel({
-      memory:mem,chat:ctx?.chat||[],config:cfg,queue:api.queue,state:pendingView,
-      summary:status,rerender:render,notice:showNotice
-    }));
-    const valid=validChapters(mem,ctx?.chat||[]);
-    recordCards('分层剧情回顾',valid.slice(-chapterLimit).reverse(),c=>({title:'L'+c.level+' · '+(c.level===1?'阶段总结':c.level===2?'二次总结':'高层总结'),subtitle:c.children.length+' 段剧情',description:c.summary}),'chapter');
+    if(!compact){
+      body.append(createPendingPanel({
+        memory:mem,chat:ctx?.chat||[],config:cfg,queue:api.queue,state:pendingView,
+        summary:status,rerender:render,notice:showNotice
+      }));
+      if(fullyDone)body.append(button('收起进度',()=>{
+        showCompletedMetrics=false;render();
+      },'sm-btn sm-btn-sm sm-collapse-progress'));
+    }
+    const valid=chapters;
+    recordCards('分层剧情回顾',valid.slice(-chapterLimit).reverse(),c=>({
+      title:c.level===1?'阶段总结':c.level===2?'二次总结':'高层总结',
+      subtitle:c.children.length+' 段剧情',description:c.summary,level:c.level
+    }),'chapter',null,{scope:'chapter'});
     if(valid.length>chapterLimit)body.append(button('加载更早的分层总结',()=>{
       chapterLimit+=40;render();
     },'sm-btn sm-btn-text'));
@@ -461,28 +540,44 @@ export function mountUI(api){
     const queryRow=el('div','sm-timeline-search');
     const query=el('input','sm-input');query.type='search';query.placeholder='搜索楼层、故事时间、地点或剧情';
     query.value=timelineQuery;query.setAttribute('aria-label','搜索剧情时间线');
-    const applyQuery=()=>{timelineQuery=query.value.trim();timelineLimit=50;render();};
+    const timelineRegion=el('div','sm-timeline-region');
+    const refreshTimeline=()=>{
+      timelineRegion.replaceChildren();
+      const term=timelineQuery.toLocaleLowerCase();
+      const filtered=term?state.timeline.filter(e=>
+        ['#'+e.sourceIndex,e.summary,e.time,e.location].some(x=>String(x||'').toLocaleLowerCase().includes(term))
+      ):state.timeline;
+      recordCards('剧情时间线',filtered.slice(-timelineLimit).reverse(),e=>({
+        title:'#'+e.sourceIndex,
+        subtitle:[
+          ['时间',formatStoryTime(e.time)||leadingStoryTime(e.summary)],
+          ['地点',e.location]
+        ].filter(([,value])=>Boolean(value)).map(([label,value])=>label+'：'+value).join('  ·  '),
+        description:e.summary,
+        meta:'本楼层更新：物品 '+(e.delta?.items?.length||0)+' · 场景 '+(e.delta?.scenes?.length||0)+
+          ' · 角色 '+(e.delta?.characters?.length||0)+' · 计划 '+(e.delta?.plans?.length||0)
+      }),'floor',null,{container:timelineRegion,timeline:true,scope:'floor'});
+      if(filtered.length>timelineLimit)timelineRegion.append(button('加载更早的楼层摘要',()=>{
+        timelineLimit+=50;refreshTimeline();
+      },'sm-btn sm-btn-text'));
+      if(term&&!filtered.length)timelineRegion.append(el('p','sm-help','未找到匹配的剧情摘要。'));
+    };
+    const applyQuery=()=>{
+      if(timelineSearchTimer!==null){clearTimeout(timelineSearchTimer);timelineSearchTimer=null;}
+      timelineQuery=query.value.trim();timelineLimit=50;refreshTimeline();
+    };
+    query.addEventListener('input',()=>{
+      // Commit the query before debounce, so a queue refresh cannot erase typing.
+      timelineQuery=query.value.trim();timelineLimit=50;
+      if(timelineSearchTimer!==null)clearTimeout(timelineSearchTimer);
+      timelineSearchTimer=setTimeout(()=>{timelineSearchTimer=null;
+        if(query.isConnected!==false)refreshTimeline();
+      },150);
+    });
     query.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyQuery();}});
     queryRow.append(query,button('搜索',applyQuery,'sm-btn'));
-    body.append(queryRow);
-    const term=timelineQuery.toLocaleLowerCase();
-    const filtered=term?state.timeline.filter(e=>
-      ['#'+e.sourceIndex,e.summary,e.time,e.location].some(x=>String(x||'').toLocaleLowerCase().includes(term))
-    ):state.timeline;
-    recordCards('剧情时间线',filtered.slice(-timelineLimit).reverse(),e=>({
-      title:'#'+e.sourceIndex,
-      subtitle:[
-        ['时间',formatStoryTime(e.time)||leadingStoryTime(e.summary)],
-        ['地点',e.location]
-      ].filter(([,value])=>Boolean(value)).map(([label,value])=>label+'：'+value).join('  ·  '),
-      description:e.summary,
-      meta:'本楼层更新：物品 '+(e.delta?.items?.length||0)+' · 场景 '+(e.delta?.scenes?.length||0)+
-        ' · 角色 '+(e.delta?.characters?.length||0)+' · 计划 '+(e.delta?.plans?.length||0)
-    }),'floor');
-    if(filtered.length>timelineLimit)body.append(button('加载更早的楼层摘要',()=>{
-      timelineLimit+=50;render();
-    },'sm-btn sm-btn-text'));
-    if(term&&!filtered.length)body.append(el('p','sm-help','未找到匹配的剧情摘要。'));
+    queryRow.append(button('清空',()=>{query.value='';applyQuery();query.focus?.();},'sm-btn'));
+    body.append(queryRow,timelineRegion);refreshTimeline();
     const skipped=Object.keys(mem.skippedFloors||{}).map(Number).filter(i=>
       mem.skippedFloors[i]?.fingerprint===messageFingerprint(ctx?.chat?.[i])&&
       mem.skippedFloors[i]?.userFingerprint===userFingerprint(ctx.chat,i)).sort((a,b)=>a-b);
@@ -500,11 +595,11 @@ export function mountUI(api){
     if(!state.timeline.length&&!mem.manual.summaries.length)emptyState('book','还没有剧情摘要','可以先添加记忆，或配置副 API 后整理楼层。');
     manualInput('summaries');
   }
-  function entityMergeControl(kind,entry,entries,aliases){
+  function entityMergeControl(kind,entry,entries,aliases,inline=false){
     if(entries.length<2&&!aliases.length)return null;
-    const panel=el('details','sm-entity-history sm-entity-merge');
+    const panel=el(inline?'div':'details',inline?'sm-entity-panel-content':'sm-entity-history sm-entity-merge');
     const heading=aliases.length?'合并称呼 · 已合并 '+aliases.length+' 个':'合并称呼';
-    panel.append(el('summary','sm-entity-history-heading',heading));
+    if(!inline)panel.append(el('summary','sm-entity-history-heading',heading));
     const inside=el('div','sm-entity-merge-content');
     if(entries.length>1){
       inside.append(el('p','sm-entity-hint','确认两条记录属于同一实体后再合并；不会修改原始摘要。'));
@@ -533,7 +628,7 @@ export function mountUI(api){
         const row=el('div','sm-entity-alias');
         row.append(el('span','',rule.name));
         row.append(button('撤销合并',()=>{
-          try{api.unmergeAlias(kind,rule.name);showNotice('已撤销合并');}
+          try{api.unmergeAlias(kind,rule.key||rule.name);showNotice('已撤销合并');}
           catch(e){showNotice(e?.message||'撤销失败');}
         },'sm-btn'));
         aliasBox.append(row);
@@ -543,11 +638,11 @@ export function mountUI(api){
     panel.append(inside);
     return panel;
   }
-  function entityHistoryDetails(entry){
+  function entityHistoryDetails(entry,inline=false){
     const history=entry.history||[];
     if(!history.length)return el('span');
-    const wrap=el('details','sm-entity-history');
-    wrap.append(el('summary','sm-entity-history-heading','变更记录 · '+history.length+' 条'));
+    const wrap=el(inline?'div':'details',inline?'sm-entity-panel-content':'sm-entity-history');
+    if(!inline)wrap.append(el('summary','sm-entity-history-heading','变更记录 · '+history.length+' 条'));
     const list=el('div','sm-entity-history-list');
     for(const event of history.slice(-12).reverse()){
       const row=el('div','sm-entity-history-row');
@@ -572,15 +667,15 @@ export function mountUI(api){
     }
     return wrap;
   }
-  function entityCorrection(kind,entry){
+  function entityCorrection(kind,entry,inline=false){
     const fields={items:['name','description','location','owner','status','quantity'],
       scenes:['name','description','location','status'],
       characters:['name','description','location','status','relationship','presence'],
       plans:['name','description','location','status','time']}[kind]||[];
     const labels={name:'名称',description:'说明',location:'位置',owner:'归属',status:'状态',
       quantity:'数量',relationship:'关系',presence:'在场状态',time:'故事时间'};
-    const panel=el('details','sm-entity-history sm-entity-correction');
-    panel.append(el('summary','sm-entity-history-heading',
+    const panel=el(inline?'div':'details',inline?'sm-entity-panel-content':'sm-entity-history sm-entity-correction');
+    if(!inline)panel.append(el('summary','sm-entity-history-heading',
       entry.lockedFields?.length?'人工纠错 · 已锁定 '+entry.lockedFields.length+' 项':
       entry.correctionStale?'人工纠错 · 部分待核对':entry.manualCorrection?'人工纠错 · 已生效':'人工纠错'));
     const content=el('div','sm-entity-correction-content');
@@ -619,15 +714,51 @@ export function mountUI(api){
       try{api.correctEntity(kind,entry.entity_id,
         Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,v.value])),
         Object.fromEntries(Object.entries(locks).map(([k,v])=>[k,v.checked])));
-        showNotice('已更新当前状态');}
+        dirtyEditor=false;render();showNotice('已更新当前状态');}
       catch(e){showNotice(e.message||'保存失败');}
     },'sm-btn sm-btn-primary'));
     if(entry.manualCorrection||entry.correctionStale)actions.append(button('恢复提取值',()=>{
-      try{api.clearEntityCorrection(kind,entry.entity_id);showNotice('已恢复提取值');}
+      try{api.clearEntityCorrection(kind,entry.entity_id);dirtyEditor=false;render();showNotice('已恢复提取值');}
       catch(e){showNotice(e.message||'恢复失败');}
     },'sm-btn'));
     content.append(grid,actions);panel.append(content);
     return panel;
+  }
+  function entityDrawer(kind,entry,entries,rules){
+    const aliases=rules.filter(([,rule])=>rule.targetId===entry.entity_id||
+      entityNameKey(rule.to)===entityNameKey(entry.name)).map(([key,rule])=>({...rule,key}));
+    const id=kind+':'+entry.entity_id;
+    const sections=[
+      ['history','变更记录 · '+(entry.history?.length||0),entry.history?.length?entityHistoryDetails(entry,true):null],
+      ['correction','人工纠错'+(entry.lockedFields?.length?' · 已锁 '+entry.lockedFields.length:
+        entry.correctionStale?' · 部分待核对':entry.manualCorrection?' · 已生效':''),entityCorrection(kind,entry,true)],
+      ['merge','合并称呼',entityMergeControl(kind,entry,entries,aliases,true)]
+    ].filter(([, ,part])=>part);
+    const root=el('div','sm-entity-drawer-root'),tabs=el('div','sm-entity-tabs');
+    tabs.setAttribute('role','tablist');tabs.setAttribute('aria-label',entry.name+' · 详情选项');
+    const panels=el('div','sm-entity-drawers'),controls=[];
+    let selected=entityTabs.get(id)||'';
+    const update=()=>{
+      for(const [name,buttonNode,panel] of controls){
+        const on=selected===name;
+        buttonNode.className='sm-entity-tab'+(on?' is-active':'');
+        buttonNode.setAttribute('aria-selected',String(on));
+        panel.hidden=!on;
+      }
+    };
+    for(const [name,label,content] of sections){
+      const tab=button(label,()=>{
+        selected=selected===name?'':name;
+        entityTabs.delete(id);entityTabs.set(id,selected);
+        if(entityTabs.size>240)entityTabs.delete(entityTabs.keys().next().value);
+        update();
+      },'sm-entity-tab');
+      tab.setAttribute('role','tab');tab.setAttribute('aria-label',label);
+      const panel=el('div','sm-entity-drawer');panel.setAttribute('role','tabpanel');
+      panel.append(content);
+      tabs.append(tab);panels.append(panel);controls.push([name,tab,panel]);
+    }
+    update();root.append(tabs,panels);return root;
   }
   function renderCollection(kind,heading,caption){
     const ctx=api.context(),mem=api.memory(),state=deriveState(mem,ctx?.chat||[]);
@@ -638,28 +769,24 @@ export function mountUI(api){
       title:x.name,
       subtitle:x.lockConflicts?.length?'锁定字段与新剧情有冲突':x.lockedFields?.length?'已锁定 '+x.lockedFields.length+' 个字段':
         x.correctionStale?'新剧情已更新部分人工纠错':x.manualCorrection?'当前状态 · 人工确认':'',
-      description:x.description||'',
-      status:x.status||'',
+      description:x.description||'',status:x.status||'',
+      tags:[
+        ...(kind==='characters'&&x.presence==='present'?[{label:'● 在场',tone:'present'}]:
+          kind==='characters'&&x.presence==='absent'?[{label:'○ 不在场'}]:[]),
+        ...(kind==='items'&&x.owner?[{label:'归属：'+x.owner}]:[]),
+        ...(x.location?[{label:'📍 '+x.location}]:[]),
+        ...(x.lockConflicts?.length?[{label:'⚠ 锁定冲突',tone:'conflict'}]:
+          x.lockedFields?.length?[{label:'已锁定 '+x.lockedFields.length+' 项'}]:[])
+      ],
+      knowledge:kind==='characters'?x.knowledge||[]:[],
       facts:[
         ['位置',x.location],['归属',x.owner],['关系',x.relationship],
         ['数量',Number.isFinite(x.quantity)?String(x.quantity):''],
         ['时间',x.time],
         ['在场',kind==='characters'&&x.presence==='present'?'当前在场':
-          kind==='characters'&&x.presence==='absent'?'当前不在场':''],
-        ['知情',kind==='characters'&&x.knowledge?.length?x.knowledge.map(k=>
-          ({knows:'知道',suspects:'怀疑',believes:'误信',hides:'隐瞒'}[k.stance]||k.stance)+
-          '「'+k.fact+'」'+(k.provenance==='secondhand'?'（转述）':'')).join('；'):'']
+          kind==='characters'&&x.presence==='absent'?'当前不在场':'']
       ].filter(([,value])=>value!==undefined&&value!==null&&value!=='')
-    }),null,x=>{
-      const wrap=el('div','sm-entity-details');
-      if(x.history?.length)wrap.append(entityHistoryDetails(x));
-      wrap.append(entityCorrection(kind,x));
-      const merge=entityMergeControl(kind,x,entries,
-        rules.filter(([,rule])=>entityNameKey(rule.to)===entityNameKey(x.name))
-          .map(([,rule])=>rule));
-      if(merge)wrap.append(merge);
-      return wrap;
-    });
+    }),null,x=>entityDrawer(kind,x,entries,rules),{scope:'entity:'+kind});
     const warnings=state.ambiguities?.[kind]||[];
     if(warnings.length){
       const notice=el('details','sm-entity-history sm-entity-ambiguity');
@@ -672,9 +799,9 @@ export function mountUI(api){
     recordCards('已归档'+heading,archived,x=>({title:x.name,
       subtitle:'归档于 #'+x.retiredAtFloor,
       description:x.description||'这条状态已被后续剧情移除；完整来源仍保存在楼层摘要中。'
-    }),null,entityHistoryDetails);
+    }),null,entityHistoryDetails,{scope:'archive:'+kind});
 
-    const aliases=Object.values(mem.entityAliases?.[kind]||{});
+    const aliases=Object.entries(mem.entityAliases?.[kind]||{}).map(([key,rule])=>({...rule,key}));
     if(entries.length>=2||aliases.length){
       const panel=el('details','sm-manual sm-entity-merge-panel');
       const heading=el('summary','sm-manual-head');
@@ -717,7 +844,7 @@ export function mountUI(api){
           const line=el('div','sm-entity-alias-row');
           line.append(el('span','',rule.name+' → '+rule.to));
           line.append(button('撤销合并',()=>{
-            try{api.unmergeAlias(kind,rule.name);showNotice('已撤销合并');}
+            try{api.unmergeAlias(kind,rule.key||rule.name);showNotice('已撤销合并');}
             catch(e){showNotice(e.message||'撤销失败');}
           },'sm-btn'));
           ruleList.append(line);
@@ -1133,7 +1260,7 @@ export function mountUI(api){
         delete next.api.secretId;delete next.vector.source;
         api.saveSettings(next);
         settingsDraft=null;settingsBaseline=settingsFormSnapshot(box);dirtyEditor=false;
-        draftNote?.remove();draftNote=null;
+        draftNote?.remove();draftNote=null;updateSaveBar();
         showSaveSuccess();
       }catch(e){showNotice('保存失败：'+e.message);}
     },'sm-btn sm-btn-primary');
@@ -1164,9 +1291,18 @@ export function mountUI(api){
     },'sm-btn');
     reset.setAttribute('data-testid','reset-settings');
     if(settingsDraft){draftNote=el('p','sm-settings-draft-note','已填入默认设置，点击「保存设置」后才会生效。');box.append(draftNote);}
-    saveBar.append(reset,save);box.append(saveBar);body.append(box);
+    const saveState=el('span','sm-settings-save-status','所有修改已保存');
+    saveBar.append(saveState,reset,save);box.append(saveBar);body.append(box);
     let settingsBaseline=settingsFormSnapshot(box);
     settingsReadDirty=()=>Boolean(settingsDraft)||settingsFormSnapshot(box)!==settingsBaseline;
+    function updateSaveBar(){
+      const changed=settingsReadDirty();
+      saveBar.classList.toggle('is-dirty',changed);
+      saveState.textContent=changed?'● 有未保存修改':'所有修改已保存';
+    }
+    box.addEventListener('input',updateSaveBar);
+    box.addEventListener('change',updateSaveBar);
+    updateSaveBar();
   }
   function openL0PromptPreview(trigger,prompt){
     clearSaveToast();closeRecordModal(false);
@@ -1195,9 +1331,7 @@ export function mountUI(api){
     overlay.addEventListener('click',e=>{if(e.target===overlay)closeRecordModal();});
     overlay.addEventListener('keydown',e=>{
       if(e.key==='Escape'){e.preventDefault();e.stopPropagation?.();closeRecordModal();return;}
-      if(e.key!=='Tab')return;
-      if(e.shiftKey&&e.target===close){e.preventDefault();done.focus();}
-      else if(!e.shiftKey&&e.target===done){e.preventDefault();close.focus();}
+      trapFocus(panel,e);
     });
     close.focus?.();
   }
@@ -1306,10 +1440,7 @@ export function mountUI(api){
     overlay.addEventListener('click',e=>{if(e.target===overlay)closeRecordModal();});
     overlay.addEventListener('keydown',e=>{
       if(e.key==='Escape'){e.preventDefault();e.stopPropagation?.();closeRecordModal();return;}
-      if(e.key!=='Tab')return;
-      const focusables=[close,textarea,done],first=focusables[0],last=focusables[focusables.length-1];
-      if(e.shiftKey&&e.target===first){e.preventDefault();last.focus();}
-      else if(!e.shiftKey&&e.target===last){e.preventDefault();first.focus();}
+      trapFocus(panel,e);
     });
     void injectionTextWithinBudget(memory,ctx?.chat||[],cfg,[],recalled,
       value=>countTokens(ctx,value),usage).then(value=>{
@@ -1328,6 +1459,11 @@ export function mountUI(api){
     if(!active)return;
     vectorStatusField=null;
     clearSaveToast();closeRecordModal(false);
+    if(timelineSearchTimer!==null){clearTimeout(timelineSearchTimer);timelineSearchTimer=null;}
+    const focusedSearch=page==='summaries'&&
+      shadow.activeElement?.getAttribute?.('aria-label')==='搜索剧情时间线';
+    const selection=focusedSearch?shadow.activeElement.selectionStart:null;
+    const preservedScroll=body.scrollTop;
     body.replaceChildren();nav.replaceChildren();dirtyEditor=false;
     for(const [name,label,icon] of NAV){
       const item=button('',()=>{
@@ -1344,11 +1480,19 @@ export function mountUI(api){
     else if(page==='plans')renderCollection('plans','计划','未完成任务、约定与剧情伏笔');
     else if(page==='settings')renderSettings();
     if(notice)showNotice(notice);
+    body.scrollTop=preservedScroll;
+    if(focusedSearch){
+      const search=body.querySelector('[aria-label="搜索剧情时间线"]');
+      search?.focus?.();
+      if(Number.isInteger(selection))search?.setSelectionRange?.(selection,selection);
+    }
   }
   return {open,updateVectorStatus,showFailures(){
     page='summaries';pendingView.expanded='failed';pendingView.all=false;open(true);
   },resetChatView(){
     timelineLimit=50;chapterLimit=40;timelineQuery='';dirtyEditor=false;
+    openDetails.clear();entityTabs.clear();showCompletedMetrics=false;
+    if(timelineSearchTimer!==null){clearTimeout(timelineSearchTimer);timelineSearchTimer=null;}
     pendingView.expanded='failed';pendingView.all=false;pendingView.limit=40;
   },refresh(force=false){
     // Preserve drafts and editing dialogs during async queue updates.

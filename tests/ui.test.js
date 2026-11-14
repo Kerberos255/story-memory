@@ -6,6 +6,24 @@ import {readFileSync} from 'node:fs';
 
 class FakeElement{
   constructor(tag){this.tag=tag;this.children=[];this.attrs={};this.style={};this.dataset={};this.listeners={};this.open=false;this.value='';this.className='';this.textContent='';this.checked=false;this.scrollTop=0;}
+  get classList(){
+    const classes=()=>new Set(String(this.className||'').split(/\\s+/).filter(Boolean));
+    return {
+      contains:name=>classes().has(name),
+      add:(...names)=>{const c=classes();names.forEach(n=>c.add(n));this.className=[...c].join(' ');},
+      remove:(...names)=>{const c=classes();names.forEach(n=>c.delete(n));this.className=[...c].join(' ');},
+      toggle:(name,force)=>{const c=classes(),enabled=force??!c.has(name);
+        if(enabled)c.add(name);else c.delete(name);
+        this.className=[...c].join(' ');return enabled;}
+    };
+  }
+  getAttribute(key){return this.attrs[key]??null;}
+  closest(selector){
+    if(selector.includes('[hidden]')&&this.hidden)return this;
+    if(selector.includes('[inert]')&&this.inert)return this;
+    return this.parent?.closest?.(selector)||null;
+  }
+
   append(...nodes){for(const x of nodes){if(x===undefined)throw Error('undefined child');this.children.push(x);if(x&&typeof x==='object')x.parent=this;}}
   prepend(...nodes){this.children.unshift(...nodes);}
   replaceChildren(...nodes){this.children=[];this.append(...nodes);}
@@ -17,7 +35,10 @@ class FakeElement{
   focus(){}
   getBoundingClientRect(){return {left:0,right:900,top:0,bottom:680};}
   querySelector(selector){if(selector==='.sm-notice')return find(this,x=>x.className==='sm-notice');return null;}
-  querySelectorAll(selector){return selector==='input'?walk(this).filter(x=>x.tag==='input'):[];}
+  querySelectorAll(selector){
+    const names=new Set(selector.split(',').map(x=>x.trim().split(/[:\\[.]/)[0]));
+    return walk(this).slice(1).filter(x=>names.has(x.tag));
+  }
   remove(){if(this.parent)this.parent.children=this.parent.children.filter(x=>x!==this);}
   fire(key,extra={}){for(const fn of this.listeners[key]||[])fn({target:this,preventDefault(){},...extra});}
 }
@@ -723,18 +744,22 @@ test('entity merge panel aligns with other full-width cards and preserves inline
     assert.equal(panel.parent.tag,'main');
     assert.ok(walk(panel).some(x=>x.textContent==='合并同一实体的不同称呼'));
     assert.ok(walk(panel).some(x=>x.className==='sm-btn sm-btn-primary sm-entity-merge-confirm'));
-    const nested=walk(list).find(x=>x.className==='sm-entity-history sm-entity-merge');
-    assert.ok(nested,'record merge is a compact accordion like history and correction');
-    assert.equal(nested.tag,'details');
-    assert.equal(nested.open,false,'merge controls stay collapsed by default');
-    assert.equal(nested.children[0].tag,'summary');
-    assert.ok(walk(nested).some(x=>x.className==='sm-entity-controls'));
+    const drawer=find(list,x=>x.className==='sm-entity-drawer-root');
+    assert.ok(drawer,'record utilities use a shared compact drawer');
+    const mergeTab=find(drawer,x=>x.tag==='button'&&x.textContent==='合并称呼');
+    assert.ok(mergeTab);
+    const controls=find(drawer,x=>x.className==='sm-entity-controls');
+    assert.ok(controls);
+    const panelNode=find(drawer,x=>x.className==='sm-entity-drawer'&&walk(x).includes(controls));
+    assert.equal(panelNode.hidden,true,'merge is hidden before tab activation');
+    mergeTab.fire('click');
+    assert.equal(panelNode.hidden,false,'merge tab opens its own panel');
     assert.ok(walk(panel).every(x=>!x.className?.includes('sm-entity-merge-content')),
       'full-width merge panel does not inherit record-only spacing');
   }
   const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
-  assert.match(css,/\.sm-entity-details\{display:grid;gap:9px;padding:0 15px 15px/);
-  assert.match(css,/\.sm-entity-details>\.sm-entity-history\{margin:0/);
+  assert.match(css,/\.sm-entity-drawer-root\{/);
+  assert.match(css,/\.sm-entity-drawer\[hidden\]\{display:none\}/);
   assert.match(css,/\.sm-entity-merge-content\{display:grid;gap:11px/);
   assert.match(css,/\.sm-entity-merge-panel \.sm-manual-content\{display:grid;gap:12px/);
   assert.match(css,/@media\(max-width:560px\)\{[\s\S]*\.sm-entity-controls\{grid-template-columns:minmax\(0,1fr\)/);
@@ -1118,9 +1143,13 @@ test('entity correction stays collapsed by default and updates only after explic
     clearEntityCorrection:(kind,id)=>{memory=clearEntityCorrection(memory,kind,id);}});
   view.open();const dialog=body.children[0].shadow.children[1];
   find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='角色')).fire('click');
-  const correction=find(dialog,x=>x.className==='sm-entity-history sm-entity-correction');
+  const correction=find(dialog,x=>x.className==='sm-entity-panel-content'&&
+    walk(x).some(y=>y.tag==='button'&&y.textContent==='保存纠错'));
   assert.ok(correction);
-  assert.equal(correction.open,false,'correction form is not another permanent cluttered card');
+  assert.equal(correction.parent.hidden,true,'correction is hidden before choosing its tab');
+  const tab=find(dialog,x=>x.tag==='button'&&String(x.textContent).startsWith('人工纠错'));
+  tab.fire('click');
+  assert.equal(correction.parent.hidden,false);
   const input=find(correction,x=>x.attrs['aria-label']==='守门人 · 状态');
   input.value='痊愈';
   assert.equal(changed.length,0,'typing must not silently persist the result');
@@ -1172,12 +1201,13 @@ test('plans, items, scenes and characters share tidy metadata and closed utility
     const current=find(dialog,x=>x.className==='sm-record-list');
     const card=find(current,x=>x.className==='sm-record');
     assert.ok(card,page+' needs a record card');
-    const details=find(card,x=>x.className==='sm-entity-details');
+    const details=find(card,x=>x.className==='sm-entity-drawer-root');
     assert.ok(details);
-    const merge=find(details,x=>x.className==='sm-entity-history sm-entity-merge');
-    assert.ok(merge,page+' merge belongs to a collapsed details control');
-    assert.equal(merge.open,false);
-    assert.equal(merge.children[0].tag,'summary');
+    const merge=find(details,x=>x.tag==='button'&&x.textContent==='合并称呼');
+    assert.ok(merge,page+' merge belongs to a shared tabs drawer');
+    const panel=find(details,x=>x.className==='sm-entity-panel-content'&&
+      walk(x).some(y=>y.className==='sm-entity-controls'));
+    assert.equal(panel.parent.hidden,true,'merge drawer is initially hidden');
     assert.ok(walk(details).every(x=>x.className!=='sm-entity-hint'||x.parent?.className==='sm-entity-merge-content'));
   }
   selectPage('计划');
@@ -1316,7 +1346,7 @@ test('field locks render as compact controls and warn before overwriting newer p
   view.open();
   const dialog=body.children[0].shadow.children[1];
   find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='角色')).fire('click');
-  let form=find(dialog,x=>x.className==='sm-entity-history sm-entity-correction');
+  let form=find(dialog,x=>x.className==='sm-entity-panel-content'&&walk(x).some(y=>y.tag==='button'&&y.textContent==='保存纠错'));
   const titleLock=find(form,x=>x.attrs['aria-label']==='守门人 · 锁定名称');
   const relationLock=find(form,x=>x.attrs['aria-label']==='守门人 · 锁定关系');
   assert.ok(titleLock&&relationLock);
@@ -1333,7 +1363,7 @@ test('field locks render as compact controls and warn before overwriting newer p
       evidence:'守门人后来加入敌方。'}]
   }));
   view.refresh(true);
-  form=find(dialog,x=>x.className==='sm-entity-history sm-entity-correction');
+  form=find(dialog,x=>x.className==='sm-entity-panel-content'&&walk(x).some(y=>y.tag==='button'&&y.textContent==='保存纠错'));
   assert.ok(walk(form).some(x=>String(x.textContent||'').includes('新剧情与锁定字段不一致')));
   assert.equal(deriveState(memory,chat).characters[0].relationship,'盟友');
   const latestRelationLock=find(form,x=>x.attrs['aria-label']==='守门人 · 锁定关系');
@@ -1620,4 +1650,158 @@ test('chapter compression failure is visible in summary and can be retried witho
   await new Promise(resolve=>setTimeout(resolve,5));
   assert.equal(calls,1);
   assert.equal(find(dialog,x=>x.className==='sm-chapter-warning'),undefined);
+}));
+
+test('completed progress compacts only when truly complete, with working expand/collapse controls',()=>withUI(body=>{
+  const chat=[{is_user:false,swipe_id:0,mes:'已完成的剧情'}];
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({summary:'已总结剧情'}));
+  const ctx={chat,getCurrentChatId:()=> 'complete-progress'};
+  const ui=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,queue:{busy:false,enqueueMissing(){}}});
+  ui.open();const dialog=body.children[0].shadow.children[1];
+  assert.ok(find(dialog,x=>x.className==='sm-status-strip'));
+  assert.equal(find(dialog,x=>x.className==='sm-metrics'),undefined);
+  find(dialog,x=>x.tag==='button'&&x.textContent==='展开进度').fire('click');
+  assert.ok(find(dialog,x=>x.className==='sm-metrics'));
+  assert.ok(find(dialog,x=>x.attrs['data-testid']==='summary-progress'));
+  find(dialog,x=>x.tag==='button'&&x.textContent==='收起进度').fire('click');
+  assert.ok(find(dialog,x=>x.className==='sm-status-strip'));
+  const withDelay=[...chat,{is_user:false,swipe_id:0,mes:'新剧情'}];
+  ctx.chat=withDelay;ui.refresh(true);
+  assert.equal(find(dialog,x=>x.className==='sm-status-strip'),undefined,'pending or delayed floors need full status');
+  assert.ok(find(dialog,x=>x.attrs['data-testid']==='summary-progress'));
+}));
+
+test('background refresh preserves expanded floor and entity cards across page changes',()=>withUI(body=>{
+  const chat=[{is_user:false,swipe_id:0,mes:'守卫持有钥匙'}];
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'守卫持有钥匙',items:[{op:'add',name:'钥匙',owner:'守卫'}]
+  }));
+  const ctx={chat,getCurrentChatId:()=> 'keep-open-card'};
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}}});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  let card=find(dialog,x=>x.tag==='details'&&x.attrs['data-record-key']==='floor:0');
+  card.open=true;card.fire('toggle');
+  view.refresh();
+  card=find(dialog,x=>x.tag==='details'&&x.attrs['data-record-key']==='floor:0');
+  assert.equal(card.open,true,'floor stays open after queue refresh');
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='物品')).fire('click');
+  card=find(dialog,x=>x.tag==='details'&&x.attrs['data-record-key']?.startsWith('entity:items:'));
+  card.open=true;card.fire('toggle');
+  view.refresh();
+  card=find(dialog,x=>x.tag==='details'&&x.attrs['data-record-key']?.startsWith('entity:items:'));
+  assert.equal(card.open,true,'entity card stays open');
+  const chip=find(card,x=>x.className?.includes('sm-meta-chip')&&x.textContent.includes('守卫'));
+  assert.ok(chip,'owner visible while collapsed');
+  assert.ok(find(card,x=>x.className==='sm-entity-tabs'));
+  view.resetChatView();
+  view.refresh(true);
+  card=find(dialog,x=>x.tag==='details'&&x.attrs['data-record-key']?.startsWith('entity:items:'));
+  assert.equal(card.open,false,'new chat does not inherit old open cards');
+}));
+
+test('timeline query updates only its list after debounce; search and clear buttons preserve the field',()=>withUI(async body=>{
+  const chat=[{is_user:false,swipe_id:0,mes:'城堡门打开'},{is_user:false,swipe_id:0,mes:'森林里找到地图'}];
+  let memory=freshMemory();
+  for(const [i,summary] of ['城堡的守门人','森林的地图'].entries())
+    memory=commitLeaf(memory,i,messageFingerprint(chat[i]),normalizeDelta({summary}));
+  const ctx={chat,getCurrentChatId:()=> 'search-only'};
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,queue:{busy:false,enqueueMissing(){}}});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  let search=find(dialog,x=>x.attrs['aria-label']==='搜索剧情时间线');
+  const before=search,main=find(dialog,x=>x.tag==='main');
+  search.value='森林';search.fire('input');main.fire('input',{target:search});
+  await new Promise(resolve=>setTimeout(resolve,190));
+  assert.ok(walk(dialog).includes(before),'typing preserves the exact search control');
+  assert.equal(find(dialog,x=>x.className==='sm-record-list is-timeline')?.children.length,1);
+  assert.equal(find(dialog,x=>x.attrs['data-record-key']==='floor:1')?.tag,'details');
+  assert.equal(find(dialog,x=>x.attrs['data-record-key']==='floor:0'),undefined);
+  search.value='城堡';
+  find(dialog,x=>x.tag==='button'&&x.textContent==='搜索').fire('click');
+  assert.ok(walk(dialog).includes(before));
+  assert.ok(find(dialog,x=>x.attrs['data-record-key']==='floor:0'));
+  find(dialog,x=>x.tag==='button'&&x.textContent==='清空').fire('click');
+  assert.equal(search.value,'');
+  assert.equal(find(dialog,x=>x.className==='sm-record-list is-timeline')?.children.length,2);
+  view.refresh();
+  search=find(dialog,x=>x.attrs['aria-label']==='搜索剧情时间线');
+  assert.equal(search.value,'');
+  // A completion event during the 150 ms debounce must not erase fresh typing.
+  search.value='森林';search.fire('input');main.fire('input',{target:search});
+  view.refresh();
+  search=find(dialog,x=>x.attrs['aria-label']==='搜索剧情时间线');
+  assert.equal(search.value,'森林');
+  assert.equal(find(dialog,x=>x.className==='sm-record-list is-timeline')?.children.length,1);
+}));
+
+test('switching entity tabs retains unsaved corrections and saves through the real callback',()=>withUI(body=>{
+  const chat=[{is_user:false,swipe_id:0,mes:'守门人守护城堡'}];
+  let memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({
+    summary:'守门人守护城堡',characters:[{op:'add',name:'守门人',status:'巡逻',presence:'present',
+      knowledge:[{op:'add',fact:'城堡位置',stance:'knows',evidence:'守门人守护城堡'}]}]
+  }));
+  const ctx={chat,getCurrentChatId:()=> 'entity-tabs'};
+  let saved=0;
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},
+    correctEntity:(kind,id,values,locks)=>{memory=correctEntity(memory,chat,kind,id,values,locks);saved++;}
+  });
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='角色')).fire('click');
+  let card=find(dialog,x=>x.className==='sm-record');
+  card.open=true;card.fire('toggle');
+  const badge=find(card,x=>x.className?.includes('sm-meta-chip')&&x.textContent.includes('在场'));
+  assert.ok(badge);
+  assert.ok(find(card,x=>x.className==='sm-knowledge-badge'));
+  const correctionTab=find(card,x=>x.tag==='button'&&String(x.textContent).startsWith('人工纠错'));
+  const historyTab=find(card,x=>x.tag==='button'&&String(x.textContent).startsWith('变更记录'));
+  correctionTab.fire('click');
+  const input=find(card,x=>x.attrs['aria-label']==='守门人 · 状态');
+  input.value='休息';find(dialog,x=>x.tag==='main').fire('input',{target:input});
+  historyTab.fire('click');correctionTab.fire('click');
+  assert.equal(input.value,'休息','tab change cannot discard an uncommitted draft');
+  assert.equal(saved,0);
+  find(card,x=>x.tag==='button'&&x.textContent==='保存纠错').fire('click');
+  assert.equal(saved,1);
+  assert.equal(deriveState(memory,chat).characters[0].status,'休息');
+  card=find(dialog,x=>x.className==='sm-record');
+  assert.equal(card.open,true);
+  assert.ok(find(card,x=>x.tag==='button'&&String(x.textContent).startsWith('人工纠错')).className.includes('is-active'));
+}));
+
+test('source modal keyboard loop skips hidden load-more button and preview includes all actions',()=>withUI(body=>{
+  const chat=[{is_user:false,swipe_id:0,mes:'原文甲'}];
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),normalizeDelta({summary:'摘要甲'}));
+  const ctx={chat,getCurrentChatId:()=> 'focus-cycle'};
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},sourcePreview:()=>[{index:0,text:'原文甲'}],
+    lastInjection:()=>({chatId:'focus-cycle',text:'上轮记忆'})});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.tag==='button'&&x.textContent==='查看原文').fire('click');
+  let overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+  const close=find(overlay,x=>x.className==='sm-record-modal-close');
+  const foot=find(overlay,x=>x.className==='sm-record-modal-footer');
+  assert.equal(foot.children[0].hidden,true);
+  let focusName='';
+  for(const node of walk(overlay).filter(x=>x.tag==='button'||x.tag==='textarea'))node.focus=()=>{focusName=node.textContent||node.className;};
+  let prevented=0;
+  overlay.fire('keydown',{key:'Tab',target:close,shiftKey:true,preventDefault(){prevented++;}});
+  assert.ok(focusName.includes('关闭'),'shift+tab from close wraps to visible footer Close');
+  assert.equal(prevented,1);
+  find(foot,x=>x.tag==='button'&&x.textContent==='关闭').fire('click');
+  assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  find(dialog,x=>x.tag==='button'&&x.textContent==='预览发送内容').fire('click');
+  overlay=find(dialog,x=>x.className==='sm-record-modal-overlay');
+  assert.ok(find(overlay,x=>x.tag==='button'&&x.textContent==='查看上轮扩展发送'));
+  assert.ok(find(overlay,x=>x.tag==='summary'&&x.textContent.includes('记忆组成')));
+  const previewFoot=find(overlay,x=>x.className==='sm-record-modal-footer');
+  const previewClose=find(overlay,x=>x.className==='sm-record-modal-close');
+  focusName='';
+  for(const node of walk(overlay).filter(x=>x.tag==='button'||x.tag==='textarea'||x.tag==='summary'))
+    node.focus=()=>{focusName=node.textContent||node.className;};
+  overlay.fire('keydown',{key:'Tab',target:previewClose,shiftKey:true,preventDefault(){prevented++;}});
+  assert.equal(focusName,'关闭');
+  find(previewFoot,x=>x.tag==='button'&&x.textContent==='查看上轮扩展发送').fire('click');
+  assert.ok(find(previewFoot,x=>x.tag==='button'&&x.textContent==='返回模拟预览'));
 }));

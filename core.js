@@ -345,16 +345,17 @@ const entityKinds=['items','scenes','characters','plans'];
 export const entityNameKey=name=>String(name||'').normalize('NFKC').trim().toLocaleLowerCase().replace(/\s+/g,'');
 function canonicalEntity(memory,kind,name){
   const rules=memory.entityAliases?.[kind]||{};
-  let display=String(name||'').trim(),key=entityNameKey(display),steps=0;
+  let display=String(name||'').trim(),key=entityNameKey(display),steps=0,targetId=null;
   const seen=new Set();
   while(Object.hasOwn(rules,key)&&steps++<20&&!seen.has(key)){
     seen.add(key);
-    const target=String(rules[key]?.to||'').trim();
+    const rule=rules[key],target=String(rule?.to||'').trim();
     const next=entityNameKey(target);
     if(!next||seen.has(next))break;
+    if(typeof rule.targetId==='string')targetId=rule.targetId;
     display=target;key=next;
   }
-  return {key,name:display};
+  return {key,name:display,targetId,merged:seen.size>0};
 }
 /** Explicit alias mapping scoped to one chat and one category; never edits leaves. */
 export function mergeEntities(memory,chat,kind,fromId,toId){
@@ -362,19 +363,28 @@ export function mergeEntities(memory,chat,kind,fromId,toId){
   const rows=deriveState(memory,chat)[kind].filter(x=>!x.manual);
   const source=rows.find(x=>x.entity_id===fromId),target=rows.find(x=>x.entity_id===toId);
   if(!source||!target||source===target)throw Error('请选择两个不同的现有记录');
-  const from=entityNameKey(source.name),to=entityNameKey(target.name);
+  // Corrections change display names, never the names stored in original deltas.
+  // Replay without corrections to find the stable source/target canonical names.
+  const rawRows=deriveState({...memory,entityCorrections:{}},chat)[kind];
+  const rawSource=rawRows.find(x=>x.entity_id===fromId);
+  const rawTarget=rawRows.find(x=>x.entity_id===toId);
+  if(!rawSource||!rawTarget)throw Error('实体来源已变化，请重新打开');
+  const from=entityNameKey(rawSource.name),to=entityNameKey(rawTarget.name);
   if(!from||!to||from===to)throw Error('记录名称相同');
   if(['__proto__','constructor','prototype'].includes(from)||['__proto__','constructor','prototype'].includes(to))throw Error('该名称不能建立合并规则');
   const next=structuredClone(memory);
   next.entityAliases??={};
   next.entityAliases[kind]??={};
-  next.entityAliases[kind][from]={name:source.name,to:target.name};
+  next.entityAliases[kind][from]={name:source.name,to:rawTarget.name,targetId:toId};
   next.revision++;return next;
 }
 export function unmergeEntity(memory,kind,fromName){
   if(!entityKinds.includes(kind))throw Error('未知实体类型');
-  const key=entityNameKey(fromName);
-  if(!Object.hasOwn(memory.entityAliases?.[kind]||{},key))throw Error('没有可撤销的合并规则');
+  const rules=memory.entityAliases?.[kind]||{};
+  const normalized=entityNameKey(fromName);
+  const key=Object.hasOwn(rules,normalized)?normalized:
+    Object.keys(rules).find(k=>entityNameKey(rules[k]?.name)===normalized);
+  if(!key)throw Error('没有可撤销的合并规则');
   const next=structuredClone(memory);
   delete next.entityAliases[kind][key];
   next.revision++;return next;
@@ -456,7 +466,8 @@ function makeStateCheckpoint(memory,chat,floors,throughFloor,validCount,aliasKey
     ambiguities:Object.fromEntries(entityKinds.map(kind=>[kind,state.ambiguities[kind].slice()])),
     byId:Object.fromEntries(entityKinds.map(kind=>[kind,new Map(state.byId[kind])])),
     knownAliases:Object.fromEntries(entityKinds.map(kind=>[kind,new Map(state.knownAliases[kind])])),
-    timeline:state.timeline.slice()
+    timeline:state.timeline.slice(),
+    pendingMergeTargets:[...(state.pendingMergeTargets||[])]
   };
 }
 function checkpointMatches(checkpoint,memory,chat,floors,aliasKey){
@@ -477,19 +488,23 @@ function restoreStateCheckpoint(checkpoint){
     ambiguities:Object.fromEntries(entityKinds.map(kind=>[kind,checkpoint.ambiguities[kind].slice()])),
     byId:Object.fromEntries(entityKinds.map(kind=>[kind,new Map(checkpoint.byId[kind])])),
     knownAliases:Object.fromEntries(entityKinds.map(kind=>[kind,new Map(checkpoint.knownAliases[kind])])),
-    timeline:checkpoint.timeline.slice()
+    timeline:checkpoint.timeline.slice(),
+    pendingMergeTargets:new Set(checkpoint.pendingMergeTargets||[])
   };
 }
 export function deriveState(memory,chat) {
   const floors=Object.keys(memory.leaves||{}).map(Number).filter(Number.isSafeInteger).sort((a,b)=>a-b);
   const aliasKey=hashText(JSON.stringify(memory.entityAliases||{}));
   const cached=Array.isArray(chat)?stateCheckpointCache.get(chat):null;
-  let checkpoints=cached?.aliasKey===aliasKey?cached.checkpoints:[];
+  const previous=cached?.aliasKey===aliasKey?cached.checkpoints||[]:[];
   let checkpoint=null;
-  for(let i=checkpoints.length-1;i>=0;i--){
-    if(checkpointMatches(checkpoints[i],memory,chat,floors,aliasKey)){checkpoint=checkpoints[i];break;}
+  for(let i=previous.length-1;i>=0;i--){
+    if(checkpointMatches(previous[i],memory,chat,floors,aliasKey)){checkpoint=previous[i];break;}
   }
-  checkpoints=checkpoint?checkpoints.filter(x=>x.throughFloor<=checkpoint.throughFloor):[];
+  // A historical prefix read must not evict the newer chat's valid cache.
+  const maxFloor=floors.at(-1)??-1;
+  let checkpoints=previous.filter(x=>x.throughFloor>maxFloor||
+    (checkpoint&&x.throughFloor<=checkpoint.throughFloor));
   const restored=checkpoint?restoreStateCheckpoint(checkpoint):null;
   const sections=restored?.sections||{items:new Map(),scenes:new Map(),characters:new Map(),plans:new Map()};
   const archived=restored?.archived||{items:[],scenes:[],characters:[],plans:[]};
@@ -497,6 +512,7 @@ export function deriveState(memory,chat) {
   const byId=restored?.byId||Object.fromEntries(entityKinds.map(kind=>[kind,new Map()]));
   const knownAliases=restored?.knownAliases||Object.fromEntries(entityKinds.map(kind=>[kind,new Map()]));
   const timeline=restored?.timeline||[];
+  const pendingMergeTargets=restored?.pendingMergeTargets||new Set();
   let validCount=checkpoint?.validCount||0;
   for(const i of floors){
     if(checkpoint&&i<=checkpoint.throughFloor)continue;
@@ -532,12 +548,17 @@ export function deriveState(memory,chat) {
           continue;
         }
         const old=map.get(key);
-        if(old&&change.op==='add'&&!linked){
+        const confirmedMerge=Boolean(old&&canonical.merged&&canonical.targetId===old.entity_id);
+        const firstTargetAppearance=Boolean(old&&raw===key&&pendingMergeTargets.has(kind+':'+key));
+        if(old&&change.op==='add'&&!linked&&!confirmedMerge&&!firstTargetAppearance){
           ambiguities[kind].push({name:change.name,sourceIndex:i,
             reason:'已有同名实体却再次声明新增；无法确定是新对象还是重复提取，已保留原状态'});
           continue;
         }
-        const entity_id=old?.entity_id||(kind+':'+i+':'+hashText(kind+'|'+key));
+        if(firstTargetAppearance)pendingMergeTargets.delete(kind+':'+key);
+        if(!old&&canonical.merged&&canonical.targetId)pendingMergeTargets.add(kind+':'+key);
+        const entity_id=old?.entity_id||canonical.targetId||
+          (kind+':'+i+':'+hashText(kind+'|'+key));
         const display=old?.name||canonical.name;
         const aliases=[...(old?.aliases||[])];
         if(raw!==entityNameKey(display)&&!aliases.some(x=>entityNameKey(x)===raw)&&aliases.length<12)
@@ -584,11 +605,16 @@ export function deriveState(memory,chat) {
   if(validCount>=STATE_CHECKPOINT_INTERVAL&&
     (!checkpoint||validCount-checkpoint.validCount>=STATE_CHECKPOINT_INTERVAL)){
     const lastIndex=timeline.at(-1)?.sourceIndex;
-    if(Number.isSafeInteger(lastIndex))
-      checkpoints=[makeStateCheckpoint(memory,chat,floors,lastIndex,validCount,aliasKey,
-        {sections,archived,ambiguities,byId,knownAliases,timeline})];
+    if(Number.isSafeInteger(lastIndex)){
+      checkpoints=checkpoints.filter(x=>x.throughFloor!==lastIndex);
+      checkpoints.push(makeStateCheckpoint(memory,chat,floors,lastIndex,validCount,aliasKey,
+        {sections,archived,ambiguities,byId,knownAliases,timeline,pendingMergeTargets}));
+    }
   }
-  if(Array.isArray(chat))stateCheckpointCache.set(chat,{aliasKey,checkpoints});
+  // Bound memory usage to a few snapshots regardless of chat length.
+  if(Array.isArray(chat))stateCheckpointCache.set(chat,{
+    aliasKey,checkpoints:checkpoints.sort((a,b)=>a.throughFloor-b.throughFloor).slice(-4)
+  });
   for(const kind of ['items','scenes','characters','plans']){
     for(const [key,baseEntity] of sections[kind]){
       const entity={...baseEntity};sections[kind].set(key,entity);

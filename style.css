@@ -548,3 +548,91 @@
 
 .sm-chapter-warning{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px;padding:12px 14px;border:1px solid var(--danger);border-radius:10px;background:var(--surface-alt)}
 .sm-chapter-warning .sm-help{margin:0;flex:1 1 210px}
+
+/* Readable, restrained visual hierarchy for long-running stories. */
+.sm-status-strip{display:flex;align-items:center;flex-wrap:wrap;gap:10px;
+  padding:10px 14px;margin:0 0 18px;border:1px solid color-mix(in srgb,var(--accent) 28%,var(--edge));
+  border-radius:10px;background:var(--surface);color:var(--fg-weak);font-size:12px}
+.sm-status-strip>strong{font-size:12px;font-weight:660}
+.sm-status-strip .sm-btn{margin-left:auto}
+.sm-status-dot{width:8px;height:8px;flex:none;border-radius:50%;background:#46bd87}
+.sm-status-pill{font-size:11px;color:var(--muted);border:1px solid var(--edge);
+  border-radius:6px;padding:2px 7px;background:var(--surface-alt)}
+.sm-collapse-progress{margin:-8px 0 12px auto;display:flex}
+.sm-record[data-level="1"]{border-left:3px solid #8396ff}
+.sm-record[data-level="2"]{border-left:3px solid #dba65e}
+.sm-record[data-level="3"],.sm-record[data-level="4"],.sm-record[data-level="5"]{border-left:3px solid #ad82d7}
+.sm-record-title-row{display:flex;align-items:center;gap:7px;flex-wrap:wrap;min-width:0}
+.sm-level-tag{font-size:10px;font-weight:700;line-height:1.4;padding:2px 6px;
+  border-radius:5px;color:#aeb9ff;background:color-mix(in srgb,#8396ff 16%,transparent)}
+.sm-level-tag.is-l2{color:#e7b66e;background:color-mix(in srgb,#dba65e 15%,transparent)}
+.sm-level-tag.is-l3{color:#cba7ff;background:color-mix(in srgb,#ad82d7 15%,transparent)}
+.sm-dialog[data-theme=light] .sm-level-tag.is-l1{color:#4e60bb}
+.sm-dialog[data-theme=light] .sm-level-tag.is-l2{color:#966018}
+.sm-dialog[data-theme=light] .sm-level-tag.is-l3{color:#7f45ad}
+.sm-card-chips{display:flex;flex-wrap:wrap;align-items:center;gap:5px;min-width:0}
+.sm-meta-chip{display:inline-block;max-width:min(180px,100%);padding:2px 7px;
+  font-size:10px;line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  border:1px solid var(--edge);border-radius:6px;color:var(--fg-weak);background:var(--surface-alt)}
+.sm-meta-chip.is-present{color:#57d6a1;border-color:color-mix(in srgb,#4fc58a 32%,var(--edge))}
+.sm-meta-chip.is-conflict{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 35%,var(--edge))}
+.sm-dialog[data-theme=light] .sm-meta-chip.is-present{color:#18834b}
+.sm-timeline-region{min-width:0}
+.sm-record-list.is-timeline{position:relative;padding-left:17px}
+.sm-record-list.is-timeline::before{content:"";position:absolute;top:12px;bottom:12px;
+  left:5px;width:2px;border-radius:2px;background:var(--edge-strong)}
+.sm-record-list.is-timeline>.sm-record{position:relative;overflow:visible}
+.sm-record-list.is-timeline>.sm-record::before{content:"";position:absolute;left:-17px;top:17px;
+  width:9px;height:9px;border:2px solid var(--accent);background:var(--bg);
+  border-radius:50%;box-shadow:0 0 0 2px var(--bg)}
+.sm-record-list.is-timeline>.sm-record[open]::before{background:var(--accent)}
+.sm-entity-drawer-root{display:grid;gap:8px;margin:0 15px 14px;padding-top:10px;
+  border-top:1px solid var(--edge)}
+.sm-entity-tabs{display:flex;gap:6px;flex-wrap:wrap}
+.sm-entity-tab{border:1px solid var(--edge);background:var(--surface-alt);color:var(--fg-weak);
+  border-radius:7px;padding:5px 10px;font:inherit;font-size:11px;font-weight:600;cursor:pointer}
+.sm-entity-tab:hover{border-color:var(--accent)}
+.sm-entity-tab.is-active{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 44%,var(--edge));
+  background:var(--accent-soft)}
+.sm-entity-drawer{border:1px solid var(--edge);background:var(--surface-alt);
+  border-radius:9px;padding:11px 12px;min-width:0}
+.sm-entity-drawer[hidden]{display:none}
+.sm-entity-panel-content{display:grid;gap:10px;min-width:0}
+.sm-entity-panel-content>.sm-entity-correction-content,
+.sm-entity-panel-content>.sm-entity-merge-content{padding:0}
+.sm-entity-panel-content .sm-entity-history-list{padding:0}
+.sm-entity-panel-content .sm-entity-version-list{padding:0}
+.sm-knowledge-wrap{display:grid;gap:7px;padding:0 15px 12px}
+.sm-knowledge-title{font-size:11px;font-weight:650;color:var(--muted)}
+.sm-knowledge-list{display:flex;flex-wrap:wrap;gap:6px}
+.sm-knowledge-badge{max-width:100%;border:1px solid var(--edge);border-radius:6px;
+  font-size:11px;line-height:1.5;padding:4px 8px;overflow-wrap:anywhere;background:var(--surface-alt)}
+.sm-knowledge-badge[data-stance=knows]{color:#65dba7;border-color:color-mix(in srgb,#46bd87 30%,var(--edge))}
+.sm-knowledge-badge[data-stance=suspects]{color:#e4b970;border-color:color-mix(in srgb,#dba65e 28%,var(--edge))}
+.sm-knowledge-badge[data-stance=believes]{color:#d0aaff;border-color:color-mix(in srgb,#ad82d7 28%,var(--edge))}
+.sm-knowledge-badge[data-stance=hides]{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 27%,var(--edge))}
+.sm-dialog[data-theme=light] .sm-knowledge-badge[data-stance=knows]{color:#187f4e}
+.sm-dialog[data-theme=light] .sm-knowledge-badge[data-stance=suspects]{color:#93621a}
+.sm-dialog[data-theme=light] .sm-knowledge-badge[data-stance=believes]{color:#7042a3}
+.sm-settings-save.is-dirty{background:var(--surface-alt);
+  border-top-color:color-mix(in srgb,var(--accent) 55%,var(--edge))}
+.sm-settings-save-status{margin-right:auto;font-size:11px;color:var(--muted)}
+.sm-settings-save.is-dirty .sm-settings-save-status{color:var(--accent);font-weight:650}
+@media(max-width:440px){
+  .sm-card-chips{width:100%}
+  .sm-meta-chip{max-width:min(145px,100%)}
+  .sm-record-list.is-timeline{padding-left:13px}
+  .sm-record-list.is-timeline>.sm-record::before{left:-14px}
+  .sm-record-list.is-timeline::before{left:3px}
+  .sm-status-strip .sm-btn{margin-left:0}
+  .sm-entity-tabs{gap:5px}
+  .sm-entity-tab{padding:5px 8px}
+  .sm-settings-save-status{max-width:108px}
+}
+
+/* Three real search actions must share one row on desktop and narrow screens. */
+.sm-timeline-search{grid-template-columns:minmax(0,1fr) auto auto}
+@media(max-width:440px){
+  .sm-timeline-search{gap:5px}
+  .sm-timeline-search>.sm-btn{padding:6px 9px;min-width:0}
+}
