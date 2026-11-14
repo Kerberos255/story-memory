@@ -8,5 +8,6 @@
   "author": "Kerberos255",
   "version": "0.1.0",
   "auto_update": false,
+  "hooks": {"install": "storyMemoryOnInstall", "update": "storyMemoryOnUpdate"},
   "minimum_client_version": "1.12.13"
 }

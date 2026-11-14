@@ -298,14 +298,19 @@ test('compact compression strip edits three independent thresholds and retained 
  assert.ok(keep);
  const keepInput=walk(keep).find(x=>x.tag==='input');
  assert.ok(keepInput);keepInput.value='4';
- const advanced=find(dialog,x=>x.className==='sm-summary-advanced');
- assert.ok(advanced);
- assert.equal(advanced.open,false,'advanced settings stay collapsed');
+ assert.ok(walk(keep).some(x=>x.textContent==='保留最近 L0 摘要'));
+ assert.ok(walk(keep).some(x=>String(x.textContent||'').includes('与延迟生成 L0 无关')));
+ const retry=find(dialog,x=>x.className==='sm-summary-retry');
+ assert.ok(retry,'a single retry control does not need an advanced drawer');
+ assert.equal(find(dialog,x=>x.className==='sm-summary-advanced'),undefined);
+ const retryInput=walk(retry).find(x=>x.tag==='input');
+ assert.ok(retryInput);retryInput.value='2';
  find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
  assert.equal(saved.summary.leafBatchThreshold,10);
  assert.equal(saved.summary.resummaryThreshold,5);
  assert.equal(saved.summary.higherResummaryThreshold,2);
  assert.equal(saved.summary.leafKeepRecent,4);
+ assert.equal(saved.summary.retry,2);
 }));
 test('dark and light palettes have clear foreground and neutral cool backgrounds',()=>{
  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
@@ -1398,4 +1403,37 @@ test('processing console expands groups, retries individual floors and keeps ori
   const again=find(dialog,x=>x.className==='sm-progress-group-head'&&walk(x).some(t=>t.textContent==='需要关注'));
   assert.equal(again.attrs['aria-expanded'],'true');
   assert.ok(walk(dialog).some(x=>x.textContent==='剧情时间线'));
+}));
+
+test('injection preview shows actual token usage and explains excluded candidate counts',()=>withUI(async body=>{
+  const memory=freshMemory(),settings=defaultSettings();
+  settings.injection.budget=400;
+  memory.manual.summaries=[
+    {id:'x',text:'短记忆'},
+    {id:'y',text:'短记忆'},
+    {id:'z',text:'超长记忆'.repeat(450)},
+    {id:'w',text:' '}
+  ];
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=> 'injection-exclusions',
+    getTokenCountAsync:async value=>Math.ceil(value.length/3)};
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:()=>settings,
+    queue:{busy:false,enqueueMissing(){}},previewHistory:()=>[]});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  find(dialog,x=>x.tag==='button'&&x.textContent==='预览发送内容').fire('click');
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const skipped=find(dialog,x=>x.className==='sm-preview-skipped');
+  assert.ok(skipped);
+  assert.match(skipped.textContent,/跳过 3 条/);
+  assert.match(skipped.textContent,/容量不足 1、重复 1、空记录 1/);
+  const usage=find(dialog,x=>x.className==='sm-preview-counter');
+  assert.match(usage.textContent,/400 Tokens/);
+  const drawer=find(dialog,x=>x.className==='sm-injection-breakdown');
+  assert.ok(walk(drawer).some(x=>String(x.textContent||'').includes('容量不足 1 条')));
+  const field=find(dialog,x=>x.attrs['aria-label']==='发送预览内容');
+  assert.ok(field);assert.ok(field.value.includes('短记忆'));
+  const bodyContent=find(dialog,x=>x.className==='sm-record-modal-body'&&
+    walk(x).some(y=>y.className==='sm-preview-skipped'));
+  assert.ok(bodyContent.children.indexOf(skipped)<bodyContent.children.indexOf(field),
+    'over-budget alert must stay above the long memory textarea');
 }));

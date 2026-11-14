@@ -921,3 +921,43 @@ test('host tokenizer failure falls back to bounded estimate without rejecting ge
   assert.ok(text.length<=1200);
   assert.equal(usage.tokenEstimated,true);
 });
+
+test('injection report separates budget, duplicate and empty exclusions without changing text',()=>{
+  const memory=freshMemory(),cfg=defaultSettings();
+  assert.equal(cfg.injection.budget,16000,'new installations get the expanded budget');
+  cfg.injection.budget=400; // Existing saved limits remain valid.
+  memory.manual.summaries=[
+    {id:'one',text:'保留的短记忆'},
+    {id:'two',text:'保留的短记忆'},
+    {id:'three',text:'非常长的记录'.repeat(400)},
+    {id:'four',text:'   '}
+  ];
+  const diagnostics={};
+  const text=injectionText(memory,[],cfg,[],[],diagnostics);
+  assert.equal(text,injectionText(memory,[],cfg));
+  const info=diagnostics.sections.find(x=>x.title==='【人工补充记忆】');
+  assert.ok(info);
+  assert.equal(info.selected,1);
+  assert.equal(info.skippedBudget,1);
+  assert.equal(info.skippedDuplicate,1);
+  assert.equal(info.skippedEmpty,1);
+  assert.equal(info.omitted,info.skippedBudget+info.skippedDuplicate+info.skippedEmpty);
+  assert.match(text,/保留的短记忆/);
+  assert.doesNotMatch(text,/非常长的记录/);
+});
+test('tokenizer shrink preserves final report and does not silently exceed the token budget',async()=>{
+  const {injectionTextWithinBudget}=await import('../core.js');
+  const cfg=defaultSettings();cfg.injection.budget=400;
+  const memory=freshMemory();
+  memory.manual.summaries=[{id:'short',text:'短'.repeat(250)},{id:'long',text:'大'.repeat(1000)}];
+  const report={};
+  const result=await injectionTextWithinBudget(memory,[],cfg,[],[],async text=>
+    ({tokens:Math.ceil(text.length/2),estimated:false}),report);
+  assert.ok(result.length>0);
+  assert.ok(report.usedTokens<=400);
+  assert.equal(report.budgetTokens,400);
+  assert.equal(report.tokenAdjusted,true);
+  assert.ok(report.tokenChecks>=2);
+  assert.ok(report.sections.every(s=>s.omitted===
+    (s.skippedBudget||0)+(s.skippedDuplicate||0)+(s.skippedEmpty||0)));
+});

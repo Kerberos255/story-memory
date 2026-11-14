@@ -7,7 +7,7 @@ export function defaultSettings() {
     enabled: true, autoSummary: true, api: {name:'摘要 API',mode:'main',url:'',key:'',model:'',headers:{},exclude:[],include:{},maxTokens:null,thinkLevel:'auto',timeout:90,temperature:0},
     summary: {keepRecent:3,autoHide:true,delayFloors:3,leafBatchThreshold:12,leafKeepRecent:3,resummaryThreshold:6,higherResummaryThreshold:3,retry:1},
     extraction: {items:true,scenes:true,characters:true,plans:true},
-    injection: {inventory:true,scenes:true,characters:true,plans:true,budget:4500},
+    injection: {inventory:true,scenes:true,characters:true,plans:true,budget:16000},
     retrieval: {enabled:true,maxHits:5,maxSources:3},
     prompts: {summary:'',summaryFull:'',chapter:'',resummary2:'',overview:''},
     vector: {enabled:false,url:'https://api.siliconflow.cn/v1',key:'',model:'BAAI/bge-m3',topK:5,threshold:0.35,rerankEnabled:false,rerankModel:'BAAI/bge-reranker-v2-m3',rerankCandidates:15}
@@ -706,7 +706,7 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
   if(settings.vector?.enabled)add('【相关旧记忆】',vectorHits.map(x=>note(x.text)));
   // This is a historical archive, not a turn in the live conversation.
   const archiveHeader='【历史剧情记忆｜非新发生的对话；若与后续实际剧情冲突，以较新的聊天记录为准】\n';
-  const budget=Math.max(400,Math.min(18000,Number(cfg.budget)||4500))*3;
+  const budget=Math.max(400,Math.min(18000,Number(cfg.budget)||16000))*3;
   const capacity=maxChars===null?budget:Math.max(0,Math.min(budget,Math.floor(maxChars)));
   let remaining=capacity-archiveHeader.length;
   const result=[],seen=new Set(),breakdown=[];
@@ -721,19 +721,27 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
   ]);
   for(const {title,entries} of sections.sort((a,b)=>(priority.get(a.title)??99)-(priority.get(b.title)??99))){
     const extra=(result.length?2:0)+title.length+1;
-    if(remaining<=extra){breakdown.push({title,selected:0,omitted:entries.length,chars:0});continue;}
+    if(remaining<=extra){
+      breakdown.push({title,selected:0,omitted:entries.length,
+        skippedBudget:entries.length,skippedDuplicate:0,skippedEmpty:0,chars:0});
+      continue;
+    }
     let available=remaining-extra;
-    const chosen=[];let omitted=0;
+    const chosen=[];let skippedBudget=0,skippedDuplicate=0,skippedEmpty=0;
     for(const item of entries.slice().reverse()){
       const text=item.text.trim(),identity=item.identity||text;
-      if(!text||seen.has(identity)||text.length+1>available){omitted++;continue;}
+      if(!text){skippedEmpty++;continue;}
+      if(seen.has(identity)){skippedDuplicate++;continue;}
+      if(text.length+1>available){skippedBudget++;continue;}
       chosen.push(text);seen.add(identity);available-=text.length+1;
     }
-    if(!chosen.length){breakdown.push({title,selected:0,omitted,chars:0});continue;}
+    const omitted=skippedBudget+skippedDuplicate+skippedEmpty;
+    const details={title,selected:chosen.length,omitted,skippedBudget,skippedDuplicate,skippedEmpty};
+    if(!chosen.length){breakdown.push({...details,chars:0});continue;}
     const section=title+'\n'+chosen.reverse().join('\n');
     result.push(section);
     remaining-=section.length+(result.length>1?2:0);
-    breakdown.push({title,selected:chosen.length,omitted,chars:Array.from(section).length});
+    breakdown.push({...details,chars:Array.from(section).length});
   }
   const content=result.join('\n\n');
   const text=content?archiveHeader+content:'';
@@ -751,21 +759,27 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
  * The synchronous selector remains as a fallback for hosts without a tokenizer.
  */
 export async function injectionTextWithinBudget(memory,chat,settings,vectorHits=[],historyHits=[],countTokens,diagnostics=null){
-  const budgetTokens=Math.max(400,Math.min(18000,Number(settings.injection?.budget)||4500));
+  const budgetTokens=Math.max(400,Math.min(18000,Number(settings.injection?.budget)||16000));
   let maxChars=budgetTokens*3;
   for(let attempt=0;attempt<8;attempt++){
     const usage={};
     const text=injectionText(memory,chat,settings,vectorHits,historyHits,usage,maxChars);
     const measured=text?await countTokens(text):{tokens:0,estimated:false};
     if(!text||measured.tokens<=budgetTokens){
-      if(diagnostics)Object.assign(diagnostics,usage,{usedTokens:measured.tokens,tokenEstimated:measured.estimated});
+      if(diagnostics)Object.assign(diagnostics,usage,{
+        usedTokens:measured.tokens,tokenEstimated:measured.estimated,
+        tokenChecks:attempt+1,tokenAdjusted:attempt>0
+      });
       return text;
     }
     const ratio=budgetTokens/Math.max(1,measured.tokens);
     maxChars=Math.floor(maxChars*Math.max(.2,Math.min(.8,ratio*.9)));
   }
   // Never inject a known over-budget prompt after repeated unsuccessful checks.
-  if(diagnostics)Object.assign(diagnostics,{budgetTokens,usedTokens:0,tokenEstimated:false,sections:[]});
+  if(diagnostics)Object.assign(diagnostics,{
+    budgetTokens,usedTokens:0,tokenEstimated:false,sections:[],
+    tokenChecks:8,tokenAdjusted:true,tokenLimitFailed:true
+  });
   return '';
 }
 

@@ -216,6 +216,8 @@
   color:var(--fg);box-shadow:0 18px 56px #0007;text-align:center;
   animation:sm-save-pop .2s cubic-bezier(.2,.8,.25,1) both}
 .sm-preview-counter{margin:8px 0 5px;color:var(--fg-weak);font-size:12px;font-variant-numeric:tabular-nums}
+.sm-preview-skipped{margin:1px 0 8px;color:var(--muted);font-size:11px;line-height:1.5}
+.sm-injection-breakdown-row span:last-child{overflow-wrap:anywhere}
 .sm-preview-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;
   background:var(--surface-alt);border:1px solid var(--edge);border-radius:10px;padding:12px 14px;margin:8px 0 12px}
 .sm-preview-stat{display:flex;flex-direction:column;gap:5px;min-width:0}
@@ -322,18 +324,11 @@
 .sm-level-bottom small{font-size:10px;color:var(--muted);line-height:1.35}
 .sm-level-input{height:30px;padding:2px 5px;border-radius:6px}
 .sm-level-input input{height:23px;width:25px}
-.sm-level-keep{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:13px;padding-top:11px;
-  border-top:1px solid var(--edge);font-size:11px;color:var(--fg-weak)}
-.sm-summary-advanced{border:1px solid var(--edge);border-radius:9px;overflow:hidden;background:var(--surface-alt)}
-.sm-summary-advanced-head{display:flex;justify-content:space-between;align-items:center;gap:10px;cursor:pointer;
-  list-style:none;padding:12px 14px}
-.sm-summary-advanced-head::-webkit-details-marker{display:none}
-.sm-summary-advanced-head svg{width:15px;color:var(--muted);transition:transform .18s}
-.sm-summary-advanced[open] .sm-summary-advanced-head svg{transform:rotate(180deg)}
-.sm-summary-advanced-copy{display:flex;flex-direction:column;gap:2px}
-.sm-summary-advanced-copy strong{font-size:12px;color:var(--fg);font-weight:650}
-.sm-summary-advanced-copy small{font-size:10px;color:var(--muted)}
-.sm-summary-advanced-body{border-top:1px solid var(--edge);padding:14px}
+.sm-level-keep,.sm-summary-retry{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  margin-top:13px;padding-top:11px;border-top:1px solid var(--edge);font-size:11px;color:var(--fg-weak)}
+.sm-level-keep-copy,.sm-summary-retry-copy{display:grid;gap:3px;min-width:0}
+.sm-level-keep-copy strong,.sm-summary-retry-copy strong{font-size:11px;font-weight:650;color:var(--fg)}
+.sm-level-keep-copy small,.sm-summary-retry-copy small{font-size:10px;line-height:1.4;color:var(--muted)}
 /* Keep dark palette legible even when the hosting SillyTavern theme declares button/input text. */
 .sm-dialog .sm-summary-panel button:not(.sm-btn-primary){color:var(--fg)}
 .sm-dialog .sm-summary-panel input{color:var(--fg)}

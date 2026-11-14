@@ -7,6 +7,7 @@ import {VectorIndexScheduler} from './vector-index-scheduler.js';
 import {selectHistory,historyEvidence,sourcePreview} from './retrieval-local.js';
 import {mountUI} from './ui.js';
 import {SummaryFailureNotifier,actionableSummaryFailures} from './notifications.js';
+import {refreshAfterInstallOrUpdate} from './lifecycle.js';
 import {ensureStoryMemoryEntry} from './toolbar.js';
 // Pure private ST extension. No external scripts, analytics or dependencies.
 let ui,queue,vectorIndexer,failureNotifier,lastChat='',settings;
@@ -208,6 +209,9 @@ async function generateInterceptor(_chat,_contextSize,_abort,type){
   }
   await injectForGeneration(cfg.retrieval?.enabled!==false?[]:vectors,history,activeMemory);
 }
+// Extension lifecycle hooks: installation/update finish before the page reload.
+export function storyMemoryOnInstall(){return refreshAfterInstallOrUpdate('安装');}
+export function storyMemoryOnUpdate(){return refreshAfterInstallOrUpdate('更新');}
 // SillyTavern calls this by manifest name during user generation.
 globalThis.storyMemoryGenerationInterceptor=generateInterceptor;
 function notifyFailures(){

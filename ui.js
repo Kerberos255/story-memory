@@ -829,7 +829,7 @@ export function mountUI(api){
     const leafBatch=levelSetting('L1','阶段总结','合并楼层摘要',cfg.summary.leafBatchThreshold??cfg.summary.chapterEvery??12);
     const second=levelSetting('L2','二次总结','融合多个阶段',cfg.summary.resummaryThreshold??6);
     const higher=levelSetting('L3+','高层总结','浓缩长期主线',cfg.summary.higherResummaryThreshold??3);
-    const leafKeep=field('最近 L0 摘要暂不合并',cfg.summary.leafKeepRecent??3,'number');
+    const leafKeep=field('保留最近 L0 摘要',cfg.summary.leafKeepRecent??3,'number');
     leafKeep.input.min='0';leafKeep.input.max='50';
     const compression=el('section','sm-summary-panel');
     const compHead=el('div','sm-summary-head');
@@ -841,23 +841,27 @@ export function mountUI(api){
     const levelStrip=el('div','sm-level-strip');
     levelStrip.append(leafBatch.panel,second.panel,higher.panel);
     const keepRow=el('div','sm-level-keep');
-    keepRow.append(el('span','','最近 L0 摘要暂不合并'));
+    const keepLabel=el('div','sm-level-keep-copy');
+    keepLabel.append(el('strong','','保留最近 L0 摘要'),
+      el('small','','已生成的最新 L0 摘要暂不合并到 L1；与延迟生成 L0 无关。'));
+    keepRow.append(keepLabel);
     const keepControl=el('label','sm-level-input');
-    keepControl.setAttribute('aria-label','最近 L0 摘要暂不合并');
+    keepControl.setAttribute('aria-label','保留最近 L0 摘要');
     keepControl.append(leafKeep.input,el('span','','条'));
     keepRow.append(keepControl);
     compression.append(compHead,pipeline,levelStrip,keepRow);
 
     const retries=field('网络失败重试次数',cfg.summary.retry,'number');
-    const advanced=el('details','sm-summary-advanced'),advancedHead=el('summary','sm-summary-advanced-head');
-    const advancedCopy=el('span','sm-summary-advanced-copy');
-    advancedCopy.append(el('strong','','高级选项'));
-    advancedHead.append(advancedCopy,svg('chevron'));
-    const advancedBody=el('div','sm-summary-advanced-body');
-    advancedBody.append(retries.wrapper);
-    advanced.append(advancedHead,advancedBody);
+    retries.input.min='0';retries.input.max='2';retries.input.step='1';
+    const retryRow=el('div','sm-summary-retry'),retryCopy=el('div','sm-summary-retry-copy');
+    retryCopy.append(el('strong','','网络失败重试次数'),
+      el('small','','单次任务额外重试 0–2 次；临时故障还有有限自动恢复。'));
+    const retryControl=el('label','sm-level-input');
+    retryControl.setAttribute('aria-label','网络失败重试次数');
+    retryControl.append(retries.input,el('span','','次'));
+    retryRow.append(retryCopy,retryControl);
     box.append(accordion('summary','摘要设置','自动摘要、楼层隐藏与分层压缩',[
-      autoPanel,compression,advanced
+      autoPanel,compression,retryRow
     ]));
 
     const flags=[['inventory','物品状态'],['scenes','场景地点'],
@@ -866,11 +870,12 @@ export function mountUI(api){
     const flagGroup=el('div','sm-switch-grid');
     flagGroup.append(...flags.map(([,x])=>x.wrapper));
     const budget=field('记忆长度上限（约 Tokens）',cfg.injection.budget,'number',
-      '控制每轮交给主模型的记忆长度，和摘要 API 输出无关。');
+      '默认 16,000；只限制每轮注入的剧情记忆，不包含聊天、预设和世界书。小上下文模型建议适当调低。');
+    budget.input.min='400';budget.input.max='18000';budget.input.step='100';
     const previewButton=button('预览发送内容',()=>{
       const previewCfg=structuredClone(cfg);
       for(const [key,value] of flags)previewCfg.injection[key]=value.input.checked;
-      previewCfg.injection.budget=Number(budget.input.value)||4500;
+      previewCfg.injection.budget=Number(budget.input.value)||16000;
       previewCfg.retrieval={...previewCfg.retrieval,enabled:retrievalEnabled.input.checked,
         maxHits:Math.max(1,Math.min(10,Number(recallCount.input.value)||5)),
         maxSources:Math.max(0,Math.min(5,Number(sourceCount.input.value)||0))};
@@ -1016,7 +1021,7 @@ export function mountUI(api){
         next.summary.retry=Math.max(0,Math.min(2,Number(retries.input.value)||0));
         next.extraction={...next.extraction};
         for(const [key,row] of extractionSwitches)next.extraction[key]=row.input.checked;
-        next.injection.budget=Number(budget.input.value)||4500;
+        next.injection.budget=Number(budget.input.value)||16000;
         for(const [key,value] of flags)next.injection[key]=value.input.checked;
         delete next.injection.summary;
         delete next.injection.retrieval;
@@ -1130,12 +1135,13 @@ export function mountUI(api){
     close.append(svg('x'));close.setAttribute('aria-label','关闭弹窗');
     header.append(heading,close);
     const content=el('div','sm-record-modal-body');
-    const explanation=el('p','sm-help','模拟预览使用当前设置草稿与本地历史检索；不发送向量请求。Token 按酒馆当前主模型分词器统计，具体模型可能仍有偏差。');
+    const explanation=el('p','sm-help','当前草稿模拟使用本地历史检索，不发送向量请求。Token 按酒馆当前分词器统计；跳过统计只涵盖参与本轮筛选的候选记忆，不包含已关闭类别或来源数量上限之外的记录。');
     const stats=textStats();
     const textarea=textArea(result||'当前没有需要发送的记忆。',15);
     textarea.readOnly=true;textarea.setAttribute('aria-label','发送预览内容');
     let showSnapshot=false,simulated=result,previewEpoch=0,previewReady=false;
     const budgetLabel=el('p','sm-preview-counter','记忆用量 · 统计中…');
+    const skippedLabel=el('p','sm-preview-skipped','跳过记录 · 统计中…');
     const update=()=>{
       const epoch=++previewEpoch;
       const value=String(showSnapshot?(snapshot?.text||''):simulated||'');
@@ -1143,10 +1149,14 @@ export function mountUI(api){
       stats.chars.textContent=characterCount(value).toLocaleString();
       stats.token.textContent='计算中…';
       budgetLabel.textContent=(showSnapshot?'上轮生成时提交':'当前草稿模拟')+' · Token 统计中…';
+      breakdown.hidden=showSnapshot;
+      skippedLabel.hidden=showSnapshot;
       if(!showSnapshot){
         if(previewReady){
           stats.token.textContent=usage.usedTokens.toLocaleString()+(usage.tokenEstimated?'（回退估算）':'');
-          budgetLabel.textContent='当前草稿模拟 · 约 '+usage.usedTokens.toLocaleString()+' / '+usage.budgetTokens.toLocaleString()+' Tokens';
+          budgetLabel.textContent='当前草稿模拟 · '+(usage.tokenEstimated?'约 ':'')+
+            usage.usedTokens.toLocaleString()+' / '+usage.budgetTokens.toLocaleString()+' Tokens'+
+            (usage.tokenAdjusted?' · 已按 Token 上限重新筛选':'');
         }
         return;
       }
@@ -1157,25 +1167,42 @@ export function mountUI(api){
           ' · 约 '+measured.tokens.toLocaleString()+' / '+usage.budgetTokens.toLocaleString()+' Tokens';
       });
     };
-    update();
-    content.append(explanation,stats.wrap,textarea,budgetLabel);
+    content.append(explanation,stats.wrap,budgetLabel,skippedLabel);
     const breakdown=el('details','sm-injection-breakdown');
     const breakdownTitle=el('summary','sm-entity-history-heading','记忆组成 · 统计中…');
     breakdown.append(breakdownTitle);
     const breakdownList=el('div','sm-injection-breakdown-list');
     const refreshBreakdown=()=>{
       breakdownList.replaceChildren();
-      for(const section of usage.sections||[]){
+      const sections=usage.sections||[];
+      let selected=0,skippedBudget=0,skippedDuplicate=0,skippedEmpty=0;
+      for(const section of sections){
+        selected+=section.selected;
+        skippedBudget+=section.skippedBudget||0;
+        skippedDuplicate+=section.skippedDuplicate||0;
+        skippedEmpty+=section.skippedEmpty||0;
         const row=el('div','sm-injection-breakdown-row');
+        const details=[
+          section.selected+' 条已选',
+          section.chars.toLocaleString()+' 字符',
+          ...(section.skippedBudget?['容量不足 '+section.skippedBudget+' 条']:[]),
+          ...(section.skippedDuplicate?['重复 '+section.skippedDuplicate+' 条']:[]),
+          ...(section.skippedEmpty?['空记录 '+section.skippedEmpty+' 条']:[])
+        ];
         row.append(el('span','',section.title.replace(/[【】]/g,'')),
-          el('span','',section.chars.toLocaleString()+' 字符 · '+section.selected+' 条'+
-            (section.omitted?' · 跳过 '+section.omitted+' 条':'')));
+          el('span','',details.join(' · ')));
         breakdownList.append(row);
       }
-      breakdownTitle.textContent='记忆组成 · '+(usage.sections||[]).length+' 类';
+      const skipped=skippedBudget+skippedDuplicate+skippedEmpty;
+      skippedLabel.textContent=usage.tokenLimitFailed
+        ?'本次记忆未发送：反复校验后仍无法满足 Token 限制。'
+        :'本轮候选 '+(selected+skipped)+' 条 · 已选 '+selected+' 条 · 跳过 '+skipped+
+          ' 条（容量不足 '+skippedBudget+'、重复 '+skippedDuplicate+'、空记录 '+skippedEmpty+'）';
+      breakdownTitle.textContent='按类别查看选中与跳过 · '+sections.length+' 类';
     };
     breakdown.append(breakdownList);
-    content.append(breakdown);
+    content.append(breakdown,textarea);
+    update();
     const footer=el('div','sm-record-modal-footer');
     if(hasSnapshot){
       const toggle=button('查看上轮扩展发送',()=>{
@@ -1201,7 +1228,13 @@ export function mountUI(api){
       value=>countTokens(ctx,value),usage).then(value=>{
       if(recordOverlay!==overlay||typeof document==='undefined')return;
       simulated=value;previewReady=true;refreshBreakdown();update();
-    }).catch(()=>{if(recordOverlay===overlay&&typeof document!=='undefined'){previewReady=true;refreshBreakdown();update();}});
+    }).catch(()=>{
+      if(recordOverlay!==overlay||typeof document==='undefined')return;
+      previewReady=false;
+      stats.token.textContent='统计失败';
+      budgetLabel.textContent='当前分词器统计失败；未能确认实际发送 Token。';
+      skippedLabel.textContent='本轮预算筛选未能完成，请检查酒馆分词器。';
+    });
     close.focus?.();
   }
   function render(){
