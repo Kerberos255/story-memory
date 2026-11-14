@@ -92,6 +92,31 @@ function pullText(data) {
   if(Array.isArray(value))return value.map(x=>typeof x?.text==='string'?x.text:'').join('');
   return '';
 }
+/** Prefer structured upstream errors; do not guess from an arbitrary story-like message. */
+export function mainApiError(error){
+  if(error instanceof ApiFault)return error;
+  const nested=[error,error?.error,error?.cause,error?.response,
+    error?.cause?.response,error?.error?.response].filter(Boolean);
+  const status=nested.map(item=>[item?.status,item?.statusCode,item?.response?.status])
+    .flat().find(value=>Number.isInteger(Number(value))&&Number(value)>=400&&Number(value)<600);
+  const message=String(error?.message||'');
+  const identified=Number(status||Number(message.match(/(?:^|\\b)(?:HTTP|status|statusCode)\\s*[:=]?\\s*([45]\\d{2})\\b/i)?.[1]));
+  if(Number.isInteger(identified)&&identified>=400&&identified<600){
+    const temporary=[429,500,502,503,504].includes(identified);
+    return new ApiFault(temporary?'主 API 暂时不可用':'主 API 请求失败（HTTP '+identified+'）',
+      identified,'upstream_http_'+identified);
+  }
+  const code=String(error?.code||error?.error?.code||error?.cause?.code||'').toUpperCase();
+  if(['RATE_LIMIT_EXCEEDED','TOO_MANY_REQUESTS'].includes(code))
+    return new ApiFault('主 API 请求频率受限',429,'upstream_http_429');
+  if(code==='SERVICE_UNAVAILABLE')return new ApiFault('主 API 暂时不可用',503,'upstream_http_503');
+  const name=String(error?.name||'');
+  if(['ETIMEDOUT','ESOCKETTIMEDOUT'].includes(code)||['TimeoutError','AbortError'].includes(name))
+    return new ApiFault('主 API 请求超时',504,'timeout');
+  if(['ECONNRESET','ECONNREFUSED','EHOSTUNREACH','ENETUNREACH','EAI_AGAIN','ENOTFOUND','ERR_NETWORK'].includes(code))
+    return new ApiFault('主 API 网络连接失败',502,'network_error');
+  return new ApiFault('主 API 生成失败，请检查当前连接和提示词',422,'main_api_error');
+}
 export async function requestChat(channel,messages,ctx,externalSignal) {
   if(channel?.mode==='main'){
     if(externalSignal?.aborted)throw new ApiFault('请求已取消',0,'cancelled');
@@ -109,7 +134,7 @@ export async function requestChat(channel,messages,ctx,externalSignal) {
       return text.trim();
     }catch(err){
       if(err instanceof ApiFault)throw err;
-      throw new ApiFault('主 API 生成失败，请检查当前连接和提示词',422,'main_api_error');
+      throw mainApiError(err);
     }
   }
   const body=makeBody(channel,messages);

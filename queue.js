@@ -85,12 +85,14 @@ export class SummaryQueue{
     },Math.min(2147483647,Math.max(50,due-Date.now())));
     this.retryTimer.unref?.(); // Do not keep Node test runners alive.
   }
-  async restoreStale(key=this.currentKey()){
+  async restoreStale(key=this.currentKey(),restoreAll=false){
     if(this.restoring)return this.restoring;
     const task=async()=>{
       const ctx=this.getContext();
       if(!ctx||key!==this.currentKey()||typeof ctx.saveChat!=='function')return 0;
-      const indices=staleHiddenIndices(peekMemory(ctx),ctx.chat||[]);
+      const indices=restoreAll?(ctx.chat||[]).flatMap((msg,i)=>
+        msg?.is_system&&msg.extra?.story_memory_hidden?[i]:[]):
+        staleHiddenIndices(peekMemory(ctx),ctx.chat||[]);
       if(!indices.length)return 0;
       const changed=[];
       try{
@@ -124,6 +126,14 @@ export class SummaryQueue{
     };
     this.restoring=task();
     try{return await this.restoring;}finally{this.restoring=null;}
+  }
+  /** Explicitly restore all previously hidden messages; summaries remain intact. */
+  async restoreAllHidden(){
+    if(this.getSettings().summary?.autoHide)
+      throw Error('请先在设置中关闭「摘要完成后自动隐藏」');
+    if(this.restoring)await this.restoring;
+    if(this.hiding)await this.hiding;
+    return this.restoreStale(this.currentKey(),true);
   }
   async hideCompleted(key=this.currentKey()){
     if(this.hiding)return this.hiding;
@@ -203,11 +213,25 @@ export class SummaryQueue{
     for(let attempt=0;attempt<=maxRetries;attempt++){
       if(key!==this.currentKey()||controller.signal.aborted)return;
       memory=readMemory(this.getContext());
+      const savedPart=taskForFloor(memory,ctx.chat,index)?.checkpoint;
       memory.tasks[index]={status:'running',attempts:attempts+attempt+1,
-        autoRetries,updatedAt:Date.now(),fingerprint,userFingerprint:userFp};
+        autoRetries,updatedAt:Date.now(),fingerprint,userFingerprint:userFp,
+        ...(savedPart?{checkpoint:savedPart}:{})};
       writeMemory(this.getContext(),memory);this.onChange?.();
       try{
-        const parsed=await summarizeFloor(index,ctx,memory,settings,controller.signal);
+        const parsed=await summarizeFloor(index,ctx,memory,settings,controller.signal,{
+          resume:savedPart,
+          onCheckpoint:async checkpoint=>{
+            if(controller.signal.aborted||key!==this.currentKey())return;
+            const liveCtx=this.getContext();
+            if(messageFingerprint(liveCtx?.chat?.[index])!==fingerprint||
+              userFingerprint(liveCtx.chat,index)!==userFp)return;
+            const fresh=readMemory(liveCtx),task=taskForFloor(fresh,liveCtx.chat,index);
+            if(task?.status!=='running')return;
+            fresh.tasks[index]={...task,checkpoint};
+            writeMemory(liveCtx,fresh);
+          }
+        });
         if(key!==this.currentKey()||controller.signal.aborted)return;
         ctx=this.getContext();
         if(messageFingerprint(ctx?.chat?.[index])!==fingerprint||userFingerprint(ctx.chat,index)!==userFp)return;
@@ -227,10 +251,24 @@ export class SummaryQueue{
           httpStatus:err instanceof ApiFault?err.status||null:null,
           attempts:attempts+attempt+1,autoRetries:canRecover?autoRetries+1:autoRetries,
           updatedAt:Date.now(),fingerprint,userFingerprint:userFp,
-          nextRetryAt:canRecover?Date.now()+BACKOFF_MS[autoRetries]:null};
+          nextRetryAt:canRecover?Date.now()+BACKOFF_MS[autoRetries]:null,
+          ...(taskForFloor(memory,ctx.chat,index)?.checkpoint
+            ?{checkpoint:taskForFloor(memory,ctx.chat,index).checkpoint}:{})};
         writeMemory(this.getContext(),memory);this.onChange?.();return;
       }
     }
+  }
+  async retryChapters(){
+    if(this.busy)throw Error('正在整理楼层，请稍后重试分层压缩');
+    const key=this.currentKey(),ctx=this.getContext();
+    if(!ctx||!key)throw Error('请先打开聊天');
+    const memory=readMemory(ctx);
+    memory.chapterPauseUntil=0;
+    delete memory.chapterError;
+    writeMemory(ctx,memory);this.onChange?.();
+    await this.maybeChapter(key);
+    const current=this.getContext();
+    return this.currentKey()===key&&Boolean(current)&&!peekMemory(current).chapterError;
   }
   async maybeChapter(key){
     const ctx=this.getContext(),cfg=this.getSettings();
@@ -249,12 +287,18 @@ export class SummaryQueue{
         if(key!==this.currentKey()||controller.signal.aborted)return;
         const latest=this.getContext();
         memory=commitCompression(peekMemory(latest),latest.chat,plan,content);
+        memory.chapterPauseUntil=0;delete memory.chapterError;
         writeMemory(latest,memory);this.onChange?.();
-      }catch{
+      }catch(error){
         if(key!==this.currentKey()||controller.signal.aborted)return;
         const latest=this.getContext(),snapshot=readMemory(latest);
         snapshot.chapterPauseUntil=Date.now()+10*60*1000;
-        writeMemory(latest,snapshot);
+        snapshot.chapterError={
+          code:error instanceof ApiFault?error.code:'chapter_error',
+          message:error instanceof ApiFault?error.message:'分层压缩未完成，请检查摘要模型及输出设置',
+          updatedAt:Date.now()
+        };
+        writeMemory(latest,snapshot);this.onChange?.();
         return;
       }
     }

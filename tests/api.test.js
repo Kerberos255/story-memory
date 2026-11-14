@@ -201,3 +201,20 @@ test('Think effort follows SillyTavern main settings and explicit dropdown wins 
   assert.equal(JSON.parse(body.custom_include_body).reasoning_effort,'high');
   assert.equal(custom.include.reasoning_effort,'low','advanced settings stay unchanged until saved');
 });
+
+test('main API recognizes structured transient faults without retrying permanent failures',async()=>{
+  const {requestChat}=await import('../api.js');
+  const channel={...defaultSettings().api,mode:'main'};
+  const requests=[{error:Object.assign(Error('capacity'),{status:429}),code:'upstream_http_429',status:429},
+    {error:Object.assign(Error('server'),{response:{status:503}}),code:'upstream_http_503',status:503},
+    {error:{error:{code:'rate_limit_exceeded'}},code:'upstream_http_429',status:429},
+    {error:Object.assign(Error('HTTP 500'),{status:'500'}),code:'upstream_http_500',status:500},
+    {error:Object.assign(Error('timed out'),{code:'ETIMEDOUT'}),code:'timeout',status:504},
+    {error:Object.assign(Error('offline'),{code:'ECONNRESET'}),code:'network_error',status:502},
+    {error:Object.assign(Error('access denied'),{status:403}),code:'upstream_http_403',status:403},
+    {error:Error('invalid prompt'),code:'main_api_error',status:422}];
+  for(const {error,code,status} of requests){
+    await assert.rejects(()=>requestChat(channel,[{role:'user',content:'test'}],
+      {generateRaw:async()=>{throw error;}}),e=>e instanceof ApiFault&&e.code===code&&e.status===status);
+  }
+});

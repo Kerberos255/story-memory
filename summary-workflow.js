@@ -1,7 +1,7 @@
 // Request-sized chunks are internal safeguards, not model limits or user settings.
 import {ApiFault,requestChat,buildSummaryMessages,buildChapterMessages,
   parseL0Response,repairL0Messages} from './api.js';
-import {floorUserMessages,normalizeDelta} from './core.js';
+import {floorUserMessages,normalizeDelta,hashText} from './core.js';
 
 const SOURCE_CHUNK=14000,MERGE_INPUT=13000,MAX_PARTS=64;
 
@@ -91,10 +91,35 @@ async function combineNarratives(sections,settings,ctx,signal){
 }
 
 /** A floor is committed only after every piece and its merge have succeeded. */
-export async function summarizeFloor(index,ctx,memory,settings,signal){
-  const source=floorSource(ctx.chat,index),chunks=splitSource(source);
-  const results=[];
-  for(let i=0;i<chunks.length;i++){
+export async function summarizeFloor(index,ctx,memory,settings,signal,options={}){
+  const source=floorSource(ctx.chat,index);
+  // The checkpoint contains only completed normalized parts and source offsets.
+  // Both source and prompt/config changes invalidate it; partial data is never a leaf.
+  const signature=hashText(source)+':'+source.length+':'+hashText(JSON.stringify({
+    api:settings.api,prompts:settings.prompts,extraction:settings.extraction,
+    revision:memory.revision
+  }));
+  let chunks=splitSource(source),results=[];
+  const saved=options.resume;
+  if(saved?.version===1&&saved.signature===signature&&Array.isArray(saved.lengths)&&
+    saved.lengths.length>1&&saved.lengths.length<=MAX_PARTS&&
+    saved.lengths.every(n=>Number.isInteger(n)&&n>0)&&
+    saved.lengths.reduce((n,x)=>n+x,0)===source.length&&
+    Array.isArray(saved.results)&&saved.results.length<=saved.lengths.length&&
+    saved.results.every(x=>x&&typeof x.summary==='string'&&x.delta&&
+      ['items','scenes','characters','plans'].every(k=>Array.isArray(x.delta[k])))){
+    let offset=0;
+    chunks=saved.lengths.map(len=>{const part=source.slice(offset,offset+len);offset+=len;return part;});
+    results=structuredClone(saved.results);
+  }
+  const checkpoint=async()=>{
+    if(typeof options.onCheckpoint!=='function'||chunks.length<2||chunks.length>16)return;
+    const value={version:1,signature,lengths:chunks.map(x=>x.length),
+      results:structuredClone(results),updatedAt:Date.now()};
+    // Bound chat metadata growth; oversized tasks still work without checkpoints.
+    if(JSON.stringify(value).length<=120000)await options.onCheckpoint(value);
+  };
+  for(let i=results.length;i<chunks.length;i++){
     if(signal?.aborted)throw new ApiFault('请求已取消',0,'cancelled');
     const bridge=i?'【上一段末尾（仅供衔接，不要重复提取）】\n'+chunks[i-1].slice(-180)+'\n':'';
     const previous=results.length?'【已提取前段摘要（仅供衔接）】\n'+results.at(-1).summary.slice(-900)+'\n':'';
@@ -115,6 +140,7 @@ export async function summarizeFloor(index,ctx,memory,settings,signal){
         parsed=parseL0Response(repaired,settings);
       }
       results.push(normalizeDelta(parsed,source,settings.extraction));
+      await checkpoint();
     }catch(err){
       // Only retry when the upstream clearly reports a context/payload-length issue.
       const sizeError=err instanceof ApiFault&&['request_too_large','context_length_exceeded'].includes(err.code);
@@ -144,7 +170,15 @@ export async function summarizeChapter(rows,settings,kind,ctx,signal){
   for(let depth=0;depth<8;depth++){
     if(signal?.aborted)throw new ApiFault('请求已取消',0,'cancelled');
     const total=stage.reduce((n,r)=>n+String(r.summary||'').length+60,0);
-    if(total<=20000)return requestChat(settings.api,buildChapterMessages(stage,settings,kind),ctx,signal);
+    if(total<=20000){
+      const answer=String(await requestChat(settings.api,buildChapterMessages(stage,settings,kind),ctx,signal)).trim();
+      if(answer.length<=12000)return answer;
+      // A large model response is another source to compress, never a value to truncate.
+      if(depth>0&&stage.length===1&&answer.length>=String(stage[0].summary||'').length)
+        throw new ApiFault('分层总结没有缩短内容，请调整模型输出',422,'chapter_no_progress');
+      stage=[{summary:answer}];
+      continue;
+    }
     const groups=packSections(stage.map(row=>(row.time?'('+row.time+') ':'')+String(row.summary||'')),12000),next=[];
     for(const entries of groups){
       // Oversized individual old summaries can be split without discarding characters.

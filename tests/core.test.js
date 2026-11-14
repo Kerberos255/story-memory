@@ -915,10 +915,11 @@ test('host tokenizer failure falls back to bounded estimate without rejecting ge
   assert.deepEqual(await countTokens({getTokenCountAsync:async()=>{throw Error('offline');}},'123456'),{tokens:2,estimated:true});
   assert.deepEqual(await countTokens({getTokenCountAsync:async()=>0},'123456'),{tokens:2,estimated:true});
   const cfg=defaultSettings();cfg.injection.budget=400;
-  const memory=addManual(freshMemory(),'summaries','往事'.repeat(120));
+  const memory=addManual(freshMemory(),'summaries','往事'.repeat(55));
   const usage={};
   const text=await injectionTextWithinBudget(memory,[],cfg,[],[],value=>countTokens(null,value),usage);
-  assert.ok(text.length<=1200);
+  assert.ok(text.includes('往事'),'a small complete memory survives tokenizer fallback');
+  assert.ok(text.length*2<=400,'fallback applies a conservative bound');
   assert.equal(usage.tokenEstimated,true);
 });
 
@@ -960,4 +961,29 @@ test('tokenizer shrink preserves final report and does not silently exceed the t
   assert.ok(report.tokenChecks>=2);
   assert.ok(report.sections.every(s=>s.omitted===
     (s.skippedBudget||0)+(s.skippedDuplicate||0)+(s.skippedEmpty||0)));
+});
+
+test('compression rejects oversized output instead of clipping the final plot',async()=>{
+  const {nextCompression,commitCompression}=await import('../core.js');
+  const cfg=defaultSettings();cfg.summary.leafKeepRecent=0;
+  const chat=[],memory=freshMemory();
+  for(let i=0;i<12;i++){
+    const msg={is_user:false,is_system:false,mes:'剧情 '+i,swipe_id:0};chat.push(msg);
+    memory.leaves[i]={id:'floor:'+i,sourceIndex:i,summary:'摘要 '+i,
+      fingerprint:messageFingerprint(msg),delta:{items:[],scenes:[],characters:[],plans:[]}};
+  }
+  const plan=nextCompression(memory,chat,cfg);
+  assert.ok(plan);
+  const original='完整的历史叙事。'.repeat(1800)+'结局。';
+  assert.throws(()=>commitCompression(memory,chat,plan,original),/超过 12000 字符/);
+  assert.equal(memory.chapters.length,0);
+});
+test('tokenizer estimates do not allow a large complete memory past the cap',async()=>{
+  const {injectionTextWithinBudget}=await import('../core.js');
+  const cfg=defaultSettings();cfg.injection.budget=400;
+  const mem=addManual(freshMemory(),'summaries','完整笔记。'.repeat(250));
+  let calls=0,usage={};
+  const text=await injectionTextWithinBudget(mem,[],cfg,[],[],async()=>{calls++;return {tokens:20,estimated:true};},usage);
+  assert.equal(text,'','large full entries must be omitted under conservative fallback');
+  assert.ok(calls<=1,'failed tokenizer is not repeatedly queried');
 });

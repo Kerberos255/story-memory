@@ -1576,3 +1576,48 @@ test('injection preview validates the same token budget limit as saving',()=>wit
   assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
   assert.match(find(dialog,x=>x.className==='sm-notice')?.textContent||'',/记忆长度上限/);
 }));
+
+test('summary page offers explicit restoration of hidden text only after auto-hide is disabled',()=>withUI(async body=>{
+  const oldWindow=globalThis.window;
+  let confirmResult=false,restored=0;
+  globalThis.window={confirm:()=>confirmResult};
+  try{
+    const chat=[{is_user:true,is_system:true,extra:{story_memory_hidden:true},mes:'我决定出发。'},
+      {is_user:false,is_system:true,extra:{story_memory_hidden:true},mes:'出发经过森林。'}];
+    const cfg=defaultSettings();cfg.summary.autoHide=false;
+    const ctx={chat,chatMetadata:{},getCurrentChatId:()=> 'hidden-restore-demo'};
+    const queue={busy:false,enqueueMissing(){},restoreAllHidden:async()=>{
+      restored++;for(const m of chat){m.is_system=false;delete m.extra.story_memory_hidden;}return 2;
+    }};
+    const ui=mountUI({context:()=>ctx,memory:freshMemory,settings:()=>cfg,queue});
+    ui.open();const dialog=body.children[0].shadow.children[1];
+    let restore=find(dialog,x=>x.tag==='button'&&x.textContent==='恢复已隐藏正文');
+    assert.ok(restore,'explicit restoration is accessible on the summary page');
+    assert.ok(walk(dialog).some(x=>String(x.textContent||'').includes('不删除摘要')));
+    restore.fire('click');
+    assert.equal(restored,0,'cancel confirmation changes nothing');
+    confirmResult=true;restore.fire('click');
+    await new Promise(resolve=>setTimeout(resolve,5));
+    assert.equal(restored,1);
+    assert.ok(chat.every(x=>!x.is_system));
+    assert.equal(find(dialog,x=>x.tag==='button'&&x.textContent==='恢复已隐藏正文'),undefined);
+  }finally{globalThis.window=oldWindow;}
+}));
+
+test('chapter compression failure is visible in summary and can be retried without clearing leaves',()=>withUI(async body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=> 'chapter-failure'};
+  const cfg=defaultSettings(),mem=freshMemory();
+  mem.chapterError={code:'chapter_no_progress',message:'分层总结没有缩短内容',updatedAt:Date.now()};
+  let calls=0;
+  const queue={busy:false,enqueueMissing(){},retryChapters:async()=>{calls++;delete mem.chapterError;return true;}};
+  const view=mountUI({context:()=>ctx,memory:()=>mem,settings:()=>cfg,queue});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  const alert=find(dialog,x=>x.className==='sm-chapter-warning');
+  assert.ok(alert);
+  assert.ok(walk(alert).some(x=>String(x.textContent||'').includes('分层总结没有缩短内容')));
+  const retry=find(alert,x=>x.tag==='button'&&x.textContent==='重试分层压缩');
+  assert.ok(retry);retry.fire('click');
+  await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal(calls,1);
+  assert.equal(find(dialog,x=>x.className==='sm-chapter-warning'),undefined);
+}));

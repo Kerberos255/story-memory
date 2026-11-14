@@ -1,4 +1,4 @@
-import {defaultSettings,SETTINGS_KEY,META_KEY,peekMemory,writeMemory,addManual,editManual,removeManual,editGeneratedLeaf,deleteGeneratedLeaf,resumeGeneratedFloor,editGeneratedChapter,deleteGeneratedChapter,mergeEntities,unmergeEntity,injectionText,rebaseDeletedMessages,correctEntity,clearEntityCorrection,injectionTextWithinBudget} from './core.js';
+import {defaultSettings,SETTINGS_KEY,META_KEY,peekMemory,writeMemory,addManual,editManual,removeManual,editGeneratedLeaf,deleteGeneratedLeaf,resumeGeneratedFloor,editGeneratedChapter,deleteGeneratedChapter,mergeEntities,unmergeEntity,rebaseDeletedMessages,correctEntity,clearEntityCorrection,injectionTextWithinBudget} from './core.js';
 import {countTokens} from './text-stats.js';
 import {SummaryQueue} from './queue.js';
 import {listSummaryModels} from './api.js';
@@ -50,15 +50,20 @@ function saveSettings(next){
   queue?.resume();
 }
 function inject(hits=[],historyHits=[],memory=null){
-  ++injectionRevision;
-  const ctx=getContext();if(!ctx?.setExtensionPrompt)return;
-  const cfg=getSettings();
-  const text=cfg.enabled?injectionText(memory||peekMemory(ctx),ctx.chat,cfg,hits,historyHits):'';
-  // IN_CHAT = 1, MAX_INJECTION_DEPTH = 10000 in SillyTavern.
-  // Depth is counted from the newest turn, so the maximum inserts at the
-  // beginning of Chat History (after the preset prompts) even after trimming.
-  ctx.setExtensionPrompt('story_memory_injection_v1',text,1,10000,false,0,null);
-  lastInjection={chatId:ctx.getCurrentChatId?.()||'',text,at:Date.now()};
+  const revision=++injectionRevision,ctx=getContext();
+  if(!ctx?.setExtensionPrompt)return;
+  const chatId=ctx.getCurrentChatId?.()||'',cfg=getSettings();
+  // Never expose a previous chat's memory while an asynchronous token count runs.
+  // IN_CHAT=1, depth=10000 inserts at the start of trimmed chat history.
+  ctx.setExtensionPrompt('story_memory_injection_v1','',1,10000,false,0,null);
+  lastInjection={chatId,text:'',at:Date.now()};
+  if(!cfg.enabled)return;
+  void injectionTextWithinBudget(memory||peekMemory(ctx),ctx.chat,cfg,hits,historyHits,
+    text=>countTokens(ctx,text)).then(text=>{
+    if(revision!==injectionRevision||chatId!==(getContext()?.getCurrentChatId?.()||''))return;
+    ctx.setExtensionPrompt('story_memory_injection_v1',text,1,10000,false,0,null);
+    lastInjection={chatId,text,at:Date.now()};
+  }).catch(()=>{/* A tokenizer failure must never inject an unchecked archive. */});
 }
 async function injectForGeneration(hits=[],historyHits=[],memory=null){
   const ctx=getContext();if(!ctx?.setExtensionPrompt)return;
@@ -288,7 +293,11 @@ function init(){
     if(!observer)attach();
     if(++tries>60)clearInterval(timer);
   },1000);
-  window.addEventListener('pagehide',()=>{queue.cancel();vectorIndexer.cancel();observer?.disconnect();clearInterval(timer);inject([]);});
+  window.addEventListener('pagehide',()=>{
+    queue.cancel();vectorIndexer.cancel();observer?.disconnect();clearInterval(timer);
+    ++injectionRevision;
+    getContext()?.setExtensionPrompt?.('story_memory_injection_v1','',1,10000,false,0,null);
+  });
   return true;
 }
 function boot(){

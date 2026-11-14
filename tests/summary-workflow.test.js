@@ -137,3 +137,48 @@ test('verified context-length rejection automatically splits the affected part a
     assert.equal(result.delta.items.length,result.sourceParts.length);
   }finally{globalThis.fetch=oldFetch;}
 });
+
+test('oversized chapter output is compressed again instead of silently losing its tail',async()=>{
+  let calls=0;
+  const ctx={generateRaw:async()=>{calls++;return calls===1
+    ?'历史剧情：'+('重大线索与约定。'.repeat(2400))+'最终兑现。'
+    :'历史剧情从起因到兑现均已核对。';}};
+  const output=await summarizeChapter([{summary:'起因与过程'}],defaultSettings(),'chapter',ctx);
+  assert.equal(output,'历史剧情从起因到兑现均已核对。');
+  assert.equal(calls,2,'an oversized model result needs a second compression');
+});
+test('uncompressible oversized chapter output is rejected rather than truncated',async()=>{
+  const ctx={generateRaw:async()=>('冗长重复。'.repeat(2800))};
+  await assert.rejects(()=>summarizeChapter([{summary:'短源'}],defaultSettings(),'chapter',ctx),e=>
+    e instanceof ApiFault&&e.code==='chapter_no_progress');
+});
+test('completed source chunks can resume safely without persisting partial leaf state',async()=>{
+  const chat=[{is_user:true,mes:'开始调查'},{is_user:false,mes:'开场。'+('长篇剧情。'.repeat(4600))+'完整收束。'}];
+  const ctx={chat,getCurrentChatId:()=> 'checkpoint-fixture'},settings=defaultSettings();
+  let calls=0,failed=false,checkpoint;
+  ctx.generateRaw=async({prompt})=>{
+    if(prompt[0].content.includes('同一楼层按时间顺序提取'))
+      return JSON.stringify({summary:'所有片段均按序归纳。'});
+    calls++;
+    if(calls===2&&!failed){failed=true;throw Object.assign(Error('503'),{status:503});}
+    return JSON.stringify({summary:'局部关键事件 '+calls});
+  };
+  const memory=freshMemory();
+  await assert.rejects(()=>summarizeFloor(1,ctx,memory,settings,null,{
+    onCheckpoint:async progress=>{checkpoint=progress;}
+  }),e=>e instanceof ApiFault&&e.status===503);
+  assert.ok(checkpoint);
+  assert.equal(checkpoint.results.length,1);
+  assert.deepEqual(memory.leaves,{},'checkpoint is not an accepted L0 leaf');
+  const before=calls;
+  const full=await summarizeFloor(1,ctx,memory,settings,null,{
+    resume:checkpoint,onCheckpoint:async progress=>{checkpoint=progress;}
+  });
+  assert.ok(full.summary);
+  assert.ok(calls>=before+1);
+  assert.ok(checkpoint.results.length>=2);
+  const oldCount=calls;
+  await summarizeFloor(1,ctx,memory,{...settings,api:{...settings.api,model:'changed-model'}},
+    null,{resume:checkpoint});
+  assert.ok(calls>oldCount,'changing model invalidates the checkpoint');
+});

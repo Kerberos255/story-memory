@@ -419,6 +419,35 @@ export function mountUI(api){
       const item=el('div','sm-metric');item.append(el('span','sm-metric-number',count),el('span','sm-metric-label',label));metrics.append(item);
     }
     body.append(metrics);
+    if(mem.chapterError){
+      const alert=el('div','sm-chapter-warning');
+      alert.setAttribute('role','alert');
+      const reason=el('p','sm-help','分层压缩暂停：'+String(mem.chapterError.message||'请检查摘要模型')+
+        '。已有摘要仍然保留。');
+      const retry=button('重试分层压缩',async()=>{
+        retry.disabled=true;retry.textContent='正在重试…';
+        try{
+          const ok=await api.queue.retryChapters();
+          render();showNotice(ok?'分层压缩已重新检查':'分层压缩仍未完成，请查看错误原因');
+        }catch(e){retry.disabled=false;retry.textContent='重试分层压缩';showNotice(e.message||'重试失败');}
+      },'sm-btn sm-btn-sm');
+      retry.disabled=Boolean(api.queue.busy);
+      alert.append(reason,retry);body.append(alert);
+    }
+    const hidden=(ctx?.chat||[]).filter(msg=>msg?.is_system&&msg.extra?.story_memory_hidden).length;
+    if(hidden&&!cfg.summary?.autoHide){
+      const bar=el('div','sm-hidden-restore');
+      const explanation=el('p','sm-help','有 '+hidden+' 条原文曾被自动隐藏。恢复只改变聊天中的隐藏标记，不删除摘要。');
+      const restore=button('恢复已隐藏正文',async()=>{
+        if(!window.confirm('确定恢复 '+hidden+' 条已隐藏的原文吗？\\n\\n原文将重新参与酒馆上下文计算，长篇聊天可能增加 Token 占用。'))return;
+        restore.disabled=true;restore.textContent='正在恢复…';
+        try{
+          const count=await api.queue.restoreAllHidden();
+          render();showNotice('已恢复 '+count+' 条原文；摘要和实体记忆仍保留');
+        }catch(e){restore.disabled=false;restore.textContent='恢复已隐藏正文';showNotice(e.message||'恢复失败');}
+      },'sm-btn sm-btn-sm');
+      bar.append(explanation,restore);body.append(bar);
+    }
     body.append(createPendingPanel({
       memory:mem,chat:ctx?.chat||[],config:cfg,queue:api.queue,state:pendingView,
       summary:status,rerender:render,notice:showNotice

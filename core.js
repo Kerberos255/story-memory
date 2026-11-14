@@ -760,19 +760,24 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
  */
 export async function injectionTextWithinBudget(memory,chat,settings,vectorHits=[],historyHits=[],countTokens,diagnostics=null){
   const budgetTokens=Math.max(400,Math.min(18000,Number(settings.injection?.budget)||16000));
-  let maxChars=budgetTokens*3;
+  let maxChars=budgetTokens*3,tokenizerUnavailable=false;
   for(let attempt=0;attempt<8;attempt++){
     const usage={};
     const text=injectionText(memory,chat,settings,vectorHits,historyHits,usage,maxChars);
-    const measured=text?await countTokens(text):{tokens:0,estimated:false};
-    if(!text||measured.tokens<=budgetTokens){
+    // If ST cannot count tokens, conservatively budget two tokens per UTF-16
+    // code unit. This is a safety fallback, not a statement about token accuracy.
+    const measured=!text?{tokens:0,estimated:false}:
+      tokenizerUnavailable?{tokens:Math.ceil(text.length*2),estimated:true}:await countTokens(text);
+    if(measured.estimated)tokenizerUnavailable=true;
+    const used=measured.estimated?Math.max(measured.tokens,text.length*2):measured.tokens;
+    if(!text||used<=budgetTokens){
       if(diagnostics)Object.assign(diagnostics,usage,{
-        usedTokens:measured.tokens,tokenEstimated:measured.estimated,
+        usedTokens:used,tokenEstimated:measured.estimated,
         tokenChecks:attempt+1,tokenAdjusted:attempt>0
       });
       return text;
     }
-    const ratio=budgetTokens/Math.max(1,measured.tokens);
+    const ratio=budgetTokens/Math.max(1,used);
     maxChars=Math.floor(maxChars*Math.max(.2,Math.min(.8,ratio*.9)));
   }
   // Never inject a known over-budget prompt after repeated unsuccessful checks.
@@ -841,8 +846,9 @@ export function nextCompression(memory,chat,settings){
 }
 /** Reject changed source or concurrent compression before adding an ancestor. */
 export function commitCompression(memory,chat,plan,summary){
-  const text=cleanString(summary,12000);
+  const text=String(summary||'').trim();
   if(!text)throw Error('压缩结果为空');
+  if(text.length>12000)throw Error('压缩结果超过 12000 字符，未保存以避免剧情被截断');
   const roots=compressionRoots(memory,chat,plan.level-1);
   const live=new Set(roots.map(x=>x.id));
   if(plan.children.some(id=>!live.has(id)))throw Error('压缩源已变化');

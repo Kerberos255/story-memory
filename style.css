@@ -542,3 +542,9 @@
   .sm-progress-heading{align-items:flex-start;flex-wrap:wrap}
   .sm-progress-overview{padding:12px}
 }
+
+.sm-hidden-restore{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px;padding:12px 14px;border:1px solid var(--edge);border-radius:10px;background:var(--surface-alt)}
+.sm-hidden-restore .sm-help{margin:0;flex:1 1 190px}
+
+.sm-chapter-warning{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px;padding:12px 14px;border:1px solid var(--danger);border-radius:10px;background:var(--surface-alt)}
+.sm-chapter-warning .sm-help{margin:0;flex:1 1 210px}

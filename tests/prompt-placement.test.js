@@ -43,3 +43,13 @@ test('injected memory declares itself an older archive and gives recent dialogue
 test('no available memories means no injected header or placeholder message',()=>{
   assert.equal(injectionText(freshMemory(),[],defaultSettings()),'');
 });
+
+test('background injections clear previous text before asynchronously applying token-checked data',async()=>{
+  const fs=await import('node:fs');
+  const source=fs.readFileSync(new URL('../index.js',import.meta.url),'utf8');
+  const start=source.indexOf('function inject('),end=source.indexOf('async function injectForGeneration');
+  const body=source.slice(start,end);
+  assert.match(body,/setExtensionPrompt\('story_memory_injection_v1','',1,10000/);
+  assert.match(body,/injectionTextWithinBudget/);
+  assert.doesNotMatch(body,/injectionText\(memory\|\|peekMemory/);
+});
