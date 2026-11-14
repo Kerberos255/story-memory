@@ -25,6 +25,8 @@
   outline:2px solid var(--accent);outline-offset:2px;
 }
 .sm-dialog svg{width:17px;height:17px;flex-shrink:0;display:block}
+/* Consistent size, stroke and motion for disclosure controls in every module. */
+.sm-dialog svg.sm-disclosure-chevron{width:15px;height:15px;color:var(--muted);transition:transform .2s;flex-shrink:0}
 .sm-topbar{height:63px;min-height:63px;display:flex;align-items:center;justify-content:space-between;
   padding:0 19px 0 22px;background:var(--surface);border-bottom:1px solid var(--edge);
 }
@@ -94,7 +96,9 @@
 .sm-record-text{margin:0;color:var(--fg-weak);padding:4px 15px 17px;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .sm-record-edit{padding:0 15px 15px}
 .sm-entity-history{margin:0 15px 12px;border:1px solid var(--edge);border-radius:8px;overflow:hidden}
-.sm-entity-history-heading{cursor:pointer;padding:9px 12px;font-size:12px;font-weight:600;color:var(--fg-weak)}
+.sm-entity-history-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;list-style:none;cursor:pointer;padding:9px 12px;font-size:12px;font-weight:600;color:var(--fg-weak)}
+.sm-entity-history-heading::-webkit-details-marker{display:none}
+.sm-entity-history[open]>.sm-entity-history-heading svg.sm-disclosure-chevron{transform:rotate(180deg)}
 .sm-entity-history-list{padding:0 12px 10px;display:grid;gap:8px}
 .sm-entity-history-row{padding:8px 0;border-top:1px solid var(--edge);display:grid;gap:3px;font-size:12px}
 .sm-entity-history-row small{font-size:12px;line-height:1.5;color:var(--muted);overflow-wrap:anywhere}
@@ -515,7 +519,7 @@
 .sm-progress-group-copy strong{font-size:12px;font-weight:680;line-height:1.3}
 .sm-progress-group-copy small{font-size:10px;color:var(--muted);overflow-wrap:anywhere}
 .sm-progress-group-count{font-size:11px;color:var(--fg-weak);white-space:nowrap}
-.sm-progress-chevron{font-size:17px;color:var(--muted);min-width:12px;text-align:center}
+.sm-progress-group-head[aria-expanded="true"] svg.sm-progress-chevron{transform:rotate(180deg)}
 .sm-progress-details{display:grid;gap:10px;padding:11px 13px 13px;border-top:1px solid var(--edge);min-width:0}
 .sm-progress-task{display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0}
 .sm-progress-task+.sm-progress-task{padding-top:10px;border-top:1px solid var(--edge)}

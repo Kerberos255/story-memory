@@ -1,5 +1,7 @@
 import {pendingFloors,automaticFloorIndices,leafValid,taskForFloor} from './core.js';
 
+import {chevronIcon} from './ui-chevron.js';
+
 const element=(tag,cls,text)=>{
   const node=document.createElement(tag);
   if(cls)node.className=cls;
@@ -89,7 +91,7 @@ export function createPendingPanel({memory,chat,config,queue,state,summary,reren
     const dot=element('span','sm-progress-dot is-'+kind),copy=element('span','sm-progress-group-copy');
     copy.append(element('strong','',info.title),element('small','',info.sub));
     heading.append(dot,copy,element('span','sm-progress-group-count',indices.length+' 楼'),
-      element('span','sm-progress-chevron',state.expanded===kind?'⌃':'⌄'));
+      chevronIcon('sm-progress-chevron'));
     card.append(heading);
     if(state.expanded===kind){
       const details=element('div','sm-progress-details');

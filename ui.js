@@ -3,6 +3,8 @@ import {createPendingPanel,pendingGroups} from './pending-ui.js';
 import {characterCount,countTokens} from './text-stats.js';
 import {DEFAULT_SUMMARY_PROMPT,DEFAULT_CHAPTER_PROMPT,DEFAULT_RESUMMARY2_PROMPT,DEFAULT_OVERVIEW_PROMPT,effectiveSummaryPrompt,composeL0Prompt,parseExtraBody,parseExcluded,parseHeaderLines} from './api.js';
 
+import {chevronIcon} from './ui-chevron.js';
+
 const NAV=[['summaries','摘要','book'],['items','物品','package'],['scenes','场景','pin'],
   ['characters','角色','users'],['plans','计划','target'],['settings','设置','sliders']];
 const ICONS={
@@ -15,7 +17,6 @@ const ICONS={
   moon:['M20.5 13A8.5 8.5 0 0 1 11 3.5 8.5 8.5 0 1 0 20.5 13Z'],
   sun:['M12 2v2','M12 20v2','M4.93 4.93l1.42 1.42','m17.65 17.65 1.42 1.42','M2 12h2','M20 12h2','m6.35 17.65-1.42 1.42','m19.07 4.93-1.42 1.42','M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z'],
   x:['M18 6 6 18','M6 6l12 12'],
-  chevron:['m6 9 6 6 6-6'],
   plus:['M12 5v14','M5 12h14'],
   arrow:['M7 17 17 7','M8 7h9v9'],
   pencil:['M12 20h9','M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5Z'],
@@ -29,6 +30,7 @@ const el=(tag,cls,text)=>{
   return result;
 };
 const svg=(name)=>{
+  if(name==='chevron')return chevronIcon();
   const xmlns='http://www.w3.org/2000/svg',element=document.createElementNS(xmlns,'svg');
   element.setAttribute('viewBox','0 0 24 24');element.setAttribute('aria-hidden','true');
   element.setAttribute('fill','none');element.setAttribute('stroke','currentColor');
@@ -595,11 +597,16 @@ export function mountUI(api){
     if(!state.timeline.length&&!mem.manual.summaries.length)emptyState('book','还没有剧情摘要','可以先添加记忆，或配置副 API 后整理楼层。');
     manualInput('summaries');
   }
+  function disclosureHeading(label){
+    const head=el('summary','sm-entity-history-heading');
+    head.append(el('span','',label),svg('chevron'));
+    return head;
+  }
   function entityMergeControl(kind,entry,entries,aliases,inline=false){
     if(entries.length<2&&!aliases.length)return null;
     const panel=el(inline?'div':'details',inline?'sm-entity-panel-content':'sm-entity-history sm-entity-merge');
     const heading=aliases.length?'合并称呼 · 已合并 '+aliases.length+' 个':'合并称呼';
-    if(!inline)panel.append(el('summary','sm-entity-history-heading',heading));
+    if(!inline)panel.append(disclosureHeading(heading));
     const inside=el('div','sm-entity-merge-content');
     if(entries.length>1){
       inside.append(el('p','sm-entity-hint','确认两条记录属于同一实体后再合并；不会修改原始摘要。'));
@@ -642,7 +649,7 @@ export function mountUI(api){
     const history=entry.history||[];
     if(!history.length)return el('span');
     const wrap=el(inline?'div':'details',inline?'sm-entity-panel-content':'sm-entity-history');
-    if(!inline)wrap.append(el('summary','sm-entity-history-heading','变更记录 · '+history.length+' 条'));
+    if(!inline)wrap.append(disclosureHeading('变更记录 · '+history.length+' 条'));
     const list=el('div','sm-entity-history-list');
     for(const event of history.slice(-12).reverse()){
       const row=el('div','sm-entity-history-row');
@@ -675,7 +682,7 @@ export function mountUI(api){
     const labels={name:'名称',description:'说明',location:'位置',owner:'归属',status:'状态',
       quantity:'数量',relationship:'关系',presence:'在场状态',time:'故事时间'};
     const panel=el(inline?'div':'details',inline?'sm-entity-panel-content':'sm-entity-history sm-entity-correction');
-    if(!inline)panel.append(el('summary','sm-entity-history-heading',
+    if(!inline)panel.append(disclosureHeading(
       entry.lockedFields?.length?'人工纠错 · 已锁定 '+entry.lockedFields.length+' 项':
       entry.correctionStale?'人工纠错 · 部分待核对':entry.manualCorrection?'人工纠错 · 已生效':'人工纠错'));
     const content=el('div','sm-entity-correction-content');

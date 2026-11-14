@@ -1805,3 +1805,68 @@ test('source modal keyboard loop skips hidden load-more button and preview inclu
   find(previewFoot,x=>x.tag==='button'&&x.textContent==='查看上轮扩展发送').fire('click');
   assert.ok(find(previewFoot,x=>x.tag==='button'&&x.textContent==='返回模拟预览'));
 }));
+
+test('all disclosure arrows use one SVG shape, including pending groups and archived history',()=>withUI(body=>{
+  const chat=[{is_user:false,mes:'获得银钥匙',swipe_id:0},
+    {is_user:false,mes:'丢失银钥匙',swipe_id:0},
+    {is_user:false,mes:'旅行者进入旧城',swipe_id:0},
+    {is_user:false,mes:'城堡大门再次关闭',swipe_id:0}];
+  let memory=freshMemory();
+  memory=commitLeaf(memory,0,messageFingerprint(chat[0]),
+    normalizeDelta({summary:'获得银钥匙',items:[{op:'add',name:'银钥匙'}]}));
+  memory=commitLeaf(memory,1,messageFingerprint(chat[1]),
+    normalizeDelta({summary:'丢失银钥匙',items:[{op:'remove',name:'银钥匙'}]}));
+  memory.tasks[2]={status:'failed',code:'upstream_http_503',attempts:2,
+    updatedAt:Date.now(),fingerprint:messageFingerprint(chat[2])};
+  const cfg=defaultSettings();cfg.summary.delayFloors=1;
+  const ctx={chat,chatMetadata:{},getCurrentChatId:()=> 'disclosure-icons'};
+  const ui=mountUI({context:()=>ctx,memory:()=>memory,settings:()=>cfg,
+    queue:{busy:false,enqueueMissing(){},enqueue(){}}});
+  ui.open();
+  const dialog=body.children[0].shadow.children[1];
+  const headers=walk(dialog).filter(x=>x.className==='sm-progress-group-head');
+  assert.ok(headers.length>=2,'test shows a failed group and a delayed group');
+  const findChevron=root=>find(root,x=>x.tag==='svg'&&
+    x.attrs.class?.includes('sm-disclosure-chevron'));
+  const glyph=header=>{
+    const icon=findChevron(header);
+    assert.ok(icon,'a disclosure must have the shared svg');
+    assert.equal(icon.attrs['viewBox'],'0 0 24 24');
+    assert.equal(icon.attrs['stroke-width'],'1.75');
+    assert.equal(icon.attrs['aria-hidden'],'true');
+    assert.equal(icon.children[0].attrs.d,'m6 9 6 6 6-6');
+    return icon;
+  };
+  for(const header of headers){
+    const icon=glyph(header);
+    assert.ok(icon.attrs.class.includes('sm-progress-chevron'));
+    const before=header.attrs['aria-expanded'];
+    header.fire('click');
+    const updated=walk(dialog).find(x=>x.className==='sm-progress-group-head'&&
+      walk(x).some(y=>y.textContent===walk(header).find(y=>y.tag==='strong')?.textContent));
+    assert.ok(updated,'toggling a group keeps it available');
+    assert.equal(updated.attrs['aria-expanded'],before==='true'?'false':'true');
+    assert.deepEqual(glyph(updated).children[0].attrs,glyph(header).children[0].attrs);
+    updated.fire('click');
+  }
+  const record=find(dialog,x=>x.className==='sm-record');
+  assert.ok(record);
+  glyph(find(record,x=>x.className==='sm-record-head'));
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='物品')).fire('click');
+  const archived=find(dialog,x=>x.className==='sm-entity-history');
+  assert.ok(archived,'archived entity has its own nested history');
+  const heading=find(archived,x=>x.className==='sm-entity-history-heading');
+  assert.ok(heading);
+  glyph(heading);
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  for(const accordion of walk(dialog).filter(x=>x.className==='sm-accordion'))
+    glyph(find(accordion,x=>x.className==='sm-accordion-head'));
+}));
+test('disclosure arrows use one size and CSS rotation instead of OS font glyphs',()=>{
+  const css=readFileSync(new URL('../style.css',import.meta.url),'utf8');
+  const pending=readFileSync(new URL('../pending-ui.js',import.meta.url),'utf8');
+  assert.match(css,/svg\.sm-disclosure-chevron\{width:15px;height:15px/);
+  assert.match(css,/\.sm-progress-group-head\[aria-expanded="true"\] svg\.sm-progress-chevron\{transform:rotate\(180deg\)\}/);
+  assert.match(css,/\.sm-entity-history-heading::-webkit-details-marker\{display:none\}/);
+  assert.doesNotMatch(pending,/[⌃⌄]/,'pending groups must not use font-dependent glyphs');
+});
