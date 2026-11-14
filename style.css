@@ -169,6 +169,12 @@
 .sm-textarea{resize:vertical;min-height:85px;line-height:1.62}
 .sm-input:hover,.sm-textarea:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--edge-strong))}
 .sm-input:focus,.sm-textarea:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.sm-input[aria-invalid=true],.sm-level-input:has(input[aria-invalid=true]),.sm-summary-input:has(input[aria-invalid=true]){border-color:var(--danger);box-shadow:0 0 0 1px color-mix(in srgb,var(--danger) 20%,transparent)}
+.sm-input[aria-invalid=true]:focus{border-color:var(--danger);box-shadow:0 0 0 2px color-mix(in srgb,var(--danger) 22%,transparent)}
+.sm-dialog input[aria-invalid=true]:focus-visible{outline-color:var(--danger)}
+.sm-fields-grid.is-disabled{opacity:.55}
+.sm-fields-grid.is-disabled .sm-input{cursor:not-allowed}
+.sm-settings-draft-note{margin:0;color:var(--accent);font-size:12px;line-height:1.5}
 .sm-form-stack{display:grid;gap:10px}
 .sm-kv-editor,.sm-kv-list{display:grid;gap:8px}
 .sm-kv-row{display:grid;grid-template-columns:minmax(0,.85fr) minmax(0,1.4fr) 29px;gap:8px;align-items:center}

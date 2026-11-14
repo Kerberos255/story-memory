@@ -45,6 +45,7 @@ function button(label,onClick,cls='sm-btn'){
 function field(title,value,type='text',help=''){
   const wrap=el('label','sm-field'),caption=el('span','sm-field-label',title);
   const input=el('input','sm-input');input.type=type;input.value=String(value??'');
+  if(type==='number')input.addEventListener('input',()=>input.setAttribute('aria-invalid','false'));
   wrap.append(caption,input);
   if(help)wrap.append(el('small','sm-help',help));
   return {wrapper:wrap,input};
@@ -78,6 +79,32 @@ function textStats(){
   return {wrap,token,chars};
 }
 
+// Numeric fields should enforce the same range in the UI and saved settings.
+function settingNumber(input,label,min,max,{integer=true,optional=false}={}){
+  const raw=String(input.value??'').trim(),value=Number(raw);
+  if(optional&&raw===''){input.setAttribute('aria-invalid','false');return null;}
+  if(raw===''||!Number.isFinite(value)||(integer&&!Number.isInteger(value))||value<min||value>max){
+    input.setAttribute('aria-invalid','true');input.focus?.();
+    throw Error(label+'须为 '+min+' 到 '+max+' 的'+(integer?'整数':'数字'));
+  }
+  input.setAttribute('aria-invalid','false');
+  return value;
+}
+
+function settingsFormSnapshot(root){
+  const entries=[];
+  const visit=node=>{
+    const tag=String(node?.tagName||node?.tag||'').toLowerCase();
+    const aria=node?.getAttribute?.('aria-label')||node?.attrs?.['aria-label'];
+    if(['input','textarea','select'].includes(tag)&&aria!=='选择摘要模型'){
+      entries.push([tag,node.type==='checkbox'?'checked':String(node.type||''),
+        node.type==='checkbox'?Boolean(node.checked):String(node.value??'')]);
+    }
+    for(const child of node?.children||[])visit(child);
+  };
+  visit(root);
+  return JSON.stringify(entries);
+}
 export function mountUI(api){
   const host=el('div');host.id='story-memory-host';host.style.display='contents';document.body.append(host);
   const shadow=host.attachShadow({mode:'open'}),style=el('link');
@@ -93,7 +120,7 @@ export function mountUI(api){
   const layout=el('div','sm-layout'),nav=el('nav','sm-nav'),body=el('main','sm-content');
   layout.append(nav,body);dialog.append(top,layout);
   let active=false,page='summaries',notice='',settingsOpen=new Set(),vectorStatusField=null;
-  let dirtyEditor=false;
+  let dirtyEditor=false,settingsDraft=null,settingsReadDirty=()=>false;
   let timelineLimit=50,chapterLimit=40,timelineQuery='';
   const pendingView={expanded:'failed',all:false,limit:40};
   // Queue progress must not replace an in-progress form or destroy nested dialogs.
@@ -138,6 +165,11 @@ export function mountUI(api){
     dialog.append(toast);saveToast=toast;
     saveToastTimer=setTimeout(()=>{if(saveToast===toast)clearSaveToast();},2000);
   }
+  function confirmLeaveSettings(){
+    if(page!=='settings'||!settingsReadDirty())return true;
+    return typeof globalThis.window?.confirm==='function'&&
+      globalThis.window.confirm('设置有尚未保存的修改，离开将丢弃这些修改。确定放弃吗？');
+  }
   dialog.addEventListener('cancel',e=>{e.preventDefault();if(recordOverlay)closeRecordModal();else open(false);});
   dialog.addEventListener('click',e=>{
     if(e.target!==dialog)return;
@@ -151,7 +183,9 @@ export function mountUI(api){
       active=true;if(!dialog.open)dialog.showModal();
       dirtyEditor=false;render();close.focus();
     }else{
+      if(!confirmLeaveSettings())return;
       clearSaveToast();closeRecordModal(false);
+      settingsDraft=null;settingsReadDirty=()=>false;
       active=false;dirtyEditor=false;if(dialog.open)dialog.close();
       body.replaceChildren();nav.replaceChildren();
       api.onClose?.();
@@ -693,7 +727,7 @@ export function mountUI(api){
     else vectorStatusField.textContent='索引状态：已完成本轮同步'+(info.lastCount?' · 最近更新 '+info.lastCount+' 条':'');
   }
   function renderSettings(){
-    const cfg=api.settings();
+    const cfg=settingsDraft||api.settings();
     title('设置','管理摘要渠道、记忆整理和召回方式');
     const box=el('section','sm-settings'),main=el('div','sm-setting-global');
     const enabled=switchRow('启用剧情记忆',cfg.enabled,'控制剧情整理、记忆检索和发送');
@@ -740,6 +774,7 @@ export function mountUI(api){
     });
     modelLine.append(modelInput,modelPicker,refreshModels);modelWrap.append(modelLabel,modelLine);
     const temp=field('温度',cfg.api.temperature,'number');
+    temp.input.min='0';temp.input.max='2';temp.input.step='any';
     const thinkingWrap=el('label','sm-field');
     thinkingWrap.append(el('span','sm-field-label','Think 等级'));
     const thinking=el('select','sm-input sm-select');
@@ -793,7 +828,7 @@ export function mountUI(api){
     const autoPanel=el('section','sm-summary-panel');
     const autoGrid=el('div','sm-summary-control-grid');
     for(const [entry,description] of [
-      [delay,'最近 AI 楼层暂不摘要'],[recent,'始终保留在上下文']
+      [delay,'最近 AI 楼层暂不摘要'],[recent,'自动隐藏时保留最近 N 楼原文']
     ]){
       const card=el('div','sm-summary-number-card');
       const label=el('div','sm-summary-number-copy');
@@ -821,6 +856,7 @@ export function mountUI(api){
       control.setAttribute('aria-label',name+'触发阈值');
       const input=el('input');input.type='number';input.min='0';input.max='100';
       input.value=String(value);input.setAttribute('aria-label',name+'触发阈值');
+      input.addEventListener('input',()=>input.setAttribute('aria-invalid','false'));
       control.append(input,el('span','','条'));
       lower.append(control);
       panel.append(heading,lower);
@@ -871,11 +907,14 @@ export function mountUI(api){
     flagGroup.append(...flags.map(([,x])=>x.wrapper));
     const budget=field('记忆长度上限（约 Tokens）',cfg.injection.budget,'number',
       '默认 16,000；只限制每轮注入的剧情记忆，不包含聊天、预设和世界书。小上下文模型建议适当调低。');
-    budget.input.min='400';budget.input.max='18000';budget.input.step='100';
+    budget.input.min='400';budget.input.max='18000';budget.input.step='1';
     const previewButton=button('预览发送内容',()=>{
+      let budgetValue;
+      try{budgetValue=settingNumber(budget.input,'记忆长度上限',400,18000);}
+      catch(e){showNotice(e.message);return;}
       const previewCfg=structuredClone(cfg);
       for(const [key,value] of flags)previewCfg.injection[key]=value.input.checked;
-      previewCfg.injection.budget=Number(budget.input.value)||16000;
+      previewCfg.injection.budget=budgetValue;
       previewCfg.retrieval={...previewCfg.retrieval,enabled:retrievalEnabled.input.checked,
         maxHits:Math.max(1,Math.min(10,Number(recallCount.input.value)||5)),
         maxSources:Math.max(0,Math.min(5,Number(sourceCount.input.value)||0))};
@@ -890,6 +929,15 @@ export function mountUI(api){
     recallCount.input.min='1';recallCount.input.max='10';
     const sourceCount=field('最多补充原文',cfg.retrieval?.maxSources??3,'number');
     sourceCount.input.min='0';sourceCount.input.max='5';
+    const historyCountFields=grid(recallCount.wrapper,sourceCount.wrapper);
+    const updateHistoryFields=()=>{
+      const disabled=!retrievalEnabled.input.checked;
+      historyCountFields.className='sm-fields-grid'+(disabled?' is-disabled':'');
+      recallCount.input.disabled=disabled;
+      sourceCount.input.disabled=disabled;
+    };
+    retrievalEnabled.input.addEventListener('change',updateHistoryFields);
+    updateHistoryFields();
     const vector=switchRow('启用语义检索',cfg.vector.enabled);
     const vectorUrl=field('Embedding API 地址',cfg.vector.url||'https://api.siliconflow.cn/v1','url');
     const vectorKey=field('Embedding API 密钥',cfg.vector.key||'','password');
@@ -897,6 +945,7 @@ export function mountUI(api){
     const vectorModel=field('Embedding 模型',cfg.vector.model);
     const topK=field('召回数量 Top-K',cfg.vector.topK,'number');
     const threshold=field('相似度阈值',cfg.vector.threshold,'number');
+    threshold.input.min='0';threshold.input.max='1';threshold.input.step='any';
     const rerank=switchRow('启用重排（Rerank）',cfg.vector.rerankEnabled??false,
       '先通过向量筛选候选，再用专用重排模型排序；失败自动回退向量结果');
     const rerankModel=field('重排模型',cfg.vector.rerankModel||'BAAI/bge-reranker-v2-m3');
@@ -922,7 +971,7 @@ export function mountUI(api){
     historyHeading.append(el('strong','','历史检索'),
       el('small','','开启后检索并发送相关历史给主模型，无需额外 API。'));
     historySection.append(historyHeading,retrievalEnabled.wrapper,
-      grid(recallCount.wrapper,sourceCount.wrapper));
+      historyCountFields);
 
     const semanticSection=el('section','sm-memory-search-section');
     const semanticHeading=el('div','sm-memory-search-heading');
@@ -993,6 +1042,7 @@ export function mountUI(api){
     }
     box.append(accordion('prompts','提示配置','自定义楼层摘要与分层总结提示词',promptSections));
 
+    let draftNote=null;
     const saveBar=el('div','sm-settings-save'),save=button('保存设置',()=>{
       try{
         const next=structuredClone(cfg);
@@ -1000,44 +1050,47 @@ export function mountUI(api){
         next.api.mode=mode.value==='main'?'main':'custom';
         next.api.url=apiUrl.input.value.trim();next.api.key=apiKey.input.value.trim();
         next.api.model=modelInput.value.trim();
-        next.api.temperature=Math.max(0,Math.min(2,Number(temp.input.value)||0));
+        const tempChanged=String(temp.input.value).trim()!==String(cfg.api.temperature);
+        next.api.temperature=next.api.mode==='custom'||tempChanged
+          ?settingNumber(temp.input,'温度',0,2,{integer:false}):cfg.api.temperature;
         next.api.thinkLevel=thinking.value;
-        const outputRaw=max.input.value.trim();
-        if(outputRaw&&(!Number.isInteger(Number(outputRaw))||Number(outputRaw)<256||Number(outputRaw)>65536))
-          throw Error('输出上限须为 256 到 65536 的整数，或留空自动');
-        next.api.maxTokens=outputRaw?Number(outputRaw):null;
+        const savedOutput=cfg.api.maxTokens==null?'':String(cfg.api.maxTokens);
+        next.api.maxTokens=next.api.mode==='custom'||String(max.input.value).trim()!==savedOutput
+          ?settingNumber(max.input,'输出上限',256,65536,{optional:true}):cfg.api.maxTokens;
         next.api.include=parseExtraBody(included.value);
         next.api.exclude=parseExcluded(excluded.value);
         next.api.headers=parseHeaderLines(headers.value);
-        next.summary.keepRecent=Math.max(0,Math.min(50,Number(recent.input.value)||0));
-        next.summary.delayFloors=Math.max(0,Math.min(50,Number(delay.input.value)||0));
+        next.summary.keepRecent=settingNumber(recent.input,'保留正文',0,50);
+        next.summary.delayFloors=settingNumber(delay.input,'延迟摘要',0,50);
         next.summary.autoHide=hide.input.checked;
-        next.summary.leafBatchThreshold=Math.max(0,Math.min(100,Number(leafBatch.input.value)||0));
-        next.summary.leafKeepRecent=Math.max(0,Math.min(50,Number(leafKeep.input.value)||0));
-        next.summary.resummaryThreshold=Math.max(0,Math.min(100,Number(second.input.value)||0));
-        next.summary.higherResummaryThreshold=Math.max(0,Math.min(100,Number(higher.input.value)||0));
+        next.summary.leafBatchThreshold=settingNumber(leafBatch.input,'L1 压缩阈值',0,100);
+        next.summary.leafKeepRecent=settingNumber(leafKeep.input,'保留最近 L0 摘要',0,50);
+        next.summary.resummaryThreshold=settingNumber(second.input,'L2 压缩阈值',0,100);
+        next.summary.higherResummaryThreshold=settingNumber(higher.input,'L3+ 压缩阈值',0,100);
         delete next.summary.chapterEvery;
         delete next.summary.maxInputChars;
-        next.summary.retry=Math.max(0,Math.min(2,Number(retries.input.value)||0));
+        next.summary.retry=settingNumber(retries.input,'网络失败重试次数',0,2);
         next.extraction={...next.extraction};
         for(const [key,row] of extractionSwitches)next.extraction[key]=row.input.checked;
-        next.injection.budget=Number(budget.input.value)||16000;
+        next.injection.budget=settingNumber(budget.input,'记忆长度上限',400,18000);
         for(const [key,value] of flags)next.injection[key]=value.input.checked;
         delete next.injection.summary;
         delete next.injection.retrieval;
         delete next.injection.vector;
         next.retrieval={enabled:retrievalEnabled.input.checked,
-          maxHits:Math.max(1,Math.min(10,Number(recallCount.input.value)||5)),
-          maxSources:Math.max(0,Math.min(5,Number(sourceCount.input.value)||0))};
+          maxHits:retrievalEnabled.input.checked||String(recallCount.input.value)!==String(cfg.retrieval.maxHits)
+            ?settingNumber(recallCount.input,'最多参考记忆',1,10):cfg.retrieval.maxHits,
+          maxSources:retrievalEnabled.input.checked||String(sourceCount.input.value)!==String(cfg.retrieval.maxSources)
+            ?settingNumber(sourceCount.input,'最多补充原文',0,5):cfg.retrieval.maxSources};
         next.vector.enabled=vector.input.checked;
         next.vector.url=vectorUrl.input.value.trim();
         next.vector.key=vectorKey.input.value.trim();
         next.vector.model=vectorModel.input.value.trim();
-        next.vector.topK=Math.max(1,Math.min(10,Number(topK.input.value)||5));
-        next.vector.threshold=Math.max(0,Math.min(1,Number(threshold.input.value)||0));
+        next.vector.topK=settingNumber(topK.input,'召回数量 Top-K',1,10);
+        next.vector.threshold=settingNumber(threshold.input,'相似度阈值',0,1,{integer:false});
         next.vector.rerankEnabled=rerank.input.checked;
         next.vector.rerankModel=rerankModel.input.value.trim()||'BAAI/bge-reranker-v2-m3';
-        next.vector.rerankCandidates=Math.max(2,Math.min(30,Number(rerankCount.input.value)||15));
+        next.vector.rerankCandidates=settingNumber(rerankCount.input,'重排候选数',2,30);
         next.prompts.summaryFull=promptEditors.get('summaryFull').value.trim();
         next.prompts.summary='';
         next.prompts.chapter=promptEditors.get('chapter').value.trim();
@@ -1049,12 +1102,15 @@ export function mountUI(api){
           if(next.prompts[key]===defaultText)next.prompts[key]='';
         }
         delete next.api.secretId;delete next.vector.source;
-        api.saveSettings(next);showSaveSuccess();
+        api.saveSettings(next);
+        settingsDraft=null;settingsBaseline=settingsFormSnapshot(box);dirtyEditor=false;
+        draftNote?.remove();draftNote=null;
+        showSaveSuccess();
       }catch(e){showNotice('保存失败：'+e.message);}
     },'sm-btn sm-btn-primary');
     const reset=button('恢复默认',()=>{
       const ask=window.confirm(
-        '要恢复默认设置吗？\n\n会重置摘要、检索和提示词设置。API 连接信息与已保存的剧情记忆不会删除。'
+        '要将设置恢复为默认草稿吗？\n\n点击「保存设置」后才会生效；API 连接信息与已保存的剧情记忆不会删除。'
       );
       if(!ask)return;
       try{
@@ -1073,13 +1129,15 @@ export function mountUI(api){
           key:cfg.vector.key||'',
           model:defaults.vector.model
         };
-        api.saveSettings(defaults);
+        settingsDraft=defaults;
         render();
-        showSaveSuccess('默认设置已恢复');
       }catch(e){showNotice('恢复失败：'+e.message);}
     },'sm-btn');
     reset.setAttribute('data-testid','reset-settings');
+    if(settingsDraft){draftNote=el('p','sm-settings-draft-note','已填入默认设置，点击「保存设置」后才会生效。');box.append(draftNote);}
     saveBar.append(reset,save);box.append(saveBar);body.append(box);
+    let settingsBaseline=settingsFormSnapshot(box);
+    settingsReadDirty=()=>Boolean(settingsDraft)||settingsFormSnapshot(box)!==settingsBaseline;
   }
   function openL0PromptPreview(trigger,prompt){
     clearSaveToast();closeRecordModal(false);
@@ -1243,7 +1301,11 @@ export function mountUI(api){
     clearSaveToast();closeRecordModal(false);
     body.replaceChildren();nav.replaceChildren();dirtyEditor=false;
     for(const [name,label,icon] of NAV){
-      const item=button('',()=>{if(page===name)return;page=name;notice='';render();body.scrollTop=0;},'sm-nav-item'+(page===name?' is-current':''));
+      const item=button('',()=>{
+        if(page===name||!confirmLeaveSettings())return;
+        settingsDraft=null;settingsReadDirty=()=>false;
+        page=name;notice='';render();body.scrollTop=0;
+      },'sm-nav-item'+(page===name?' is-current':''));
       item.append(svg(icon),el('span','',label));item.setAttribute('aria-current',page===name?'page':'false');nav.append(item);
     }
     if(page==='summaries')renderSummary();

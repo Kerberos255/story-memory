@@ -58,6 +58,7 @@ test('dark mode is default; sun and moon toggle persist without rebuilding form'
   assert.equal(beforeInput.value,'custom-draft');
   assert.ok(walk(dialog).includes(beforeInput),'theme change must not rebuild input');
   toggle.fire('click');assert.equal(dialog.dataset.theme,'dark');
+  formInput.value=''; // Reverted input is clean.
   view.open(false);
   assert.equal(dialog.open,false);
   assert.equal(find(dialog,x=>x.tag==='main').children.length,0);
@@ -259,7 +260,11 @@ test('restore defaults keeps connection secrets and remembers, asks before repla
     assert.ok(reset);
     reset.fire('click');assert.equal(saves,0,'cancelled reset must not save');
     consent=true;reset.fire('click');
+    assert.equal(saves,0,'restoring defaults only fills a draft');
+    assert.ok(find(dialog,x=>x.className==='sm-settings-draft-note'));
+    find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
     assert.equal(saves,1);
+    assert.equal(find(dialog,x=>x.className==='sm-settings-draft-note'),undefined);
     assert.equal(cfg.api.temperature,0);
     assert.equal(cfg.api.maxTokens,null);
      assert.equal(cfg.summary.autoHide,true);
@@ -1436,4 +1441,138 @@ test('injection preview shows actual token usage and explains excluded candidate
     walk(x).some(y=>y.className==='sm-preview-skipped'));
   assert.ok(bodyContent.children.indexOf(skipped)<bodyContent.children.indexOf(field),
     'over-budget alert must stay above the long memory textarea');
+}));
+
+test('settings drafts require confirmation before navigation and closing, while reverted edits do not',()=>withUI(body=>{
+  const prevWindow=globalThis.window;
+  const asked=[],answers=[false,true,false,true];
+  globalThis.window={confirm:message=>{asked.push(message);return answers.shift()??true;}};
+  try{
+    const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
+    let writes=0;
+    const view=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+      queue:{busy:false,enqueueMissing(){}},saveSettings:()=>writes++});
+    view.open();
+    const dialog=body.children[0].shadow.children[1];
+    const nav=name=>find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent===name));
+    nav('设置').fire('click');
+    const budget=find(dialog,x=>x.className==='sm-field'&&walk(x).some(y=>y.textContent==='记忆长度上限（约 Tokens）'));
+    const input=find(budget,x=>x.tag==='input');
+    input.value='12000';input.fire('input');
+    nav('摘要').fire('click');
+    assert.ok(nav('设置').className.includes('is-current'),'cancel navigation keeps edited form open');
+    assert.equal(input.value,'12000');
+    nav('摘要').fire('click');
+    assert.ok(nav('摘要').className.includes('is-current'),'confirmed exit discards edits');
+    nav('设置').fire('click');
+    const now=find(dialog,x=>x.className==='sm-field'&&walk(x).some(y=>y.textContent==='记忆长度上限（约 Tokens）'));
+    assert.equal(find(now,x=>x.tag==='input').value,'16000','discarded edit never persisted');
+    const current=find(now,x=>x.tag==='input');
+    current.value='14000';current.fire('input');
+    dialog.fire('cancel');
+    assert.equal(dialog.open,true,'Escape must not silently discard settings');
+    dialog.fire('cancel');
+    assert.equal(dialog.open,false,'Escape can close after explicit confirmation');
+    assert.equal(asked.length,4);
+    assert.equal(writes,0);
+  }finally{globalThis.window=prevWindow;}
+}));
+
+test('restored defaults remain only a draft and can be discarded without saving',()=>withUI(body=>{
+  const prevWindow=globalThis.window,answers=[true,false,true];
+  globalThis.window={confirm:()=>answers.shift()??true};
+  try{
+    const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
+    const cfg=defaultSettings();cfg.summary.delayFloors=9;
+    let writes=0;
+    const ui=mountUI({context:()=>ctx,memory:freshMemory,settings:()=>cfg,
+      queue:{busy:false,enqueueMissing(){}},saveSettings:()=>writes++});
+    ui.open();const dialog=body.children[0].shadow.children[1];
+    const nav=name=>find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent===name));
+    nav('设置').fire('click');
+    find(dialog,x=>x.attrs['data-testid']==='reset-settings').fire('click');
+    assert.equal(writes,0);
+    assert.ok(find(dialog,x=>x.className==='sm-settings-draft-note'));
+    const delay=find(dialog,x=>x.className==='sm-summary-number-card'&&walk(x).some(y=>y.textContent==='延迟摘要'));
+    assert.equal(find(delay,x=>x.tag==='input').value,'3');
+    nav('摘要').fire('click');
+    assert.ok(nav('设置').className.includes('is-current'),'declined discard must keep reset draft');
+    nav('摘要').fire('click');
+    nav('设置').fire('click');
+    const original=find(dialog,x=>x.className==='sm-summary-number-card'&&walk(x).some(y=>y.textContent==='延迟摘要'));
+    assert.equal(find(original,x=>x.tag==='input').value,'9','discarding reset must restore saved values');
+    assert.equal(writes,0);
+  }finally{globalThis.window=prevWindow;}
+}));
+
+test('numeric settings reject out-of-range and fractional values instead of saving a different result',()=>withUI(body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
+  let saved=null,writes=0;
+  const ui=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},saveSettings:s=>{saved=s;writes++;}});
+  ui.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  const save=()=>find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+  const budget=find(dialog,x=>x.className==='sm-field'&&walk(x).some(y=>y.textContent==='记忆长度上限（约 Tokens）'));
+  const budgetInput=find(budget,x=>x.tag==='input');
+  for(const invalid of ['30000','399','12.5','','abc','Infinity']){
+    budgetInput.value=invalid;save();
+    assert.equal(writes,0,invalid+' may not be saved');
+    assert.equal(budgetInput.attrs['aria-invalid'],'true');
+    assert.match(find(dialog,x=>x.className==='sm-notice')?.textContent||'',/记忆长度上限/);
+  }
+  budgetInput.value='18000';budgetInput.fire('input');
+  assert.equal(budgetInput.attrs['aria-invalid'],'false');
+  const retry=find(dialog,x=>x.className==='sm-summary-retry');
+  const retryInput=find(retry,x=>x.tag==='input');
+  retryInput.value='1.5';save();
+  assert.equal(writes,0,'integer-only retries cannot be fractional');
+  assert.equal(retryInput.attrs['aria-invalid'],'true');
+  retryInput.value='2';save();
+  assert.equal(writes,1);
+  assert.equal(saved.injection.budget,18000);
+  assert.equal(saved.summary.retry,2);
+}));
+
+test('history count inputs disable with retrieval without erasing their saved values',()=>withUI(body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
+  const cfg=defaultSettings();cfg.retrieval={enabled:false,maxHits:7,maxSources:2};
+  let saved=null;
+  const ui=mountUI({context:()=>ctx,memory:freshMemory,settings:()=>cfg,
+    queue:{busy:false,enqueueMissing(){}},saveSettings:s=>saved=s});
+  ui.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  const retrieval=find(dialog,x=>x.className==='sm-accordion'&&walk(x).some(y=>y.tag==='strong'&&y.textContent==='记忆检索'));
+  const control=find(retrieval,x=>x.tag==='label'&&walk(x).some(y=>y.textContent==='启用历史检索'));
+  const toggle=find(control,x=>x.tag==='input');
+  const a=find(retrieval,x=>x.className==='sm-field'&&walk(x).some(y=>y.textContent==='最多参考记忆'));
+  const b=find(retrieval,x=>x.className==='sm-field'&&walk(x).some(y=>y.textContent==='最多补充原文'));
+  const ai=find(a,x=>x.tag==='input'),bi=find(b,x=>x.tag==='input');
+  assert.equal(ai.disabled,true);assert.equal(bi.disabled,true);
+  assert.equal(ai.value,'7');assert.equal(bi.value,'2');
+  toggle.checked=true;toggle.fire('change');
+  assert.equal(ai.disabled,false);assert.equal(bi.disabled,false);
+  ai.value='8';bi.value='4';
+  toggle.checked=false;toggle.fire('change');
+  assert.equal(ai.disabled,true);assert.equal(ai.value,'8','disabled values remain a draft');
+  find(dialog,x=>x.tag==='button'&&x.textContent==='保存设置').fire('click');
+  assert.equal(saved.retrieval.enabled,false);
+  assert.equal(saved.retrieval.maxHits,8,'count changes made before disabling are preserved');
+  assert.equal(saved.retrieval.maxSources,4);
+  assert.ok(walk(dialog).some(x=>String(x.textContent||'').includes('自动隐藏时保留最近 N 楼原文')));
+}));
+
+test('injection preview validates the same token budget limit as saving',()=>withUI(body=>{
+  const ctx={chat:[],chatMetadata:{},getCurrentChatId:()=>''};
+  const ui=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}},previewHistory:()=>[]});
+  ui.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  const budget=find(dialog,x=>x.className==='sm-field'&&walk(x).some(y=>y.textContent==='记忆长度上限（约 Tokens）'));
+  const input=find(budget,x=>x.tag==='input');
+  input.value='30000';
+  find(dialog,x=>x.tag==='button'&&x.textContent==='预览发送内容').fire('click');
+  assert.equal(input.attrs['aria-invalid'],'true');
+  assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
+  assert.match(find(dialog,x=>x.className==='sm-notice')?.textContent||'',/记忆长度上限/);
 }));
