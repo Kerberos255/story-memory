@@ -60,7 +60,7 @@ function inject(hits=[],historyHits=[],memory=null){
   lastInjection={chatId,text:'',at:Date.now()};
   if(!cfg.enabled)return;
   void injectionTextWithinBudget(memory||peekMemory(ctx),ctx.chat,cfg,hits,historyHits,
-    text=>countTokens(ctx,text)).then(text=>{
+    text=>countTokens(ctx,text),null,ctx.name1).then(text=>{
     if(revision!==injectionRevision||chatId!==(getContext()?.getCurrentChatId?.()||''))return;
     ctx.setExtensionPrompt('story_memory_injection_v1',text,1,10000,false,0,null);
     lastInjection={chatId,text,at:Date.now()};
@@ -70,7 +70,7 @@ async function injectForGeneration(hits=[],historyHits=[],memory=null){
   const ctx=getContext();if(!ctx?.setExtensionPrompt)return;
   const revision=++injectionRevision,chatId=ctx.getCurrentChatId?.()||'';
   const cfg=getSettings(),text=cfg.enabled?await injectionTextWithinBudget(
-    memory||peekMemory(ctx),ctx.chat,cfg,hits,historyHits,value=>countTokens(ctx,value)):'';
+    memory||peekMemory(ctx),ctx.chat,cfg,hits,historyHits,value=>countTokens(ctx,value),null,ctx.name1):'';
   if(revision!==injectionRevision||chatId!==(getContext()?.getCurrentChatId?.()||''))return;
   ctx.setExtensionPrompt('story_memory_injection_v1',text,1,10000,false,0,null);
   lastInjection={chatId,text,at:Date.now()};

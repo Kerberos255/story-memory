@@ -166,3 +166,81 @@ test('no extra capacity cannot displace higher-priority plots or overrun the bud
   for(const part of report.sections)
     assert.equal(part.omitted,part.skippedBudget+part.skippedDuplicate+part.skippedEmpty);
 });
+
+test('unsummarized user handoff marks previous owner and scene state as unverified',()=>{
+  const {chat,memory,add}=historyState();
+  add('主角进入城堡大厅并持有银钥匙',{location:'城堡大厅',
+    items:[{op:'add',name:'银钥匙',owner:'主角',location:'背包',quantity:1}],
+    scenes:[{op:'add',name:'城堡大厅',status:'有人驻守'}]});
+  chat.push({is_user:true,mes:'我把钥匙交给卫兵，离开城堡大厅来到森林'});
+  const cfg=config(16000);cfg.summary.keepRecent=0;
+  const out=injectionText(memory,chat,cfg);
+  assert.match(out,/记录时持有者":"主角"/);
+  assert.match(out,/记录时位置":"背包"/);
+  assert.match(out,/记录时数量":1/);
+  assert.doesNotMatch(out,/"owner":"主角"/);
+  assert.match(section(out,'场景'),/状态待核对/);
+  assert.match(out,/以新原文为准/);
+  assert.doesNotMatch(out,/"owner":"卫兵"/,
+    'the injector must not infer the new owner from unsummarized prose');
+});
+
+test('unprocessed AI reply also marks prior item states stale',()=>{
+  const {chat,memory,add}=historyState();
+  add('持有的旧道具',{items:[{op:'add',name:'旧灯笼',owner:'主角',status:'点亮'}]});
+  chat.push({is_user:false,mes:'卫兵接过旧灯笼',swipe_id:0});
+  const out=injectionText(memory,chat,config(16000));
+  assert.match(out,/"记录时持有者":"主角"/);
+  assert.match(out,/"记录时状态":"点亮"/);
+  assert.doesNotMatch(out,/"owner":"主角"/);
+});
+
+test('after committing the newer confirmed change stale labels disappear',()=>{
+  const {chat,memory,add}=historyState();
+  add('持有银钥匙',{items:[{op:'add',name:'银钥匙',owner:'主角'}]});
+  chat.push({is_user:true,mes:'我把钥匙交给卫兵'});
+  const ai={is_user:false,mes:'卫兵确认接过银钥匙',swipe_id:0};
+  chat.push(ai);
+  const next=commitLeaf(memory,2,messageFingerprint(ai),normalizeDelta({
+    summary:'卫兵接过银钥匙',items:[{op:'update',name:'银钥匙',owner:'卫兵'}]}));
+  const out=injectionText(next,chat,config(16000));
+  assert.match(out,/"owner":"卫兵"/);
+  assert.doesNotMatch(out,/记录时持有者|最新剧情尚未全部摘要/);
+});
+
+test('personal names from host context retain old player-held items above 45 candidates',()=>{
+  const {chat,memory,add}=historyState();
+  add('古旧物件',{items:[
+    {op:'add',name:'早期护符',owner:'云青'},
+    {op:'add',name:'另一人的护符',owner:'云青的朋友'}
+  ]});
+  for(let i=0;i<52;i++)
+    add('后续道具',{items:[{op:'add',name:'道具'+i,owner:'不明'}]});
+  const cfg=config(16000);cfg.retrieval.enabled=false;
+  const withPersona=injectionText(memory,chat,cfg,[],[],null,null,'云青');
+  const withoutPersona=injectionText(memory,chat,cfg,[],[],null,null,'');
+  assert.match(section(withPersona,'物品'),/早期护符/);
+  assert.doesNotMatch(section(withPersona,'物品'),/另一人的护符/);
+  assert.doesNotMatch(section(withoutPersona,'物品'),/早期护符/);
+});
+
+test('manual records stay user-authored while stale automatic records get warnings',()=>{
+  const {chat,memory,add}=historyState();
+  add('最初记录',{items:[{op:'add',name:'旧火把',owner:'主角'}]});
+  memory.manual.items.push({id:'manual:1',text:'用户确认：随身携带指南针'});
+  chat.push({is_user:true,mes:'后来事件尚未整理'});
+  const out=injectionText(memory,chat,config(16000));
+  assert.match(out,/用户确认：随身携带指南针/);
+  assert.match(out,/旧火把/);
+  assert.match(out,/记录时持有者/);
+});
+
+test('host persona propagates through the token-checked injection and both host callers',async()=>{
+  const {chat,memory,add}=historyState();
+  add('旧物',{items:[{op:'add',name:'玩家的斗篷',owner:'云青'}]});
+  for(let i=0;i<51;i++)add('普通物',{items:[{op:'add',name:'普通记事本'+i}]});
+  const cfg=config(16000),count=async text=>({tokens:Math.ceil(text.length/3),estimated:false});
+  const payload=await injectionTextWithinBudget(memory,chat,cfg,[],[],count,null,'云青');
+  assert.match(payload,/玩家的斗篷/);
+  assert.ok(payload.length<=cfg.injection.budget*3);
+});

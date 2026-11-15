@@ -1373,7 +1373,7 @@ export function mountUI(api){
     const ctx=api.context(),memory=api.memory(),cfg=previewSettings||api.settings();
     const recalled=cfg.retrieval?.enabled!==false?api.previewHistory?.(ctx,memory,cfg)||[]:[];
     const usage={};
-    const result=injectionText(memory,ctx?.chat||[],cfg,[],recalled,usage);
+    const result=injectionText(memory,ctx?.chat||[],cfg,[],recalled,usage,null,ctx?.name1||'');
     const snapshot=api.lastInjection?.();
     const hasSnapshot=Boolean(snapshot?.chatId&&snapshot.chatId===ctx?.getCurrentChatId?.());
     const overlay=el('div','sm-record-modal-overlay');
@@ -1388,7 +1388,7 @@ export function mountUI(api){
     close.append(svg('x'));close.setAttribute('aria-label','关闭弹窗');
     header.append(heading,close);
     const content=el('div','sm-record-modal-body');
-    const explanation=el('p','sm-help','当前草稿模拟使用本地历史检索，不发送向量请求。Token 按酒馆当前分词器统计；主线剧情优先，物品和场景会尽量保留最近更新、主角持有及最近已摘要地点相关的完整记录。跳过统计仅涵盖本轮候选。');
+    const explanation=el('p','sm-help','当前草稿模拟使用本地历史检索，不发送向量请求。Token 按酒馆当前分词器统计；主线剧情优先，物品和场景会优先保留最近更新、当前 Persona 持有及最近已摘要地点相关的记录；如果有未摘要的新剧情，旧归属和场景状态会标注「待核对」。跳过统计仅涵盖本轮候选。');
     const stats=textStats();
     const textarea=textArea(result||'当前没有需要发送的记忆。',10);
     textarea.readOnly=true;textarea.setAttribute('aria-label','发送预览内容');
@@ -1486,7 +1486,7 @@ export function mountUI(api){
       trapFocus(panel,e);
     });
     void injectionTextWithinBudget(memory,ctx?.chat||[],cfg,[],recalled,
-      value=>countTokens(ctx,value),usage).then(value=>{
+      value=>countTokens(ctx,value),usage,ctx?.name1||'').then(value=>{
       if(recordOverlay!==overlay||typeof document==='undefined')return;
       simulated=value;previewReady=true;refreshBreakdown();update();
     }).catch(()=>{

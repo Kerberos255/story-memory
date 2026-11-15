@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {defaultSettings,freshMemory} from '../core.js';
 import {DEFAULT_SUMMARY_PROMPT,DEFAULT_CHAPTER_PROMPT,DEFAULT_RESUMMARY2_PROMPT,
   DEFAULT_OVERVIEW_PROMPT,composeL0Prompt,buildSummaryMessages,buildChapterMessages,
@@ -98,4 +99,26 @@ test('default prompt lengths keep a bounded request budget while enforcing bette
   // Original built-in authoring text remains editable, while its output section
   // is replaced with the protected, switch-dependent runtime schema.
   assert.match(DEFAULT_SUMMARY_PROMPT,/【输出】/);
+});
+
+test('four default prompts explicitly handle newer state, factual owners and location transitions',()=>{
+  const cfg=defaultSettings(),l0=composeL0Prompt(cfg);
+  assert.match(l0,/本轮结束时明确所在的场所/);
+  assert.match(l0,/离开后去向未知则留空/);
+  assert.match(l0,/已确认的持有人姓名或称呼/);
+  assert.match(DEFAULT_CHAPTER_PROMPT,/旧状态和新结果不混写/);
+  assert.match(DEFAULT_RESUMMARY2_PROMPT,/最新证据为准/);
+  assert.match(DEFAULT_OVERVIEW_PROMPT,/物品持有与人物所在地/);
+  for(const layer of [DEFAULT_CHAPTER_PROMPT,DEFAULT_RESUMMARY2_PROMPT,DEFAULT_OVERVIEW_PROMPT])
+    assert.match(layer,/不|不能|不得/);
+  assert.equal(composeL0Prompt({...cfg,extraction:{items:false,scenes:false,characters:false,plans:false}}).includes('【物品 items】'),false);
+});
+
+test('runtime host persona wiring never writes persona identity into stored settings',()=>{
+  const source=readFileSync(new URL('../index.js',import.meta.url),'utf8');
+  const ui=readFileSync(new URL('../ui.js',import.meta.url),'utf8');
+  assert.match(source,/countTokens\(ctx,text\),null,ctx.name1\)/);
+  assert.match(source,/countTokens\(ctx,value\),null,ctx.name1\)/);
+  assert.match(ui,/recalled,usage,null,ctx\?\.name1/);
+  assert.match(ui,/countTokens\(ctx,value\),usage,ctx\?\.name1/);
 });

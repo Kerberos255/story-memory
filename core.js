@@ -667,7 +667,7 @@ function injectionState(memory,chat){
 }
 // These signals are existing, confirmed state fields; no story-text guessing,
 // remote classifier, new metadata, or additional request is introduced.
-function rankedCurrentEntities(entries,kind,lastKnownLocation){
+function rankedCurrentEntities(entries,kind,lastKnownLocation,personaName=''){
   const place=String(lastKnownLocation||'').replace(/\s+/g,'').trim();
   const normalize=x=>String(x||'').replace(/\s+/g,'').trim();
   const isCurrentScene=entity=>{
@@ -678,8 +678,15 @@ function rankedCurrentEntities(entries,kind,lastKnownLocation){
   };
   const isHeld=entity=>{
     const owner=normalize(entity.owner),location=normalize(entity.location);
-    // Only explicitly player-owned or player-carried state qualifies.
-    return /^(?:主角|玩家|主人公|我|用户|\{\{user\}\})(?:的(?:背包|行囊|物品栏))?$/.test(owner)||
+    const persona=normalize(personaName);
+    const named=persona.length>0&&persona.length<=100;
+    const carried=where=>['背包','行囊','物品栏','身上','口袋','手中','腰间']
+      .some(place=>where===place||where==='的'+place);
+    // Current ST persona is an exact identity, not a fuzzy character-name guess.
+    return (named&&(owner===persona||
+      (owner.startsWith(persona)&&carried(owner.slice(persona.length)))||
+      (location.startsWith(persona)&&carried(location.slice(persona.length)))))||
+      /^(?:主角|玩家|主人公|我|用户|\{\{user\}\})(?:的(?:背包|行囊|物品栏))?$/.test(owner)||
       /^(?:主角|玩家|主人公|我|用户|\{\{user\}\})(?:的)?(?:背包|行囊|物品栏|身上|口袋|手中|腰间)$/.test(location);
   };
   const importance=entity=>kind==='scenes'?Number(Boolean(isCurrentScene(entity))):
@@ -691,11 +698,11 @@ function rankedCurrentEntities(entries,kind,lastKnownLocation){
     lastUpdate(a)-lastUpdate(b)).slice(-45);
 }
 
-export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],diagnostics=null,maxChars=null) {
+export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],diagnostics=null,maxChars=null,personaName='') {
   const state=injectionState(memory,chat),cfg=settings.injection||{},sections=[];
   const add=(title,entries)=>{if(entries.length)sections.push({title,entries});};
   const note=text=>({text:String(text||'').trim(),identity:String(text||'').trim()});
-  const entityLine=(entity,historical=false)=>{
+  const entityLine=(entity,historical=false,kind='')=>{
     if(entity.manual)return note(entity.name);
     // Keep each JSON record intact. Internal source/identity IDs are not RP facts.
     const {entity_id,aliases,sourceIndex,op,evidence,knowledge,history,fieldVersions,evidenceStatus,identityStatus,manualCorrection,correctionStale,lockedFields,lockConflicts,retiredAtFloor,...publicState}=entity;
@@ -715,21 +722,28 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
         publicState.记录时状态=publicState.status;
         delete publicState.status;
       }
-      publicState.状态待核对='后续剧情尚未摘要，可能已完成或取消；不能视为当前待办，以最新原文为准';
+      if(kind==='items'){
+        for(const [field,label] of [['owner','记录时持有者'],['location','记录时位置'],['quantity','记录时数量']]){
+          if(publicState[field]!==undefined){publicState[label]=publicState[field];delete publicState[field];}
+        }
+      }
+      publicState.状态待核对=kind==='items'||kind==='scenes'
+        ?'最新剧情尚未全部摘要，这些是记录时的状态；以新原文为准'
+        :'后续剧情尚未摘要，可能已完成或取消；不能视为当前待办，以最新原文为准';
     }
     return note(JSON.stringify(publicState));
   };
   // High priority: user-authored memories and currently effective facts.
   add('【人工补充记忆】',(memory.manual?.summaries||[]).slice(-12).map(x=>note(x.text)));
   if(cfg.characters)add('【人物】',(state.characters||[]).slice(-45).map(entityLine));
+  const pending=pendingFloors(memory,chat);
+  const lastValidAi=state.timeline.length?state.timeline[state.timeline.length-1].sourceIndex:-1;
+  const lastUser=chat.findLastIndex(m=>m?.is_user&&!m.is_system);
+  const latestUnprocessed=Math.max(pending.at(-1)??-1,lastUser>lastValidAi?lastUser:-1);
+  const isStale=entity=>!entity.manual&&latestUnprocessed>(entity.sourceIndex??-1);
   if(cfg.plans!==false){
     const closed=/^(?:已完成|完成|已解决|已结束|已取消|取消|已放弃|已终止|已揭晓|done|completed|resolved|cancelled|canceled|closed)$/i;
-    const pending=pendingFloors(memory,chat);
-    // Include the latest unsummarized user turn: it may resolve a plan before AI replies.
-    const lastValidAi=state.timeline.length?state.timeline[state.timeline.length-1].sourceIndex:-1;
-    const lastUser=chat.findLastIndex(m=>m?.is_user&&!m.is_system);
-    const freshUser=lastUser>lastValidAi?lastUser:-1;
-    const latestUnprocessed=Math.max(pending.at(-1)??-1,freshUser);
+    // Both unprocessed user text and delayed AI summaries can change plans.
     // Source order alone determines freshness: never guess plan completion by
     // matching names in recent dialogue, and never present stale status as live.
     const confirmed=[],unverified=[];
@@ -745,9 +759,13 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
   }
   if(settings.retrieval?.enabled!==false)
     add('【相关历史】',historyHits.map(x=>note(x.text)));
-  const latestKnownLocation=state.timeline.at(-1)?.location||'';
-  if(cfg.inventory)add('【物品】',rankedCurrentEntities(state.items||[],'items',latestKnownLocation).map(entityLine));
-  if(cfg.scenes)add('【场景】',rankedCurrentEntities(state.scenes||[],'scenes',latestKnownLocation).map(entityLine));
+  const locationLeaf=state.timeline.at(-1);
+  const latestKnownLocation=latestUnprocessed>(locationLeaf?.sourceIndex??-1)
+    ?'':locationLeaf?.location||'';
+  if(cfg.inventory)add('【物品】',rankedCurrentEntities(state.items||[],'items',latestKnownLocation,personaName)
+    .map(entity=>entityLine(entity,isStale(entity),'items')));
+  if(cfg.scenes)add('【场景】',rankedCurrentEntities(state.scenes||[],'scenes',latestKnownLocation,personaName)
+    .map(entity=>entityLine(entity,isStale(entity),'scenes')));
   const chapters=validChapters(memory,chat);
   const nested=new Set(chapters.filter(c=>c.level>1).flatMap(c=>c.children||[]));
   const covered=new Set(chapters.flatMap(c=>c.children||[]));
@@ -844,12 +862,12 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
  * shrinks the character candidate pool if the selected model counts more tokens.
  * The synchronous selector remains as a fallback for hosts without a tokenizer.
  */
-export async function injectionTextWithinBudget(memory,chat,settings,vectorHits=[],historyHits=[],countTokens,diagnostics=null){
+export async function injectionTextWithinBudget(memory,chat,settings,vectorHits=[],historyHits=[],countTokens,diagnostics=null,personaName=''){
   const budgetTokens=Math.max(400,Math.min(18000,Number(settings.injection?.budget)||16000));
   let maxChars=budgetTokens*3,tokenizerUnavailable=false;
   for(let attempt=0;attempt<8;attempt++){
     const usage={};
-    const text=injectionText(memory,chat,settings,vectorHits,historyHits,usage,maxChars);
+    const text=injectionText(memory,chat,settings,vectorHits,historyHits,usage,maxChars,personaName);
     // If ST cannot count tokens, conservatively budget two tokens per UTF-16
     // code unit. This is a safety fallback, not a statement about token accuracy.
     const measured=!text?{tokens:0,estimated:false}:
