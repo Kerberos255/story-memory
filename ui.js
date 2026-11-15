@@ -126,6 +126,8 @@ export function mountUI(api){
   let showCompletedMetrics=false,timelineSearchTimer=null;
   let dirtyEditor=false,settingsDraft=null,settingsReadDirty=()=>false;
   let timelineLimit=50,chapterLimit=40,timelineQuery='';
+  const collectionLimits=new Map();
+  let renderedNavPage=null,scheduledRefresh=null;
   const pendingView={expanded:'failed',all:false,limit:40};
   // Queue progress must not replace an in-progress form or destroy nested dialogs.
   body.addEventListener('input',e=>{
@@ -191,7 +193,8 @@ export function mountUI(api){
       clearSaveToast();closeRecordModal(false);
       settingsDraft=null;settingsReadDirty=()=>false;
       active=false;dirtyEditor=false;if(dialog.open)dialog.close();
-      body.replaceChildren();nav.replaceChildren();
+      if(scheduledRefresh!==null){globalThis.cancelAnimationFrame?.(scheduledRefresh);scheduledRefresh=null;}
+      body.replaceChildren();nav.replaceChildren();renderedNavPage=null;
       api.onClose?.();
     }
   }
@@ -414,7 +417,22 @@ export function mountUI(api){
         wrap.append(badges);details.append(wrap);
       }
       if(value.meta)details.append(el('p','sm-record-state',value.meta));
-      if(detailFactory){const extra=detailFactory(entry);if(extra)details.append(extra);}
+      if(detailFactory){
+        // Most entity cards stay closed. Avoid constructing correction forms,
+        // merge pickers and history panels until their details are requested.
+        if(options.lazyDetails){
+          let hydrated=false;
+          const hydrate=()=>{
+            if(hydrated||!details.open)return;
+            hydrated=true;
+            const extra=detailFactory(entry);if(extra)details.append(extra);
+          };
+          details.addEventListener('toggle',hydrate);
+          if(details.open)hydrate();
+        }else{
+          const extra=detailFactory(entry);if(extra)details.append(extra);
+        }
+      }
       if(type){
         const actions=el('div','sm-record-actions');
         const edit=button('编辑',()=>openRecordModal(entry,type,'edit',edit),'sm-btn sm-record-edit-button');
@@ -736,24 +754,28 @@ export function mountUI(api){
       entityNameKey(rule.to)===entityNameKey(entry.name)).map(([key,rule])=>({...rule,key}));
     const id=kind+':'+entry.entity_id;
     const sections=[
-      ['history','变更记录 · '+(entry.history?.length||0),entry.history?.length?entityHistoryDetails(entry,true):null],
+      ['history','变更记录 · '+(entry.history?.length||0),Boolean(entry.history?.length),()=>entityHistoryDetails(entry,true)],
       ['correction','人工纠错'+(entry.lockedFields?.length?' · 已锁 '+entry.lockedFields.length:
-        entry.correctionStale?' · 部分待核对':entry.manualCorrection?' · 已生效':''),entityCorrection(kind,entry,true)],
-      ['merge','合并称呼',entityMergeControl(kind,entry,entries,aliases,true)]
-    ].filter(([, ,part])=>part);
+        entry.correctionStale?' · 部分待核对':entry.manualCorrection?' · 已生效':''),true,()=>entityCorrection(kind,entry,true)],
+      ['merge','合并称呼',entries.length>=2||aliases.length>0,()=>entityMergeControl(kind,entry,entries,aliases,true)]
+    ].filter(([, ,enabled])=>enabled);
     const root=el('div','sm-entity-drawer-root'),tabs=el('div','sm-entity-tabs');
     tabs.setAttribute('role','tablist');tabs.setAttribute('aria-label',entry.name+' · 详情选项');
     const panels=el('div','sm-entity-drawers'),controls=[];
     let selected=entityTabs.get(id)||'';
     const update=()=>{
-      for(const [name,buttonNode,panel] of controls){
-        const on=selected===name;
-        buttonNode.className='sm-entity-tab'+(on?' is-active':'');
-        buttonNode.setAttribute('aria-selected',String(on));
-        panel.hidden=!on;
+      for(const control of controls){
+        const on=selected===control.name;
+        control.tab.className='sm-entity-tab'+(on?' is-active':'');
+        control.tab.setAttribute('aria-selected',String(on));
+        control.panel.hidden=!on;
+        if(on&&!control.loaded){
+          const content=control.create();if(content)control.panel.append(content);
+          control.loaded=true;
+        }
       }
     };
-    for(const [name,label,content] of sections){
+    for(const [name,label,,create] of sections){
       const tab=button(label,()=>{
         selected=selected===name?'':name;
         entityTabs.delete(id);entityTabs.set(id,selected);
@@ -762,8 +784,7 @@ export function mountUI(api){
       },'sm-entity-tab');
       tab.setAttribute('role','tab');tab.setAttribute('aria-label',label);
       const panel=el('div','sm-entity-drawer');panel.setAttribute('role','tabpanel');
-      panel.append(content);
-      tabs.append(tab);panels.append(panel);controls.push([name,tab,panel]);
+      tabs.append(tab);panels.append(panel);controls.push({name,tab,panel,create,loaded:false});
     }
     update();root.append(tabs,panels);return root;
   }
@@ -771,8 +792,9 @@ export function mountUI(api){
     const ctx=api.context(),mem=api.memory(),state=deriveState(mem,ctx?.chat||[]);
     title(heading,caption);
     const entries=(state[kind]||[]).filter(x=>!x.manual);
+    const visibleCount=collectionLimits.get(kind)||60;
     const rules=Object.entries(mem.entityAliases?.[kind]||{});
-    recordCards(kind==='plans'?'计划记录':'当前'+heading,entries,x=>({
+    recordCards(kind==='plans'?'计划记录':'当前'+heading,entries.slice(0,visibleCount),x=>({
       title:x.name,
       subtitle:x.lockConflicts?.length?'锁定字段与新剧情有冲突':x.lockedFields?.length?'已锁定 '+x.lockedFields.length+' 个字段':
         x.correctionStale?'新剧情已更新部分人工纠错':x.manualCorrection?'当前状态 · 人工确认':'',
@@ -793,7 +815,10 @@ export function mountUI(api){
         ['在场',kind==='characters'&&x.presence==='present'?'当前在场':
           kind==='characters'&&x.presence==='absent'?'当前不在场':'']
       ].filter(([,value])=>value!==undefined&&value!==null&&value!=='')
-    }),null,x=>entityDrawer(kind,x,entries,rules),{scope:'entity:'+kind});
+    }),null,x=>entityDrawer(kind,x,entries,rules),{scope:'entity:'+kind,lazyDetails:true});
+    if(entries.length>visibleCount)body.append(button('加载更多'+heading+'（还有 '+(entries.length-visibleCount)+' 条）',()=>{
+      collectionLimits.set(kind,visibleCount+60);render();
+    },'sm-btn sm-btn-text'));
     const warnings=state.ambiguities?.[kind]||[];
     if(warnings.length){
       const notice=el('details','sm-entity-history sm-entity-ambiguity');
@@ -806,7 +831,7 @@ export function mountUI(api){
     recordCards('已归档'+heading,archived,x=>({title:x.name,
       subtitle:'归档于 #'+x.retiredAtFloor,
       description:x.description||'这条状态已被后续剧情移除；完整来源仍保存在楼层摘要中。'
-    }),null,entityHistoryDetails,{scope:'archive:'+kind});
+    }),null,entityHistoryDetails,{scope:'archive:'+kind,lazyDetails:true});
 
     const aliases=Object.entries(mem.entityAliases?.[kind]||{}).map(([key,rule])=>({...rule,key}));
     if(entries.length>=2||aliases.length){
@@ -1419,6 +1444,17 @@ export function mountUI(api){
         ];
         row.append(el('span','',section.title.replace(/[【】]/g,'')),
           el('span','',details.join(' · ')));
+        const samples=section.skippedSamples||[];
+        if(samples.length){
+          const examples=el('details','sm-injection-skipped');
+          const caption=el('summary','sm-injection-skipped-head',
+            '查看跳过示例 · '+samples.length+' 条'+(section.omitted>samples.length?'（仅展示部分）':''));
+          examples.append(caption);
+          for(const sample of samples){
+            examples.append(el('p','sm-injection-skipped-row',sample.reason+' · '+(sample.preview||'无文本')));
+          }
+          row.append(examples);
+        }
         breakdownList.append(row);
       }
       const skipped=skippedBudget+skippedDuplicate+skippedEmpty;
@@ -1471,14 +1507,17 @@ export function mountUI(api){
       shadow.activeElement?.getAttribute?.('aria-label')==='搜索剧情时间线';
     const selection=focusedSearch?shadow.activeElement.selectionStart:null;
     const preservedScroll=body.scrollTop;
-    body.replaceChildren();nav.replaceChildren();dirtyEditor=false;
-    for(const [name,label,icon] of NAV){
+    body.replaceChildren();dirtyEditor=false;
+    if(renderedNavPage!==page){
+      nav.replaceChildren();renderedNavPage=page;
+      for(const [name,label,icon] of NAV){
       const item=button('',()=>{
         if(page===name||!confirmLeaveSettings())return;
         settingsDraft=null;settingsReadDirty=()=>false;
         page=name;notice='';render();body.scrollTop=0;
       },'sm-nav-item'+(page===name?' is-current':''));
-      item.append(svg(icon),el('span','',label));item.setAttribute('aria-current',page===name?'page':'false');nav.append(item);
+        item.append(svg(icon),el('span','',label));item.setAttribute('aria-current',page===name?'page':'false');nav.append(item);
+      }
     }
     if(page==='summaries')renderSummary();
     else if(page==='items')renderCollection('items','物品','重要物件和持有状态');
@@ -1509,8 +1548,20 @@ export function mountUI(api){
     openDetails.clear();entityTabs.clear();showCompletedMetrics=false;
     if(timelineSearchTimer!==null){clearTimeout(timelineSearchTimer);timelineSearchTimer=null;}
     pendingView.expanded='failed';pendingView.all=false;pendingView.limit=40;
+    collectionLimits.clear();
   },refresh(force=false){
-    // Preserve drafts and editing dialogs during async queue updates.
-    if(active&&page!=='settings'&&(force||(!recordOverlay&&!dirtyEditor)))render();
+    // Coalesce bursts of queue state changes into one paint; no form or modal
+    // is replaced while its editor is active. Explicit user edits stay immediate.
+    if(!active||page==='settings'||(!force&&(recordOverlay||dirtyEditor)))return;
+    if(force){
+      if(scheduledRefresh!==null){globalThis.cancelAnimationFrame?.(scheduledRefresh);scheduledRefresh=null;}
+      render();return;
+    }
+    if(scheduledRefresh!==null)return;
+    if(typeof globalThis.requestAnimationFrame!=='function'){render();return;}
+    scheduledRefresh=globalThis.requestAnimationFrame(()=>{
+      scheduledRefresh=null;
+      if(active&&page!=='settings'&&!recordOverlay&&!dirtyEditor)render();
+    });
   },report:showNotice};
 }

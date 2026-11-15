@@ -44,6 +44,18 @@ class FakeElement{
 }
 function walk(root){return [root,...root.children.flatMap(x=>x instanceof FakeElement?walk(x):[])];}
 function find(root,fn){return walk(root).find(fn);}
+function expandRecord(record){
+  assert.ok(record,'record exists before expanding it');
+  record.open=true;record.fire('toggle');
+  return record;
+}
+function openEntityTab(record,label){
+  expandRecord(record);
+  const tab=find(record,x=>x.tag==='button'&&String(x.textContent).startsWith(label));
+  assert.ok(tab,label+' tab is available after expanding the card');
+  tab.fire('click');
+  return tab;
+}
 function withUI(fn){
   const old={document:globalThis.document,localStorage:globalThis.localStorage};
   const storage=new Map(),body=new FakeElement('body');
@@ -514,6 +526,8 @@ test('entity cards offer explicit merge and undo instead of fuzzy automatic grou
    find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='物品')).fire('click');
    const cards=walk(dialog).filter(x=>x.className==='sm-record');
    assert.equal(cards.length,2);
+   assert.equal(find(cards[1],x=>x.className==='sm-entity-controls'),undefined,'collapsed cards defer selectors');
+   openEntityTab(cards[1],'合并称呼');
    const controls=find(cards[1],x=>x.className==='sm-entity-controls');
    assert.ok(controls);
    const picker=find(controls,x=>x.tag==='select');
@@ -744,16 +758,19 @@ test('entity merge panel aligns with other full-width cards and preserves inline
     assert.equal(panel.parent.tag,'main');
     assert.ok(walk(panel).some(x=>x.textContent==='合并同一实体的不同称呼'));
     assert.ok(walk(panel).some(x=>x.className==='sm-btn sm-btn-primary sm-entity-merge-confirm'));
-    const drawer=find(list,x=>x.className==='sm-entity-drawer-root');
-    assert.ok(drawer,'record utilities use a shared compact drawer');
-    const mergeTab=find(drawer,x=>x.tag==='button'&&x.textContent==='合并称呼');
-    assert.ok(mergeTab);
-    const controls=find(drawer,x=>x.className==='sm-entity-controls');
-    assert.ok(controls);
-    const panelNode=find(drawer,x=>x.className==='sm-entity-drawer'&&walk(x).includes(controls));
-    assert.equal(panelNode.hidden,true,'merge is hidden before tab activation');
-    mergeTab.fire('click');
-    assert.equal(panelNode.hidden,false,'merge tab opens its own panel');
+    const card=find(list,x=>x.className==='sm-record');
+   assert.equal(find(card,x=>x.className==='sm-entity-drawer-root'),undefined);
+   expandRecord(card);
+   const drawer=find(card,x=>x.className==='sm-entity-drawer-root');
+   assert.ok(drawer,'record utilities use a shared compact drawer');
+   const mergeTab=find(drawer,x=>x.tag==='button'&&x.textContent==='合并称呼');
+   assert.ok(mergeTab);
+   assert.equal(find(drawer,x=>x.className==='sm-entity-controls'),undefined);
+   mergeTab.fire('click');
+   const controls=find(drawer,x=>x.className==='sm-entity-controls');
+   assert.ok(controls);
+   const panelNode=find(drawer,x=>x.className==='sm-entity-drawer'&&walk(x).includes(controls));
+   assert.equal(panelNode.hidden,false,'merge tab opens its own panel');
     assert.ok(walk(panel).every(x=>!x.className?.includes('sm-entity-merge-content')),
       'full-width merge panel does not inherit record-only spacing');
   }
@@ -1126,7 +1143,10 @@ test('retired entities are visible as historical records instead of current inve
   find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='物品')).fire('click');
   assert.ok(walk(dialog).some(x=>x.textContent==='已归档物品'));
   assert.ok(walk(dialog).some(x=>x.textContent==='归档于 #1'));
-  assert.ok(find(dialog,x=>x.className==='sm-entity-history'));
+  const archivedCard=find(dialog,x=>x.className==='sm-record');
+   assert.equal(find(archivedCard,x=>x.className==='sm-entity-history'),undefined);
+   expandRecord(archivedCard);
+   assert.ok(find(archivedCard,x=>x.className==='sm-entity-history'));
 }));
 
 
@@ -1143,13 +1163,13 @@ test('entity correction stays collapsed by default and updates only after explic
     clearEntityCorrection:(kind,id)=>{memory=clearEntityCorrection(memory,kind,id);}});
   view.open();const dialog=body.children[0].shadow.children[1];
   find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='角色')).fire('click');
-  const correction=find(dialog,x=>x.className==='sm-entity-panel-content'&&
-    walk(x).some(y=>y.tag==='button'&&y.textContent==='保存纠错'));
-  assert.ok(correction);
-  assert.equal(correction.parent.hidden,true,'correction is hidden before choosing its tab');
-  const tab=find(dialog,x=>x.tag==='button'&&String(x.textContent).startsWith('人工纠错'));
-  tab.fire('click');
-  assert.equal(correction.parent.hidden,false);
+  const card=find(dialog,x=>x.className==='sm-record');
+   assert.equal(find(card,x=>x.className==='sm-entity-panel-content'),undefined);
+   openEntityTab(card,'人工纠错');
+   const correction=find(card,x=>x.className==='sm-entity-panel-content'&&
+     walk(x).some(y=>y.tag==='button'&&y.textContent==='保存纠错'));
+   assert.ok(correction);
+   assert.equal(correction.parent.hidden,false);
   const input=find(correction,x=>x.attrs['aria-label']==='守门人 · 状态');
   input.value='痊愈';
   assert.equal(changed.length,0,'typing must not silently persist the result');
@@ -1201,14 +1221,18 @@ test('plans, items, scenes and characters share tidy metadata and closed utility
     const current=find(dialog,x=>x.className==='sm-record-list');
     const card=find(current,x=>x.className==='sm-record');
     assert.ok(card,page+' needs a record card');
-    const details=find(card,x=>x.className==='sm-entity-drawer-root');
-    assert.ok(details);
-    const merge=find(details,x=>x.tag==='button'&&x.textContent==='合并称呼');
-    assert.ok(merge,page+' merge belongs to a shared tabs drawer');
-    const panel=find(details,x=>x.className==='sm-entity-panel-content'&&
-      walk(x).some(y=>y.className==='sm-entity-controls'));
-    assert.equal(panel.parent.hidden,true,'merge drawer is initially hidden');
-    assert.ok(walk(details).every(x=>x.className!=='sm-entity-hint'||x.parent?.className==='sm-entity-merge-content'));
+    assert.equal(find(card,x=>x.className==='sm-entity-drawer-root'),undefined);
+     expandRecord(card);
+     const details=find(card,x=>x.className==='sm-entity-drawer-root');
+     assert.ok(details);
+     const merge=find(details,x=>x.tag==='button'&&x.textContent==='合并称呼');
+     assert.ok(merge,page+' merge belongs to a shared tabs drawer');
+     assert.equal(find(details,x=>x.className==='sm-entity-controls'),undefined);
+     merge.fire('click');
+     const panel=find(details,x=>x.className==='sm-entity-panel-content'&&
+       walk(x).some(y=>y.className==='sm-entity-controls'));
+     assert.equal(panel.parent.hidden,false);
+     assert.ok(walk(details).every(x=>x.className!=='sm-entity-hint'||x.parent?.className==='sm-entity-merge-content'));
   }
   selectPage('计划');
   const plans=find(dialog,x=>x.className==='sm-record-list');
@@ -1346,7 +1370,8 @@ test('field locks render as compact controls and warn before overwriting newer p
   view.open();
   const dialog=body.children[0].shadow.children[1];
   find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='角色')).fire('click');
-  let form=find(dialog,x=>x.className==='sm-entity-panel-content'&&walk(x).some(y=>y.tag==='button'&&y.textContent==='保存纠错'));
+  openEntityTab(find(dialog,x=>x.className==='sm-record'),'人工纠错');
+   let form=find(dialog,x=>x.className==='sm-entity-panel-content'&&walk(x).some(y=>y.tag==='button'&&y.textContent==='保存纠错'));
   const titleLock=find(form,x=>x.attrs['aria-label']==='守门人 · 锁定名称');
   const relationLock=find(form,x=>x.attrs['aria-label']==='守门人 · 锁定关系');
   assert.ok(titleLock&&relationLock);
@@ -1853,7 +1878,9 @@ test('all disclosure arrows use one SVG shape, including pending groups and arch
   assert.ok(record);
   glyph(find(record,x=>x.className==='sm-record-head'));
   find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='物品')).fire('click');
-  const archived=find(dialog,x=>x.className==='sm-entity-history');
+  const archivedCard=find(dialog,x=>x.className==='sm-record');
+   expandRecord(archivedCard);
+   const archived=find(archivedCard,x=>x.className==='sm-entity-history');
   assert.ok(archived,'archived entity has its own nested history');
   const heading=find(archived,x=>x.className==='sm-entity-history-heading');
   assert.ok(heading);
@@ -1922,4 +1949,76 @@ test('sending preview uses a compact scrollable reader without resizing or trunc
   assert.match(css,/@media\(max-width:700px\)\{[\s\S]*?max-height:min\(230px,35dvh\)/);
   find(footer,x=>x.tag==='button'&&x.textContent==='关闭').fire('click');
   assert.equal(find(dialog,x=>x.className==='sm-record-modal-overlay'),undefined);
+}));
+
+test('large entity catalog defers utility controls and pages records in bounded batches',()=>withUI(body=>{
+  const chat=[{is_user:false,mes:'收集许多样品',swipe_id:0}];
+  const memory=commitLeaf(freshMemory(),0,messageFingerprint(chat[0]),{
+    summary:'收集样品',time:'',location:'',
+    delta:{items:Array.from({length:95},(_,i)=>({op:'add',name:'样品'+i})),
+      scenes:[],characters:[],plans:[]}
+  });
+  const ctx={chat,getCurrentChatId:()=> 'catalog-pagination'};
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:defaultSettings,
+    queue:{busy:false,enqueueMissing(){}}});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='物品')).fire('click');
+  const count=()=>walk(dialog).filter(x=>x.className==='sm-record').length;
+  assert.equal(count(),60);
+  assert.equal(walk(dialog).filter(x=>x.className==='sm-entity-drawer-root').length,0);
+  find(dialog,x=>x.tag==='button'&&String(x.textContent).startsWith('加载更多物品')).fire('click');
+  assert.equal(count(),95);
+  const card=find(dialog,x=>x.className==='sm-record');
+  expandRecord(card);
+  assert.ok(find(card,x=>x.className==='sm-entity-drawer-root'));
+  assert.equal(find(card,x=>x.className==='sm-correction-field'),undefined,
+    'unselected correction tab must not build forms');
+}));
+
+test('scheduled UI refresh merges bursts and retains the navigation DOM',()=>withUI(body=>{
+  const oldFrame=globalThis.requestAnimationFrame,oldCancel=globalThis.cancelAnimationFrame;
+  let next=1,schedules=0;
+  const pending=new Map();
+  globalThis.requestAnimationFrame=fn=>{const id=next++;pending.set(id,fn);schedules++;return id;};
+  globalThis.cancelAnimationFrame=id=>pending.delete(id);
+  try{
+    const ctx={chat:[],getCurrentChatId:()=> 'frame-refresh'};
+    const view=mountUI({context:()=>ctx,memory:freshMemory,settings:defaultSettings,
+      queue:{busy:false,enqueueMissing(){}}});
+    view.open();const dialog=body.children[0].shadow.children[1];
+    const nav=find(dialog,x=>x.className==='sm-nav');
+    const firstButton=nav.children[0];
+    view.refresh();view.refresh();view.refresh();
+    assert.equal(schedules,1);
+    assert.equal(pending.size,1);
+    const draw=[...pending.values()][0];pending.clear();draw();
+    assert.equal(nav.children[0],firstButton,'queue progress must not rebuild navigation');
+    view.refresh();assert.equal(pending.size,1);
+    view.refresh(true);assert.equal(pending.size,0,'forced refresh cancels stale frame');
+    view.open(false);
+  }finally{
+    globalThis.requestAnimationFrame=oldFrame;
+    globalThis.cancelAnimationFrame=oldCancel;
+  }
+}));
+
+test('send-preview skipped candidate examples remain collapsed and bounded',()=>withUI(async body=>{
+  const memory=freshMemory(),cfg=defaultSettings();
+  cfg.injection.budget=400;
+  memory.manual.summaries=[{id:'a',text:'短记忆'},{id:'b',text:'短记忆'},
+    {id:'c',text:'过长的记忆'.repeat(550)}];
+  const ctx={chat:[],getCurrentChatId:()=> 'candidate-visibility',
+    getTokenCountAsync:async text=>Math.ceil(text.length/3)};
+  const view=mountUI({context:()=>ctx,memory:()=>memory,settings:()=>cfg,
+    queue:{busy:false,enqueueMissing(){}},previewHistory:()=>[]});
+  view.open();const dialog=body.children[0].shadow.children[1];
+  find(dialog,x=>x.className?.includes('sm-nav-item')&&walk(x).some(y=>y.textContent==='设置')).fire('click');
+  find(dialog,x=>x.tag==='button'&&x.textContent==='预览发送内容').fire('click');
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const list=walk(dialog).filter(x=>x.className==='sm-injection-skipped');
+  assert.ok(list.length);
+  assert.ok(list.every(x=>x.open===false));
+  assert.ok(list.some(x=>walk(x).some(y=>String(y.textContent).includes('容量不足'))));
+  const excerpt=walk(list[0]).filter(x=>x.className==='sm-injection-skipped-row');
+  assert.ok(excerpt.every(x=>x.textContent.length<220));
 }));

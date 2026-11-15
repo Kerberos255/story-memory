@@ -92,7 +92,7 @@
 .sm-record-head:hover{background:var(--hover)}
 .sm-record-head svg{color:var(--muted);width:15px;height:15px;transition:transform .2s}
 .sm-record[open] .sm-record-head svg{transform:rotate(180deg)}
-.sm-record-label{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;font-weight:590;font-size:12px}
+.sm-record-label{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;font-weight:600;font-size:13px}
 .sm-record-text{margin:0;color:var(--fg-weak);padding:4px 15px 17px;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .sm-record-edit{padding:0 15px 15px}
 .sm-entity-history{margin:0 15px 12px;border:1px solid var(--edge);border-radius:8px;overflow:hidden}
@@ -543,7 +543,7 @@
 .sm-progress-dot.is-delay{background:var(--muted)}
 .sm-progress-group-copy{display:grid;gap:2px;flex:1;min-width:0}
 .sm-progress-group-copy strong{font-size:12px;font-weight:680;line-height:1.3}
-.sm-progress-group-copy small{font-size:10px;color:var(--muted);overflow-wrap:anywhere}
+.sm-progress-group-copy small{font-size:11px;color:var(--muted);overflow-wrap:anywhere}
 .sm-progress-group-count{font-size:11px;color:var(--fg-weak);white-space:nowrap}
 .sm-progress-group-head[aria-expanded="true"] svg.sm-progress-chevron{transform:rotate(180deg)}
 .sm-progress-details{display:grid;gap:10px;padding:11px 13px 13px;border-top:1px solid var(--edge);min-width:0}
@@ -551,7 +551,7 @@
 .sm-progress-task+.sm-progress-task{padding-top:10px;border-top:1px solid var(--edge)}
 .sm-progress-task-copy{display:grid;gap:2px;min-width:0}
 .sm-progress-task-copy strong{font-size:12px;font-weight:650}
-.sm-progress-task-copy small{font-size:10px;color:var(--muted);overflow-wrap:anywhere}
+.sm-progress-task-copy small{font-size:11px;color:var(--muted);overflow-wrap:anywhere}
 .sm-progress-task>.sm-btn{flex-shrink:0}
 .sm-progress-floor-grid{display:flex;flex-wrap:wrap;gap:7px;min-width:0}
 .sm-progress-floor{padding:5px 10px;border:1px solid color-mix(in srgb,var(--accent) 25%,var(--edge));
@@ -602,7 +602,7 @@
 .sm-dialog[data-theme=light] .sm-level-tag.is-l3{color:#7f45ad}
 .sm-card-chips{display:flex;flex-wrap:wrap;align-items:center;gap:5px;min-width:0}
 .sm-meta-chip{display:inline-block;max-width:min(180px,100%);padding:2px 7px;
-  font-size:10px;line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  font-size:11px;line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   border:1px solid var(--edge);border-radius:6px;color:var(--fg-weak);background:var(--surface-alt)}
 .sm-meta-chip.is-present{color:#57d6a1;border-color:color-mix(in srgb,#4fc58a 32%,var(--edge))}
 .sm-meta-chip.is-conflict{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 35%,var(--edge))}
@@ -666,3 +666,11 @@
   .sm-timeline-search{gap:5px}
   .sm-timeline-search>.sm-btn{padding:6px 9px;min-width:0}
 }
+
+/* Inspection remains compact: examples are opt-in and stay inside the preview. */
+.sm-injection-breakdown-row{flex-wrap:wrap}
+.sm-injection-breakdown-row>span:nth-child(2){margin-left:auto;text-align:right;white-space:normal;overflow-wrap:anywhere}
+.sm-injection-skipped{flex:0 0 100%;margin-top:4px;min-width:0}
+.sm-injection-skipped-head{cursor:pointer;color:var(--accent);font-size:11px;list-style:revert}
+.sm-injection-skipped-row{margin:5px 0 0;padding:6px 8px;background:var(--surface-alt);
+  border-radius:6px;color:var(--fg-weak);font-size:11px;overflow-wrap:anywhere;white-space:pre-wrap}

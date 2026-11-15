@@ -749,20 +749,26 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
     const extra=(result.length?2:0)+title.length+1;
     if(remaining<=extra){
       breakdown.push({title,selected:0,omitted:entries.length,
-        skippedBudget:entries.length,skippedDuplicate:0,skippedEmpty:0,chars:0});
+        skippedBudget:entries.length,skippedDuplicate:0,skippedEmpty:0,chars:0,
+        skippedSamples:diagnostics?entries.slice(-5).map(item=>({reason:'容量不足',
+          preview:String(item.text||'').replace(/\s+/g,' ').slice(0,180)})):[]});
       continue;
     }
     let available=remaining-extra;
-    const chosen=[];let skippedBudget=0,skippedDuplicate=0,skippedEmpty=0;
+    const chosen=[],skippedSamples=[];let skippedBudget=0,skippedDuplicate=0,skippedEmpty=0;
+    const recordSkipped=(reason,text)=>{
+      if(diagnostics&&skippedSamples.length<5)
+        skippedSamples.push({reason,preview:String(text||'').replace(/\s+/g,' ').slice(0,180)});
+    };
     for(const item of entries.slice().reverse()){
       const text=item.text.trim(),identity=item.identity||text;
-      if(!text){skippedEmpty++;continue;}
-      if(seen.has(identity)){skippedDuplicate++;continue;}
-      if(text.length+1>available){skippedBudget++;continue;}
+      if(!text){skippedEmpty++;recordSkipped('空内容','');continue;}
+      if(seen.has(identity)){skippedDuplicate++;recordSkipped('重复',text);continue;}
+      if(text.length+1>available){skippedBudget++;recordSkipped('容量不足',text);continue;}
       chosen.push(text);seen.add(identity);available-=text.length+1;
     }
     const omitted=skippedBudget+skippedDuplicate+skippedEmpty;
-    const details={title,selected:chosen.length,omitted,skippedBudget,skippedDuplicate,skippedEmpty};
+    const details={title,selected:chosen.length,omitted,skippedBudget,skippedDuplicate,skippedEmpty,skippedSamples};
     if(!chosen.length){breakdown.push({...details,chars:0});continue;}
     const section=title+'\n'+chosen.reverse().join('\n');
     result.push(section);

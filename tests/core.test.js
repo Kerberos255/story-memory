@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {defaultSettings,freshMemory,peekMemory,readMemory,writeMemory,normalizeDelta,commitLeaf,deriveState,pendingFloors,injectionText,messageFingerprint,addManual,editManual,staleHiddenIndices,userFingerprint,rebaseDeletedMessages,correctEntity,clearEntityCorrection} from '../core.js';
 const makeChat=()=>[
  {is_user:true,is_system:false,mes:'我找到一只旧怀表。'},
@@ -1041,4 +1042,31 @@ test('bounded state checkpoints retain correctness for old-prefix reads and late
   const edited=correctEntity(merged,chat,'items',idList[1],{name:'确认后的铜钥匙'});
   assert.equal(deriveState(edited,chat).items[0].name,'确认后的铜钥匙');
   assert.equal(deriveState(unmergeEntity(edited,'items','旧银钥匙'),chat).items.length,2);
+});
+
+test('injection budget diagnostics expose bounded skipped examples without changing sent text',()=>{
+  const cfg=defaultSettings();cfg.injection.budget=400;
+  const memory=freshMemory();
+  memory.manual.summaries=[
+    {id:'a',text:'简短记忆'},
+    {id:'b',text:'简短记忆'},
+    {id:'c',text:'超长条目'.repeat(500)}
+  ];
+  const details={};
+  const actual=injectionText(memory,[],cfg,[],[],details);
+  assert.equal(actual,injectionText(memory,[],cfg));
+  const section=details.sections.find(x=>x.title==='【人工补充记忆】');
+  assert.ok(section);
+  assert.equal(section.skippedDuplicate,1);
+  assert.equal(section.skippedBudget,1);
+  assert.ok(section.skippedSamples.some(x=>x.reason==='容量不足'));
+  assert.ok(section.skippedSamples.some(x=>x.reason==='重复'));
+  assert.ok(section.skippedSamples.every(x=>x.preview.length<=180));
+  assert.ok(!actual.includes('超长条目'));
+});
+
+test('live UI forwards field-lock flags into core corrections',()=>{
+  const source=readFileSync(new URL('../index.js',import.meta.url),'utf8');
+  assert.match(source,/function saveEntityCorrection\(kind,id,values,locks=null\)/);
+  assert.match(source,/correctEntity\(peekMemory\(ctx\),ctx.chat,kind,id,values,locks\)/);
 });

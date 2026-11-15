@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Story Memory UI smoke test</title></head>
+<body><script type="module">
+import {mountUI} from '../ui.js';
+import {freshMemory,defaultSettings,commitLeaf,normalizeDelta,messageFingerprint} from '../core.js';
+const chat=[
+ {is_user:false,mes:'雨夜的旅馆里，主角和向导讨论旧地图。',swipe_id:0},
+ {is_user:false,mes:'向导将银钥匙交给主角，约定明早前往北塔。',swipe_id:0},
+ {is_user:false,mes:'主角抵达北塔，发现新的线索。',swipe_id:0}
+];
+let memory=freshMemory();
+const chapters=[
+ {summary:'雨夜在旅馆得知北塔之谜',time:'夜晚',location:'旅馆大厅',
+  items:[{op:'add',name:'旧地图',owner:'主角'}],scenes:[{op:'add',name:'旅馆大厅',location:'城中'}],
+  characters:[{op:'add',name:'向导',status:'同行',presence:'present'}],
+  plans:[{op:'add',name:'调查北塔',status:'进行中'}]},
+ {summary:'向导交出银钥匙并约定出发',time:'次日清晨前',location:'旅馆',
+  items:[{op:'add',name:'银钥匙',owner:'主角'}],
+  characters:[{op:'update',name:'向导',status:'同行'}],
+  plans:[{op:'update',name:'调查北塔',status:'进行中'}]},
+ {summary:'抵达北塔并找到旧记录',location:'北塔',
+  scenes:[{op:'add',name:'北塔',location:'城北'}],
+  characters:[{op:'add',name:'守卫',status:'警戒'}],
+  plans:[{op:'add',name:'解读旧记录',status:'尚未完成'}]}
+];
+for(let i=0;i<chat.length;i++){
+ memory=commitLeaf(memory,i,messageFingerprint(chat[i]),normalizeDelta(chapters[i],chat[i].mes));
+}
+memory.manual.summaries.push({id:'sample-a',text:'避免泄露北塔记录的内容'});
+memory.manual.summaries.push({id:'sample-b',text:'非常长的旧资料'.repeat(1500)});
+const config=defaultSettings();config.summary.autoHide=false;config.summary.keepRecent=0;config.summary.delayFloors=0;
+const ctx={chat,chatMetadata:{story_memory_v1:memory},getCurrentChatId:()=> 'synthetic-browser-smoke',
+  getTokenCountAsync:async text=>Math.ceil(text.length/3)};
+const ui=mountUI({context:()=>ctx,memory:()=>memory,settings:()=>config,
+  saveSettings:newConfig=>Object.assign(config,newConfig),
+  queue:{busy:false,enqueueMissing(){},enqueue(){},retryChapters:async()=>true,restoreAllHidden:async()=>0},
+  correctEntity:(kind,id,values,locks)=>{window.__fieldLockSeen=locks;},
+  clearEntityCorrection:()=>{},mergeEntity:()=>{},unmergeAlias:()=>{},
+  addManual:()=>{},editManual:()=>{},removeManual:()=>{},
+  editLeaf:()=>{},deleteLeaf:()=>{},editChapter:()=>{},deleteChapter:()=>{},
+  sourcePreview:()=>[{index:0,text:'模拟剧情：雨夜的旅馆里，主角和向导讨论旧地图。'}],
+  previewHistory:()=>[],lastInjection:()=>null,
+  vectorStatus:()=>({enabled:false,busy:false,pending:false,lastCount:0}),
+  indexNow:async()=>0,fetchSummaryModels:async()=>[]
+});
+ui.open();
+window.smHarness={ui,ctx,config};window.smReady=true;
+</script></body></html>

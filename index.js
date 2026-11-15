@@ -3,6 +3,7 @@ import {countTokens} from './text-stats.js';
 import {SummaryQueue} from './queue.js';
 import {listSummaryModels} from './api.js';
 import {recall} from './vector-local.js';
+import {recallWithDeadline} from './recall-deadline.js';
 import {VectorIndexScheduler} from './vector-index-scheduler.js';
 import {selectHistory,historyEvidence,sourcePreview} from './retrieval-local.js';
 import {mountUI} from './ui.js';
@@ -156,10 +157,10 @@ function unmergeAlias(kind,fromName){
   queue.cancel(false);
   writeMemory(ctx,unmergeEntity(peekMemory(ctx),kind,fromName));afterMemoryChanged();
 }
-function saveEntityCorrection(kind,id,values){
+function saveEntityCorrection(kind,id,values,locks=null){
   const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('聊天未就绪');
   queue.cancel(false);
-  writeMemory(ctx,correctEntity(peekMemory(ctx),ctx.chat,kind,id,values));afterMemoryChanged();
+  writeMemory(ctx,correctEntity(peekMemory(ctx),ctx.chat,kind,id,values,locks));afterMemoryChanged();
 }
 function removeEntityCorrection(kind,id){
   const ctx=getContext();if(!ctx?.getCurrentChatId?.())throw Error('聊天未就绪');
@@ -190,10 +191,9 @@ async function generateInterceptor(_chat,_contextSize,_abort,type){
   const query=String(latestUser?.mes||'');
   let vectors=[];
   if(cfg.vector.enabled&&query.trim()){
-    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),11500);
-    try{vectors=await recall(ctx,memory,cfg,query,controller.signal);}
-    catch{/* Embedding outages must not prevent local historical search. */}
-    finally{clearTimeout(timer);}
+    // A slow embedding/rerank API must not stall the next story response.
+    // Keyword retrieval remains available when semantic recall times out.
+    vectors=await recallWithDeadline(signal=>recall(ctx,memory,cfg,query,signal));
   }
   if(key!==getContext()?.getCurrentChatId?.())return;
   const current=getContext();
