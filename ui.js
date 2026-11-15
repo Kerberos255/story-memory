@@ -1388,7 +1388,7 @@ export function mountUI(api){
     close.append(svg('x'));close.setAttribute('aria-label','关闭弹窗');
     header.append(heading,close);
     const content=el('div','sm-record-modal-body');
-    const explanation=el('p','sm-help','当前草稿模拟使用本地历史检索，不发送向量请求。Token 按酒馆当前分词器统计；跳过统计只涵盖参与本轮筛选的候选记忆，不包含已关闭类别或来源数量上限之外的记录。');
+    const explanation=el('p','sm-help','当前草稿模拟使用本地历史检索，不发送向量请求。Token 按酒馆当前分词器统计；主线剧情优先，物品和场景会尽量保留最近更新、主角持有及最近已摘要地点相关的完整记录。跳过统计仅涵盖本轮候选。');
     const stats=textStats();
     const textarea=textArea(result||'当前没有需要发送的记忆。',10);
     textarea.readOnly=true;textarea.setAttribute('aria-label','发送预览内容');

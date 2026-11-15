@@ -665,6 +665,32 @@ function injectionState(memory,chat){
     refs:keys.map(x=>memory.leaves[x]),valid:keys.map(x=>leafValid(memory,chat,Number(x))),state});
   return state;
 }
+// These signals are existing, confirmed state fields; no story-text guessing,
+// remote classifier, new metadata, or additional request is introduced.
+function rankedCurrentEntities(entries,kind,lastKnownLocation){
+  const place=String(lastKnownLocation||'').replace(/\s+/g,'').trim();
+  const normalize=x=>String(x||'').replace(/\s+/g,'').trim();
+  const isCurrentScene=entity=>{
+    const name=normalize(entity.name);
+    return name.length>=2&&place&&
+      (place===name||(name.length>=3&&place.includes(name)&&
+        !/(?:外|附近|旁边|周边)$/.test(place.slice(place.indexOf(name)+name.length))));
+  };
+  const isHeld=entity=>{
+    const owner=normalize(entity.owner),location=normalize(entity.location);
+    // Only explicitly player-owned or player-carried state qualifies.
+    return /^(?:主角|玩家|主人公|我|用户|\{\{user\}\})(?:的(?:背包|行囊|物品栏))?$/.test(owner)||
+      /^(?:主角|玩家|主人公|我|用户|\{\{user\}\})(?:的)?(?:背包|行囊|物品栏|身上|口袋|手中|腰间)$/.test(location);
+  };
+  const importance=entity=>kind==='scenes'?Number(Boolean(isCurrentScene(entity))):
+    kind==='items'?Number(Boolean(isHeld(entity))):0;
+  const lastUpdate=entity=>Number.isSafeInteger(entity.sourceIndex)?entity.sourceIndex:-1;
+  // Low priority first: injection selects from the end (high priority first).
+  return [...entries].sort((a,b)=>importance(a)-importance(b)||
+    Number(Boolean(a.manual))-Number(Boolean(b.manual))||
+    lastUpdate(a)-lastUpdate(b)).slice(-45);
+}
+
 export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],diagnostics=null,maxChars=null) {
   const state=injectionState(memory,chat),cfg=settings.injection||{},sections=[];
   const add=(title,entries)=>{if(entries.length)sections.push({title,entries});};
@@ -719,8 +745,9 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
   }
   if(settings.retrieval?.enabled!==false)
     add('【相关历史】',historyHits.map(x=>note(x.text)));
-  if(cfg.inventory)add('【物品】',(state.items||[]).slice(-45).map(entityLine));
-  if(cfg.scenes)add('【场景】',(state.scenes||[]).slice(-45).map(entityLine));
+  const latestKnownLocation=state.timeline.at(-1)?.location||'';
+  if(cfg.inventory)add('【物品】',rankedCurrentEntities(state.items||[],'items',latestKnownLocation).map(entityLine));
+  if(cfg.scenes)add('【场景】',rankedCurrentEntities(state.scenes||[],'scenes',latestKnownLocation).map(entityLine));
   const chapters=validChapters(memory,chat);
   const nested=new Set(chapters.filter(c=>c.level>1).flatMap(c=>c.children||[]));
   const covered=new Set(chapters.flatMap(c=>c.children||[]));
@@ -736,8 +763,8 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
   const capacity=maxChars===null?budget:Math.max(0,Math.min(budget,Math.floor(maxChars)));
   let remaining=capacity-archiveHeader.length;
   const result=[],seen=new Set(),breakdown=[];
-  // Select entire entries by priority, newest within a section; never slice JSON
-  // or prose in the middle. Preserve chronology when presenting chosen entries.
+  // Select entire entries by priority, newest updates first within entity groups;
+  // never slice JSON or prose in the middle. Keep chosen sections ordered.
   // Story continuity must not be displaced by a large entity catalog or retrieval dump.
   // Keep the existing per-section newest-first and full-entry budget semantics.
   const priority=new Map([
@@ -745,16 +772,43 @@ export function injectionText(memory,chat,settings,vectorHits=[],historyHits=[],
     ['【计划与伏笔】',3],['【人物】',4],['【历史计划（状态待核对，不代表当前待办；请以最新剧情为准）】',5],
     ['【相关历史】',6],['【物品】',7],['【场景】',8],['【相关旧记忆】',9]
   ]);
-  for(const {title,entries} of sections.sort((a,b)=>(priority.get(a.title)??99)-(priority.get(b.title)??99))){
+  const ordered=sections.sort((a,b)=>(priority.get(a.title)??99)-(priority.get(b.title)??99));
+  const reservations=new Map();
+  let reserved=false;
+  // Reserve room for one *complete* item and scene when the remaining
+  // budget makes it possible. High-priority narrative, plans and people have
+  // already been selected; this only constrains later history/other entities.
+  function reserveEntities(){
+    if(reserved)return;
+    reserved=true;
+    const maxEach=Math.min(1400,Math.floor(remaining*.35));
+    const maxCombined=Math.floor(remaining*.6);
+    let used=0;
+    for(const title of ['【场景】','【物品】']){
+      const group=ordered.find(section=>section.title===title);
+      if(!group)continue;
+      const candidate=[...group.entries].reverse().find(item=>
+        item.text.trim()&&item.text.trim().length+title.length+4<=maxEach);
+      if(!candidate)continue;
+      const size=candidate.text.trim().length+title.length+4;
+      if(used+size<=maxCombined){
+        reservations.set(title,size);used+=size;
+      }
+    }
+  }
+  for(const {title,entries} of ordered){
+    if(title==='【相关历史】'||title==='【物品】'||title==='【场景】')reserveEntities();
+    const protectedLater=[...reservations].reduce((n,[name,size])=>
+      n+((priority.get(name)??99)>(priority.get(title)??99)?size:0),0);
     const extra=(result.length?2:0)+title.length+1;
-    if(remaining<=extra){
+    if(remaining<=extra+protectedLater){
       breakdown.push({title,selected:0,omitted:entries.length,
         skippedBudget:entries.length,skippedDuplicate:0,skippedEmpty:0,chars:0,
         skippedSamples:diagnostics?entries.slice(-5).map(item=>({reason:'容量不足',
           preview:String(item.text||'').replace(/\s+/g,' ').slice(0,180)})):[]});
       continue;
     }
-    let available=remaining-extra;
+    let available=remaining-extra-protectedLater;
     const chosen=[],skippedSamples=[];let skippedBudget=0,skippedDuplicate=0,skippedEmpty=0;
     const recordSkipped=(reason,text)=>{
       if(diagnostics&&skippedSamples.length<5)
